@@ -1,0 +1,16 @@
+{
+  "name": "ghostclick",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "PoC: drive headless Chrome from a small DSL, stream it to a canvas, draw a synthetic cursor over it.",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node scripts/check.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "playwright": "^1.47.0",
+    "ws": "^8.18.0"
+  }
+}

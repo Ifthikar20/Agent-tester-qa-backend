@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ghostclick</title>
+<style>
+  :root {
+    --ground:  #0f1d24;
+    --panel:   #162b35;
+    --edge:    #23434f;
+    --ink:     #dceaef;
+    --ink-dim: #7d9aa5;
+    --signal:  #e8a33d;
+    --pass:    #79cfa4;
+    --fail:    #e8705f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, "Segoe UI", Roboto, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .shell {
+    display: grid; grid-template-columns: minmax(0,1fr) 360px;
+    gap: 20px; padding: 20px; max-width: 1700px; margin: 0 auto; align-items: start;
+  }
+  @media (max-width: 1100px) { .shell { grid-template-columns: 1fr; } }
+  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 14px; }
+  header h1 { font-size: 19px; font-weight: 650; letter-spacing: -.02em; margin: 0; }
+  header p { margin: 0; color: var(--ink-dim); font-size: 13.5px; }
+
+  /* ---- the feed, and the cursor that floats over it ---- */
+  .stage {
+    position: relative; line-height: 0;
+    border: 1px solid var(--edge); border-radius: 4px;
+    overflow: hidden; background: #08131a;
+  }
+  #view { width: 100%; height: auto; display: block; }
+  /* pointer-events:none so the overlay never eats a click meant for the page */
+  .ptr, .ripple { position: absolute; top: 0; left: 0; pointer-events: none; }
+  .ptr {
+    width: 21px; height: 21px; opacity: 0;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,.6));
+    transition: opacity .2s;
+  }
+  .ptr.on { opacity: 1; }
+  .ripple {
+    width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%;
+    border: 2px solid var(--signal); opacity: 0;
+  }
+  .ripple.fire { animation: pop .42s ease-out; }
+  @keyframes pop {
+    from { opacity: .95; transform: scale(.4); }
+    to   { opacity: 0;   transform: scale(3.6); }
+  }
+  @media (prefers-reduced-motion: reduce) { .ripple.fire { animation: none; } }
+
+  .statusbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px; border: 1px solid var(--edge); border-top: 0;
+    border-radius: 0 0 4px 4px; font-size: 13px;
+    color: var(--ink-dim); background: var(--panel);
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-dim); }
+  .dot.live { background: var(--pass); }
+  .dot.busy { background: var(--signal); }
+  .statusbar .spacer { margin-left: auto; }
+
+  /* ---- side panel ---- */
+  .card {
+    background: var(--panel); border: 1px solid var(--edge);
+    border-radius: 4px; padding: 14px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 13px; font-weight: 600; margin: 0 0 10px; color: var(--ink-dim); }
+  textarea {
+    width: 100%; height: 220px; resize: vertical; color: var(--ink);
+    background: #0d1f27; border: 1px solid var(--edge); border-radius: 4px;
+    padding: 11px; font: 13px/1.65 ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  textarea:focus, button:focus-visible { outline: 2px solid var(--signal); outline-offset: 1px; }
+  .row { display: flex; gap: 8px; margin-top: 10px; }
+  button {
+    font: inherit; font-size: 13.5px; font-weight: 550; cursor: pointer;
+    padding: 9px 15px; border-radius: 4px; border: 1px solid var(--edge);
+    background: transparent; color: var(--ink);
+  }
+  button.go { background: var(--signal); border-color: var(--signal); color: #17242b; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #log { max-height: 340px; overflow-y: auto; font-size: 13px; }
+  #log div { padding: 4px 0; border-bottom: 1px solid rgba(35,67,79,.5); display: flex; gap: 8px; }
+  #log div:last-child { border-bottom: 0; }
+  #log .mark { width: 13px; flex: none; color: var(--ink-dim); }
+  #log .pass .mark { color: var(--pass); }
+  #log .fail .mark, #log .fail { color: var(--fail); }
+  #log .ms { margin-left: auto; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+  .empty { color: var(--ink-dim); font-size: 13px; margin: 0; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <main>
+    <header>
+      <h1>ghostclick</h1>
+      <p>Headless Chrome, driven over CDP, with a cursor you can watch.</p>
+    </header>
+
+    <div class="stage">
+      <canvas id="view" width="1180" height="760"></canvas>
+      <svg class="ptr" id="ptr" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 2 L5 19 L9.6 14.7 L12.4 21 L15.4 19.6 L12.6 13.4 L19 13.2 Z"
+              fill="#fff" stroke="#0f1d24" stroke-width="1.6" stroke-linejoin="round"/>
+      </svg>
+      <div class="ripple" id="ripple"></div>
+    </div>
+
+    <div class="statusbar">
+      <span class="dot" id="dot"></span>
+      <span id="status">Connecting</span>
+      <span class="spacer"></span>
+      <span id="fps">—</span>
+    </div>
+  </main>
+
+  <aside>
+    <div class="card">
+      <h2>Script</h2>
+      <textarea id="script" spellcheck="false"></textarea>
+      <div class="row">
+        <button class="go" id="run">Run script</button>
+        <button id="reset">Reload page</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Run log</h2>
+      <div id="log"><p class="empty">Nothing has run yet.</p></div>
+    </div>
+  </aside>
+</div>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const canvas = $('view'), ctx = canvas.getContext('2d');
+const ptr = $('ptr'), ripple = $('ripple');
+
+$('script').value = `suite "Username length boundary"
+goto   "http://localhost:3000/demo.html"
+fill   auth.email    with $secrets.QA_USER
+fill   auth.password with $secrets.QA_PASS
+click  auth.submit
+click  nav.settings
+expect url contains "/settings"
+click  settings.profileTab
+fill   profile.username with repeat("a", 20)
+click  profile.save
+expect text "Profile saved"
+expect value profile.username is repeat("a", 20)`;
+
+// Frames land ~120ms behind reality; cursor events land in ~10ms. Without this
+// delay the arrow clicks visibly before the frame showing the click, which
+// reads as broken. Measure and tune per deployment.
+const LAG = 120;
+
+// The arrow tip sits at (5,2) in a 24-unit viewBox rendered at 21px, i.e.
+// (4.375, 1.75) inside the SVG. Offset by that so the TIP lands on the point,
+// not the SVG's corner.
+const TIP_X = 4.375, TIP_Y = 1.75;
+
+const ws = new WebSocket(`ws://${location.host}`);
+ws.binaryType = 'arraybuffer';
+
+let frames = 0;
+setInterval(() => { $('fps').textContent = `${frames} fps`; frames = 0; }, 1000);
+
+ws.onopen  = () => { $('dot').className = 'dot live'; $('status').textContent = 'Live'; };
+ws.onclose = () => { $('dot').className = 'dot';      $('status').textContent = 'Disconnected'; };
+
+ws.onmessage = async (e) => {
+  if (e.data instanceof ArrayBuffer) {
+    // createImageBitmap decodes off the main thread and leaks no object URLs —
+    // which matters at 10fps for an hour.
+    const bmp = await createImageBitmap(new Blob([e.data], { type: 'image/jpeg' }));
+    ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    bmp.close(); frames++;
+    return;
+  }
+  handle(JSON.parse(e.data));
+};
+
+const scale = () => canvas.getBoundingClientRect().width / canvas.width;
+
+function handle(ev) {
+  switch (ev.t) {
+    case 'cursor':
+      setTimeout(() => {
+        const s = scale();
+        ptr.classList.add('on');
+        ptr.style.transform = `translate(${ev.x * s - TIP_X}px, ${ev.y * s - TIP_Y}px)`;
+      }, LAG);
+      break;
+
+    case 'press':
+      setTimeout(() => {
+        const s = scale();
+        ripple.style.transform = `translate(${ev.x * s}px, ${ev.y * s}px)`;
+        ripple.classList.remove('fire');
+        void ripple.offsetWidth;          // restart the animation
+        ripple.classList.add('fire');
+      }, LAG);
+      break;
+
+    case 'run.start':
+      $('log').innerHTML = '';
+      $('run').disabled = true;
+      $('dot').className = 'dot busy';
+      $('status').textContent = `Running — ${ev.suite}`;
+      break;
+
+    case 'step.start': line(ev.i, describe(ev.step), '·'); break;
+    case 'step.pass':  mark(ev.i, 'pass', '✓', ev.ms); break;
+    case 'step.fail':  mark(ev.i, 'fail', '✕', ev.ms, ev.error); break;
+
+    case 'run.end':
+      $('run').disabled = false;
+      $('dot').className = 'dot live';
+      $('status').textContent = ev.ok ? 'Live — run passed' : 'Live — run failed';
+      break;
+
+    case 'log':
+      if (ev.level === 'error') line('!', ev.msg, '✕', 'fail');
+      break;
+  }
+}
+
+function describe(s) {
+  if (s.op === 'goto')   return `goto ${new URL(s.url).pathname}`;
+  if (s.op === 'fill')   return `fill ${s.target}`;
+  if (s.op === 'click')  return `click ${s.target}`;
+  if (s.op === 'expect') return `expect ${s.assert} ${s.target ?? ''} ${trunc(s.value)}`;
+  return s.op;
+}
+const trunc = (v) => (String(v).length > 24 ? String(v).slice(0, 21) + '…' : v);
+
+function line(i, text, glyph, cls = '') {
+  if ($('log').querySelector('.empty')) $('log').innerHTML = '';
+  const row = document.createElement('div');
+  row.id = `s${i}`; row.className = cls;
+  row.append(span('mark', glyph), span('', text), span('ms', ''));
+  $('log').append(row);
+  $('log').scrollTop = $('log').scrollHeight;
+}
+function span(cls, text) {
+  const el = document.createElement('span');
+  if (cls) el.className = cls;
+  el.textContent = text;
+  return el;
+}
+function mark(i, cls, glyph, ms, err) {
+  const row = $(`s${i}`); if (!row) return;
+  row.className = cls;
+  row.querySelector('.mark').textContent = glyph;
+  row.querySelector('.ms').textContent = `${ms}ms`;
+  if (err) line(`${i}e`, err, ' ', 'fail');
+}
+
+$('run').onclick = () =>
+  ws.send(JSON.stringify({ t: 'command', text: $('script').value }));
+$('reset').onclick = () =>
+  ws.send(JSON.stringify({ t: 'command', text: 'goto "http://localhost:3000/demo.html"' }));
+</script>
+</body>
+</html>
