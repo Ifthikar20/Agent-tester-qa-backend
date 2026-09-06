@@ -23,6 +23,14 @@ It prints what it starts with:
 Open `http://localhost:3000` and press **Run script** to watch it drive the
 bundled demo app and go red on a planted bug. If that works, everything works.
 
+**Watch the canvas, not your own page.** Run script drives a *separate* browser
+that ghostclick launched and streams it onto that canvas — your mouse and your
+tabs are never touched. If you would rather see a real window being driven:
+
+```bash
+HEADED=1 npm start
+```
+
 ## 2 · Point it at your app
 
 On startup it drives the bundled demo app, because it has to drive something.

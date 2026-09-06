@@ -91,6 +91,60 @@ after with outcomes folded in as a report.
 
 ---
 
+## Where the script actually runs
+
+This is the thing that trips everyone up once, so: **Run script does not touch
+your mouse, or your tabs, or the page you are reading.**
+
+It drives a *separate* browser that ghostclick launched, and streams a video of
+that browser onto the canvas. The arrow gliding across the canvas is drawn over
+that video. Your own cursor never moves, because it is not involved.
+
+```
+your screen                          the browser being driven
+┌──────────────────────────────┐     ┌─────────────────────────┐
+│ the viewer, in your browser   │     │  a second browser,       │
+│                               │     │  launched by the server  │
+│   canvas  ◀── video ──────────┼─────┤                          │
+│   arrow   ◀── coordinates ────┼─────┤  ← the clicks land here  │
+│                               │     │                          │
+│   your real mouse: untouched  │     └─────────────────────────┘
+└──────────────────────────────┘
+```
+
+That separation is the point. It means a run behaves the same on your laptop, on
+a server, and in CI, and it means you can keep working while a suite runs.
+
+**If nothing appears to happen when you press Run**, look at the canvas, not at
+your own page. The status bar under it says what is going on, and says why if a
+run failed.
+
+### Watching it in a real window
+
+If a video of a browser is not convincing, open a real one:
+
+```bash
+HEADED=1 npm start
+```
+
+A Chrome window appears and gets driven in front of you — same automation, same
+canvas feed, just visible in a browser you recognise. Worth doing once. Leave it
+off for anything unattended, since a headless browser is what makes a run work
+on a server with no screen.
+
+The banner says which mode you are in:
+
+```
+  browser     ->  headed — a real window you can watch
+```
+
+### What it deliberately will not do
+
+It will not take over your operating system's cursor. That is a different kind
+of tool — it would fight you for the machine, break the moment you moved the
+mouse, and could not run anywhere without a screen. Everything here works
+through the browser rather than around it.
+
 ## Teach mode
 
 Press **Record**, then click and type on the feed. Canvas input goes through the

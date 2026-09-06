@@ -17,6 +17,8 @@ const PORT = Number(process.env.PORT) || 3000;
 const VIEW = { width: 1180, height: 760 };
 const HOME = process.env.HOME_URL || `http://localhost:${PORT}/demo.html`;
 
+const HEADED = /^(1|true|yes|on)$/i.test(process.env.HEADED ?? '');
+
 const app = express();
 app.use(express.static('public'));
 app.use(express.json({ limit: '512kb' }));
@@ -90,11 +92,25 @@ if (process.env.HOME_URL) {
 
 console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  driving     ->  ${HOME}` +
+            `\n  browser     ->  ${HEADED ? 'headed — a real window you can watch' : 'headless — streamed to the canvas (HEADED=1 for a window)'}` +
             `\n  allowed     ->  ${origins.list().join(', ')}` +
             `\n  secrets     ->  ${vault.names().join(', ') || '(none set)'}\n`);
 
 // ---------------------------------------------------------------- browser
+/**
+ * Headless by default: the browser being driven is streamed onto the canvas, so
+ * it can run on a server, in CI, or on a colleague's machine with everyone
+ * watching the same feed.
+ *
+ * HEADED=1 opens a real window instead — same automation, same feed, but you
+ * can watch it in a browser you recognise. Useful the first time, when "is it
+ * actually doing anything" is the question.
+ *
+ * Neither mode touches YOUR mouse or YOUR tabs. The pointer you see gliding is
+ * drawn over a video of another browser.
+ */
 const browser = await chromium.launch({
+  headless: !HEADED,
   // Set CHROMIUM_PATH when the sandbox ships a Chromium that does not match
   // the revision this Playwright build would download. Otherwise leave unset.
   executablePath: process.env.CHROMIUM_PATH || undefined,
