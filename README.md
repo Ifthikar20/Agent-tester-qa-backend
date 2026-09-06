@@ -14,6 +14,7 @@ npm start                         # → http://localhost:3000
 
 npm run check                     # end-to-end, against a running server
 npm run check:teach               # demonstrate by hand, then replay what it wrote
+npm run check:fidelity            # does the replay reproduce it? would coordinates have?
 npm run check:extension           # the picker, the shared proposer, the hand-off
 npm run check:diagram             # generated mermaid vs. the real parser
 ```
@@ -160,6 +161,69 @@ that, drives the picker against a real page, and loads the extension in Chrome.
 
 See `extension/README.md` for the rest, including why replaying a login needs
 either the login recorded or a session you have chosen to export.
+
+## “Why doesn’t it just replay my coordinates?”
+
+It records them — every click carries where the pointer actually was, and the
+box it landed in, as `%% at` comments that round-trip through the language. It
+just doesn’t *navigate* by them.
+
+`npm run check:fidelity` settles both halves of this by running them:
+
+```
+— 1 · demonstrate by hand, then replay what it wrote
+  demonstrated  http://localhost:3000/demo.html#/settings
+  replayed      http://localhost:3000/demo.html#/settings
+  same page after both  ✓
+  no drift — every element resolved where it was clicked
+
+— 2 · would replaying the coordinates have worked?
+  same page, window 880 wide instead of 1180:
+    coordinate 353,371 now lands on   div#login  (the Sign in button? NO)
+    button:Sign in still resolves                yes, exactly one
+```
+
+Part 1 demonstrates a login by hand, replays the recording from a clean start,
+and compares the two end states — same URL, same accessible tree. Part 2 takes
+the recorded coordinate for the Sign in button and asks what is there in a
+narrower window. Nothing useful: the layout is centred, so the point that was
+the button is now the `<div>` behind it. The name still finds it.
+
+That is the whole reason record-and-replay tools built on coordinates have the
+reputation they do. A window a hundred pixels narrower, a scrollbar, a cookie
+banner, a different DPI, one extra row in a table — any of those moves the pixel
+without moving the button.
+
+So the coordinates are kept as **evidence**, not as the mechanism. On replay
+each one is compared with where the element actually resolved, and a step that
+lands somewhere else says so:
+
+```
+button:Sign in: recorded at 353,371 but resolves to 812,540 — 471px away.
+Fine if the layout moved; suspicious if it did not.
+```
+
+That is the case coordinates genuinely catch and a name cannot: a target that
+resolves cleanly to exactly one element — the wrong one.
+
+### What a recording still does not capture
+
+Being straight about the edges, because this is where “it didn’t run what I did”
+turns out to be true:
+
+- **Scroll position.** Steps scroll their own element into view; a scroll you did
+  for its own sake is not a step.
+- **Hover.** A menu that opens on hover and closes on leave is not recorded.
+- **Drag, and anything mid-gesture.**
+- **Keyboard-only navigation** — tabbing to a control and pressing Enter records
+  as nothing, because no element was clicked.
+- **Where inside an element you clicked.** Replay aims at the centre. It matters
+  for a canvas, a map, or a slider; nowhere else.
+- **Your timing.** Waits are re-derived from what the page does, not from how
+  long you took.
+
+Each of those is a real gap, not a subtlety. If your flow needs one, say so and
+it becomes an op.
 
 ## Any URL
 

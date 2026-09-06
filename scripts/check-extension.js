@@ -21,7 +21,7 @@ console.log('\n— one source of truth —————————————�
 if (readFileSync(root('flow.js'), 'utf8') !== readFileSync(root('extension/lib/flow.js'), 'utf8')) {
   fail('extension/lib/flow.js has drifted from flow.js — copy it again');
 }
-ok('extension/lib/flow.js matches flow.js');
+ok('extension/lib/flow.js matches flow.js');   // it drifts the moment flow.js changes
 const proposeSrc = readFileSync(root('extension/lib/propose.js'), 'utf8');
 if (!readFileSync(root('recorder.js'), 'utf8').includes('extension/lib/propose.js')) {
   fail('recorder.js no longer reads the shared proposer');

@@ -48,12 +48,41 @@ function el(page, target, ctx) {
   return locate(page, parseTarget(target, aliasesFor(new URL(page.url()).origin)));
 }
 
+/**
+ * Did we end up anywhere near where the human clicked?
+ *
+ * The recorded point is NOT how the element is found — resolving it by name is
+ * what survives a layout change. But it is evidence, and it is the only thing
+ * that catches a target which resolves cleanly to the wrong element: the name
+ * matched, one node came back, and it sits nowhere near where you pointed.
+ */
+function drift(at, box, viewport) {
+  if (!at || !viewport) return null;
+  // Scale for a different window than the one it was recorded in.
+  const sx = viewport.width / (at.vw || viewport.width);
+  const sy = viewport.height / (at.vh || viewport.height);
+  const px = at.x * sx, py = at.y * sy;
+  const inside = px >= box.x && px <= box.x + box.width && py >= box.y && py <= box.y + box.height;
+  if (inside) return null;
+  const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+  return { px: Math.round(px), py: Math.round(py), cx: Math.round(cx), cy: Math.round(cy),
+           dist: Math.round(Math.hypot(cx - px, cy - py)) };
+}
+
 async function pointAt(page, target, ctx, opts = {}) {
   const node = el(page, target, ctx);
   await node.waitFor({ state: 'visible', timeout: 8000 });
   await node.scrollIntoViewIfNeeded();
 
-  const [x, y] = point(await boxOf(node, target), opts);
+  const box0 = await boxOf(node, target);
+  const d = drift(opts.at, box0, page.viewportSize());
+  if (d && ctx.emit) {
+    ctx.emit({ t: 'log', level: 'warn',
+      msg: `${target}: recorded at ${d.px},${d.py} but resolves to ${d.cx},${d.cy} — ${d.dist}px away. ` +
+           `Fine if the layout moved; suspicious if it did not.` });
+  }
+
+  const [x, y] = point(box0, opts);
   await ctx.cursor.glideTo(x, y, opts.ms);
 
   // The page can reflow during the glide — async content landing, a smooth
@@ -79,12 +108,12 @@ export const OPS = {
   },
 
   async click(page, step, ctx) {
-    await pointAt(page, step.target, ctx);
+    await pointAt(page, step.target, ctx, { at: step.at });
     await ctx.cursor.click();
   },
 
   async fill(page, step, ctx) {
-    await pointAt(page, step.target, ctx, { leftEdge: true });
+    await pointAt(page, step.target, ctx, { leftEdge: true, at: step.at });
     await ctx.cursor.click(); // focus the way a user does, not via .fill()
     const value = step.valueRef ? vault.get(step.valueRef) : step.value;
     if (value === undefined) throw new Error(`No value for ${step.target}`);

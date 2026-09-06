@@ -44,13 +44,23 @@ const LISTENERS = `
   var propose = self.__gcPropose.propose;
   var n = 0;
 
-  function report(kind, el, extra) {
+  function report(kind, el, extra, ev) {
     if (!el || !el.getAttribute) return;
     var id = 'gc' + ++n;
     el.setAttribute('data-gc-el', id);
+    var r = el.getBoundingClientRect();
     try {
       // href rides along so URL changes stay ordered with the actions.
-      var msg = { kind: kind, id: id, href: location.href, candidates: propose(el) };
+      var msg = { kind: kind, id: id, href: location.href, candidates: propose(el),
+        // Where the pointer actually was, and the box it landed in. Not how the
+        // replay finds the element — a cross-check that says when the thing it
+        // resolved is nowhere near where you clicked.
+        at: {
+          x: ev && ev.clientX != null ? Math.round(ev.clientX) : Math.round(r.left + r.width / 2),
+          y: ev && ev.clientY != null ? Math.round(ev.clientY) : Math.round(r.top + r.height / 2),
+          w: Math.round(r.width), h: Math.round(r.height),
+          vw: window.innerWidth, vh: window.innerHeight,
+        } };
       for (var k in (extra || {})) msg[k] = extra[k];
       window.__gcRecord(msg);
     } catch (e) { /* binding not attached yet */ }
@@ -68,7 +78,7 @@ const LISTENERS = `
     // Clicking a text field is just focus; the change that follows carries the
     // real intent. Checkboxes and radios are the exception — the click IS it.
     if (FIELD.test(tag) && ['checkbox','radio','submit','button'].indexOf(el.type) === -1) return;
-    report('click', el);
+    report('click', el, null, e);
   }, true);
 
   document.addEventListener('change', function (e) {
@@ -81,7 +91,7 @@ const LISTENERS = `
       // reference that fails loudly until someone maps it.
       secret: el.type === 'password',
       value: el.type === 'password' ? null : String(el.value == null ? '' : el.value).slice(0, 500),
-    });
+    }, null);
   }, true);
 
   ['popstate', 'hashchange'].forEach(function (ev) {
@@ -213,11 +223,12 @@ export class Recorder {
       );
     }
 
-    if (p.kind === 'click') return this.#push({ op: 'click', target });
+    const at = p.at;
+    if (p.kind === 'click') return this.#push({ op: 'click', target, at });
     if (p.kind === 'fill') {
       return this.#push(p.secret
-        ? { op: 'fill', target, valueRef: 'secrets.TODO' }
-        : { op: 'fill', target, value: p.value ?? '' });
+        ? { op: 'fill', target, valueRef: 'secrets.TODO', at }
+        : { op: 'fill', target, value: p.value ?? '', at });
     }
   }
 }

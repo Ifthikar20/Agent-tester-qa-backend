@@ -114,6 +114,7 @@ function arrival(node) {
 export function parseFlow(text) {
   const nodes = new Map();
   const edges = [];
+  const marks = new Map();      // step index -> where the click landed
   let suite = 'Flow';
 
   const declare = (token) => {
@@ -144,6 +145,11 @@ export function parseFlow(text) {
     // diagram while still carrying its own title.
     if ((m = line.match(/^(?:%%)?\s*suite\s+(.+)$/i))) {
       suite = unq(m[1].trim().replace(/^["']|["']$/g, ''));
+      continue;
+    }
+    if ((m = line.match(/^%%\s*at\s+(\d+)\s+(-?\d+),(-?\d+)\s+(\d+)x(\d+)\s+in\s+(\d+)x(\d+)$/))) {
+      const [, i, x, y, w, h, vw, vh] = m.map(Number);
+      marks.set(i, { x, y, w, h, vw, vh });
       continue;
     }
     if (line.startsWith('%%')) continue;
@@ -182,6 +188,10 @@ export function parseFlow(text) {
     walk(root.id, head, new Set(), edges, nodes, cases, [root.id]);
   }
   if (!cases.length) throw new Error('Nothing to run');
+  // Re-attach the recorded landing points, by position in the emitted order.
+  if (marks.size) {
+    for (const c of cases) c.steps.forEach((s, i) => { if (marks.has(i)) s.at = marks.get(i); });
+  }
   return { suite, cases };
 }
 
@@ -313,11 +323,18 @@ export function toFlow(plan) {
   // Anything left over is a self-loop: more steps, same place.
   if (pending.length && cur) flush(cur);
 
+  // Where each click actually landed. A comment, so it round-trips through the
+  // language and stays out of the picture — it is evidence, not instruction.
+  const marks = plan.steps
+    .map((s, i) => (s.at ? `%% at ${i} ${s.at.x},${s.at.y} ${s.at.w}x${s.at.h} in ${s.at.vw}x${s.at.vh}` : null))
+    .filter(Boolean);
+
   return [
     `%% suite "${nodeText(plan.suite ?? 'Recorded flow')}"`,
     'flowchart TD',
     ...nodes,
     '',
     ...lines,
+    ...(marks.length ? ['', ...marks] : []),
   ].join('\n');
 }
