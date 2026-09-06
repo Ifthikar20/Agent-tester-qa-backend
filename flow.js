@@ -64,7 +64,8 @@ function value(raw) {
 
 /** `'Sign in' : button` -> `button:Sign in`, the target grammar targets.js speaks. */
 function target(raw) {
-  const m = raw.trim().match(/^(.*?)\s*:\s*([A-Za-z]+)$/s);
+  // The strategy half may carry a scope prefix — `navigation/link`, `nth2/link`.
+  const m = raw.trim().match(/^(.*?)\s*:\s*((?:[A-Za-z0-9]+\/)?[A-Za-z]+)$/s);
   if (!m) {
     // Bare alias, e.g. `auth.submit`. Still goes through parseTarget later.
     return unq(raw);
@@ -94,6 +95,17 @@ function op(clause) {
   }
   if ((m = s.match(/^wait\s+(\d+)\s*ms$/i))) {
     return { op: 'wait', ms: Number(m[1]) };
+  }
+  // Moving the page is an action, not scenery. `top` and `bottom` mean the
+  // same thing at any viewport; anything else scrolls a named element in.
+  if ((m = s.match(/^scroll\s+to\s+(top|bottom)$/i))) {
+    return { op: 'scroll', to: m[1].toLowerCase() };
+  }
+  if ((m = s.match(/^scroll\s+to\s+(.+)$/i))) {
+    return { op: 'scroll', target: target(m[1]) };
+  }
+  if (/^check\s+at\s+top$/i.test(s)) {
+    return { op: 'expect', assert: 'atTop' };
   }
   if ((m = s.match(/^see\s+(.+)$/i))) {
     return { op: 'expect', assert: 'textVisible', value: unq(m[1]) };
@@ -266,6 +278,13 @@ const edgeText = (s) => String(s ?? '')
   .replace(/["()[\]|\n\r]/g, ' ')   // all parse errors inside |...|
   .replace(/\s+/g, ' ').trim();
 
+/**
+ * `navigation/link:Pricing` -> `'Pricing' : navigation/link`
+ *
+ * The scope rides with the strategy rather than being dropped, because a
+ * script that silently forgets WHICH Pricing link you meant is a script that
+ * clicks the footer on Tuesday.
+ */
 const showTarget = (t) => {
   const i = t.indexOf(':');
   return i < 1 ? t : `'${edgeText(t.slice(i + 1))}' : ${t.slice(0, i)}`;
@@ -283,10 +302,13 @@ function showOp(step) {
       return `fill ${showTarget(step.target)} = ${v}`;
     }
     case 'wait': return `wait ${step.ms}ms`;
+    case 'scroll':
+      return step.to ? `scroll to ${step.to}` : `scroll to ${showTarget(step.target)}`;
     case 'expect':
       if (step.assert === 'valueEquals') {
         return `check ${showTarget(step.target)} is ${String(step.value).length} chars`;
       }
+      if (step.assert === 'atTop') return 'check at top';
       return null;   // url/text assertions become node shapes, not edges
     default: return null;
   }

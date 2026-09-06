@@ -1,0 +1,93 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Harbour — marketing site</title>
+<!--
+  A marketing site, shaped like the ones that break recorders.
+
+    - The same link text in the header nav AND the footer. `link:Pricing`
+      matches twice, so a recorder that only proposes role+name has nothing
+      unambiguous to say and drops the click.
+    - Long enough to need scrolling, so a flow that reaches the footer is only
+      expressible if scrolling is.
+    - A "Back to top" button, because a click that moves you somewhere is
+      itself a thing worth asserting.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.6 system-ui,sans-serif;color:#16181d}
+  a{color:#1f5fd0;text-decoration:none} a:hover{text-decoration:underline}
+  header{position:sticky;top:0;background:#fff;border-bottom:1px solid #e4e6ea;z-index:9}
+  header nav{display:flex;gap:22px;align-items:center;padding:14px 32px;max-width:1000px;margin:0 auto}
+  header .brand{font-weight:700;margin-right:auto}
+  section{max-width:760px;margin:0 auto;padding:56px 32px;border-bottom:1px solid #eef0f3}
+  h1{font-size:38px;line-height:1.15;letter-spacing:-.02em;margin:0 0 12px}
+  h2{font-size:24px;margin:0 0 10px}
+  .cta{display:inline-block;background:#16181d;color:#fff;padding:10px 18px;border-radius:8px;margin-top:14px}
+  .cta:hover{text-decoration:none}
+  footer{background:#f6f7f9;border-top:1px solid #e4e6ea}
+  footer .cols{max-width:1000px;margin:0 auto;padding:40px 32px;display:flex;gap:64px}
+  footer h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#6b7280;margin:0 0 10px}
+  footer ul{list-style:none;margin:0;padding:0;line-height:2}
+  #top{position:fixed;right:24px;bottom:24px;background:#16181d;color:#fff;border:0;
+       border-radius:999px;padding:10px 16px;font:inherit;font-size:13px;cursor:pointer}
+</style>
+
+<header>
+  <nav aria-label="Main">
+    <span class="brand">Harbour</span>
+    <a href="#features">Features</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#docs">Docs</a>
+    <a href="#contact">Contact</a>
+  </nav>
+</header>
+
+<main>
+  <section id="features">
+    <h1>Every account, in one place.</h1>
+    <p>Harbour reconciles the accounts you already have and tells you what changed.</p>
+    <a class="cta" href="#pricing">See how Harbour prices</a>
+  </section>
+
+  <section id="pricing">
+    <h2>Pricing</h2>
+    <p>Three plans. No per-seat surcharge, no annual lock-in, no sales call.</p>
+    <p>Teams under five people pay nothing, and keep every feature.</p>
+    <a class="cta" href="#docs">Read the documentation</a>
+  </section>
+
+  <section id="docs">
+    <h2>Documentation</h2>
+    <p>Reference for the API, the webhooks, and the reconciliation rules engine.</p>
+    <p>Everything here is versioned and every change is in the changelog.</p>
+  </section>
+
+  <section id="contact">
+    <h2>Contact</h2>
+    <p>Support answers within a day. Security reports go straight to the on-call engineer.</p>
+    <button id="top">Back to top</button>
+  </section>
+</main>
+
+<footer>
+  <div class="cols">
+    <div>
+      <h3>Product</h3>
+      <ul>
+        <li><a href="#features">Features</a></li>
+        <li><a href="#pricing">Pricing</a></li>
+        <li><a href="#docs">Docs</a></li>
+      </ul>
+    </div>
+    <div>
+      <h3>Company</h3>
+      <ul>
+        <li><a href="#contact">Contact</a></li>
+        <li><a href="#careers">Careers</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+<script>
+  document.getElementById('top').onclick = () => window.scrollTo({ top: 0, behavior: 'instant' });
+</script>

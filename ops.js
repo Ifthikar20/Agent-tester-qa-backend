@@ -214,7 +214,38 @@ export const OPS = {
 
   async expect(page, step, ctx) {
     if (step.assert === 'urlContains') {
-      await page.waitForURL((u) => u.href.includes(step.value), { timeout: 8000 });
+      // Poll the URL rather than waitForURL.
+      //
+      // waitForURL waits for a NAVIGATION, and then for a load state — by
+      // default `load`. Neither assumption survives contact with a real site:
+      //
+      //   - A hash change or a pushState is not a navigation, so on an SPA the
+      //     URL is already right while waitForURL is still waiting for one.
+      //   - `load` waits for every image, font and third-party tag. On a
+      //     marketing page that is routinely more than eight seconds, and the
+      //     assertion fails with "Timeout exceeded" about a URL that was
+      //     correct the whole time.
+      //
+      // The assertion is "the URL contains this". Ask exactly that.
+      const deadline = Date.now() + (step.timeout ?? 8000);
+      let seen = page.url();
+      while (!seen.includes(step.value)) {
+        if (Date.now() > deadline) {
+          // Say what IS true. "Timeout 8000ms exceeded" sends you to read the
+          // wrong three files; the current URL usually names the real problem
+          // in one line.
+          const same = seen === (step.from ?? seen);
+          throw new Error(
+            `expected the URL to contain "${step.value}", but it is "${seen}"` +
+            (same ? ' — the step before this one did not navigate anywhere' : '')
+          );
+        }
+        await sleep(100);
+        seen = page.url();
+      }
+    } else if (step.assert === 'atTop') {
+      const y = await page.evaluate(() => window.scrollY);
+      if (y > 8) throw new Error(`expected to be at the top of the page, but it is scrolled to ${Math.round(y)}px`);
     } else if (step.assert === 'textVisible') {
       // Intersect with the visible set BEFORE taking .first().
       //
@@ -239,6 +270,33 @@ export const OPS = {
     } else {
       throw new Error(`Unknown assertion "${step.assert}"`);
     }
+  },
+
+  /**
+   * Move the page, on purpose.
+   *
+   * Every other op scrolls as a side effect — pointAt brings its target into
+   * view before clicking — but that is not the same as scrolling being
+   * expressible. A footer link you never reach, a lazy-loaded section, a page
+   * that only reveals its pricing table once you are past the fold: none of
+   * those are testable if the only way to move is to click something.
+   *
+   * Semantic, not pixels. `scroll to 'Docs' : link` survives a viewport change;
+   * `scroll to 900px` does not, and would put the recording back in the
+   * coordinate business the rest of this deliberately avoids. `top` and
+   * `bottom` are the two positions that mean the same thing at any size.
+   */
+  async scroll(page, step, ctx) {
+    if (step.to === 'top' || step.to === 'bottom') {
+      await page.evaluate(
+        (where) => window.scrollTo({ top: where === 'top' ? 0 : document.body.scrollHeight, behavior: 'instant' }),
+        step.to,
+      );
+    } else {
+      await el(page, step.target, ctx).scrollIntoViewIfNeeded({ timeout: 8000 });
+    }
+    await sleep(180);          // let sticky headers settle and the eye catch up
+    ctx.emit?.({ t: 'log', level: 'info', msg: `scrolled to ${step.to ?? step.target}` });
   },
 
   async wait(page, step) {
@@ -270,6 +328,9 @@ export function validate(plan, baseOrigin = DEFAULT_ORIGIN) {
     if (s.op === 'goto') {
       try { origin = checkUrl(s.url).origin; }
       catch (e) { throw new Error(`Step ${i}: ${e.message}`); }
+    }
+    if (s.op === 'scroll' && !s.target && s.to !== 'top' && s.to !== 'bottom') {
+      throw new Error(`Step ${i}: scroll needs a target, or "top"/"bottom"`);
     }
     if ('target' in s) {
       // Walking the plan's navigation means aliases are checked against the

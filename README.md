@@ -14,6 +14,7 @@ npm start                         # → http://localhost:3000
 
 npm run check                     # end-to-end, against a running server
 npm run check:suites              # onboarding, the origin gate, suite runs
+npm run check:recording           # repeated links, scrolling, jump-to-top, timeouts
 npm run check:teach               # demonstrate by hand, then replay what it wrote
 npm run check:fidelity            # does the replay reproduce it? would coordinates have?
 npm run check:extension           # the picker, the shared proposer, the hand-off
@@ -432,6 +433,68 @@ turns out to be true:
 Each of those is a real gap, not a subtlety. If your flow needs one, say so and
 it becomes an op.
 
+## When the page has two of everything
+
+Three things broke the first time this met a real marketing site, and the first
+one caused the third.
+
+**A link that appears twice was dropped.** `link:Pricing` matched the header nav
+and the footer, so the recorder had nothing unambiguous to say and recorded
+nothing at all. You demonstrate eight steps, get a script with three, and the
+first thing you learn about the tool is that it lies to you.
+
+A target may now be scoped by the region the page itself declares:
+
+```
+navigation/link:Pricing     the one in the nav
+contentinfo/link:Pricing    the one in the footer
+nth2/link:Pricing           the second on the page, wherever it is
+```
+
+These are ARIA landmarks — still semantics, still resolved against the
+accessibility tree, still no selector anywhere. `nthN` is the last resort and
+the one fragile form: it survives a restyle but not a reorder. It is proposed
+only after every semantic option has failed, and it is visible in the script so
+you can see you have one. Dropping the step is worse than a fragile step you can
+read.
+
+**Scrolling did not exist.** Not as an op, and not even as a gesture — the
+console forwarded clicks and keys but never the wheel, so anything below the
+fold could be watched going past and never touched. The canvas now forwards the
+wheel over CDP, there are ↑ Top / ↓ Bottom buttons, and `scroll` is an op:
+
+```
+scroll to bottom
+scroll to 'Docs' : navigation/link
+```
+
+Positions, not pixels. `scroll to 900px` would put the recording back in the
+coordinate business the rest of this exists to avoid; `top`, `bottom` and a
+named element mean the same thing at any viewport.
+
+**A click that moves the page is a behaviour.** "Back to top", a router that
+resets scroll, an anchor that jumps — the recorder notices when a click leaves
+you at the top of a page you had scrolled down, and writes `check at top`. A
+regression that quietly stops doing it now turns a run red.
+
+**And the timeout said nothing.** `expect url contains` used `waitForURL`, which
+waits for a *navigation* and then for the `load` event. A hash change is not a
+navigation, and `load` on a marketing page routinely takes longer than the
+timeout — so an assertion about a URL that was correct the whole time failed
+with `Timeout 8000ms exceeded`. It polls the URL now, and when it does give up
+it says what it found:
+
+```
+expected the URL to contain "/pricing", but it is
+"https://treasury.sh/features#decisions" — the step before this one did not
+navigate anywhere
+```
+
+`npm run check:recording` is the regression test for all four, against
+`public/site.html`, a page shaped like the site that broke.
+
+---
+
 ## Any URL
 
 Type a host into **Page** — `treasury.acme.com`, no scheme needed — and press
@@ -642,6 +705,8 @@ silently inside someone else's docs.
 | `extension/` | Chrome recorder for apps ghostclick cannot reach |
 | `scripts/check-diagram.js` | generated mermaid vs. the real parser |
 | `scripts/check-suites.js` | onboarding, the one-origin rule, the gate, suite runs |
+| `scripts/check-recording.js` | ambiguous links, scrolling, jump-to-top, URL timeouts |
+| `public/site.html` | Harbour — the same links in header and footer, and a long page |
 
 ---
 

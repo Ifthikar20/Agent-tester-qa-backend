@@ -48,7 +48,11 @@ export function label(step, n) {
       ? `${i}fill ${trunc(step.target, BUDGET.action - 12)} ← vault`
       : `${i}fill ${trunc(step.target, BUDGET.action - 7)}`;
     case 'wait':  return `${i}wait ${step.ms}ms`;
+    case 'scroll': return step.to
+      ? `${i}scroll ${step.to}`
+      : `${i}scroll to ${trunc(step.target, BUDGET.action - 12)}`;
     case 'expect': {
+      if (step.assert === 'atTop') return `${i}at top of page`;
       if (step.assert === 'urlContains') return `${i}url ~ ${trunc(step.value, BUDGET.check - 8)}`;
       if (step.assert === 'textVisible') return `${i}text: ${trunc(step.value, BUDGET.check - 8)}`;
       if (step.assert === 'valueEquals') {

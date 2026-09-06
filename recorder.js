@@ -44,6 +44,10 @@ const LISTENERS = `
   var propose = self.__gcPropose.propose;
   var n = 0;
 
+  function send(msg) {
+    try { window.__gcRecord(msg); } catch (e) { /* binding not attached yet */ }
+  }
+
   function report(kind, el, extra, ev) {
     if (!el || !el.getAttribute) return;
     var id = 'gc' + ++n;
@@ -62,8 +66,8 @@ const LISTENERS = `
           vw: window.innerWidth, vh: window.innerHeight,
         } };
       for (var k in (extra || {})) msg[k] = extra[k];
-      window.__gcRecord(msg);
-    } catch (e) { /* binding not attached yet */ }
+      send(msg);
+    } catch (e) { /* the element went away mid-measure */ }
   }
 
   var FIELD = /^(input|textarea|select)$/;
@@ -126,6 +130,45 @@ const LISTENERS = `
     return null;
   }
 
+  // ---- scrolling -----------------------------------------------------------
+  // Scrolling is an interaction, and on a long page it is often the only way to
+  // reach the thing you want to click. Recording it as a pixel offset would be
+  // useless — a different viewport scrolls to a different place — so a gesture
+  // is converted here, while the page is in front of us, into something that
+  // means the same at any size: the top, the bottom, or the first interactive
+  // element you came to rest on.
+  var scrollTimer = null;
+  var lastY = window.scrollY;
+  var clickAt = 0;                      // when the last click happened
+
+  function anchor() {
+    var all = document.querySelectorAll(SCOPE);
+    var best = null, bestTop = Infinity;
+    for (var i = 0; i < all.length && i < 400; i++) {
+      var r = all[i].getBoundingClientRect();
+      if (!r.height || r.top < 0 || r.top > window.innerHeight - 40) continue;
+      if (r.top < bestTop) { bestTop = r.top; best = all[i]; }
+    }
+    return best;
+  }
+
+  window.addEventListener('scroll', function () {
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(function () {
+      var y = window.scrollY;
+      if (Math.abs(y - lastY) < 120) return;        // settling, not a gesture
+      lastY = y;
+      // A click that moves the page is the click's business, not a separate
+      // scroll step — recording both would replay the movement twice.
+      if (Date.now() - clickAt < 700) return;
+      var max = document.documentElement.scrollHeight - window.innerHeight;
+      if (y <= 8) return send({ kind: 'scroll', to: 'top', href: location.href });
+      if (y >= max - 8) return send({ kind: 'scroll', to: 'bottom', href: location.href });
+      var a = anchor();
+      if (a) report('scroll', a, null, null);
+    }, 260);
+  }, true);
+
   document.addEventListener('click', function (e) {
     // A click on nothing in particular is not an action. Recording it anyway
     // means naming a <div> by whatever text happens to be inside it, which is
@@ -142,7 +185,22 @@ const LISTENERS = `
       var opener = openerOf(el);
       if (opener) report('hover', opener, null, null);
     }
+    var before = window.scrollY;
+    clickAt = Date.now();
     report('click', el, null, e);
+
+    // "Back to top", a router that resets scroll, an anchor that jumps: a click
+    // that moves the page is a behaviour, and behaviours are what tests are
+    // for. Recording it means a regression that quietly stops scrolling to the
+    // top turns a run red instead of going unnoticed.
+    if (before > 200) {
+      setTimeout(function () {
+        if (window.scrollY <= 8) {
+          lastY = 0;
+          send({ kind: 'jumped-to-top', href: location.href });
+        }
+      }, 240);
+    }
   }, true);
 
   document.addEventListener('change', function (e) {
@@ -247,7 +305,18 @@ export class Recorder {
     const tagged = this.page.locator(`[data-gc-el="${id}"]`);
     const tried = [];
 
-    for (const { target, n } of candidates) {
+    // Ask about the promising ones first.
+    //
+    // Each candidate costs two round trips to the browser, and a click on a
+    // busy page can carry six. That is the lag you see between doing something
+    // and the step appearing. The page already counted every proposal
+    // synchronously at click time, so trust it for ORDER: candidates it says
+    // match exactly one element go first, and the usual case resolves on the
+    // first try instead of the fifth. Nothing is skipped — a wrong guess just
+    // costs its place in the queue, not its chance.
+    const ordered = [...candidates].sort((a, b) => rank(a.n) - rank(b.n));
+
+    for (const { target, n } of ordered) {
       try { parseTarget(target); } catch { continue; }   // not in the grammar
 
       let loc, found;
@@ -284,16 +353,25 @@ export class Recorder {
     if (p.kind === 'url') return this.#noteUrl(p.href);
     this.#noteUrl(p.href);   // the action happened at this URL, so order it first
 
+    // Positions with no element to name: the two that mean the same thing at
+    // any viewport, and the behaviour of being sent back to the top.
+    if (p.kind === 'scroll' && p.to) return this.#push({ op: 'scroll', to: p.to });
+    if (p.kind === 'jumped-to-top') return this.#push({ op: 'expect', assert: 'atTop' });
+
     const { target, tried } = await this.#verify(p.candidates ?? [], p.id);
     if (!target) {
-      // Say so rather than emitting something unproven — a recorder you cannot
-      // trust is worse than no recorder.
+      // This should now be rare: the proposer offers a positional target as a
+      // last resort precisely so a step is never silently lost. If it still
+      // happens, say WHICH step went missing — "could not name that element"
+      // with no subject sends you looking through the whole recording.
       return this.onError(
-        `Could not name that element uniquely. Tried: ${(tried ?? []).join(', ') || '(nothing usable)'}`
+        `Dropped a ${p.kind} — could not name that element. Tried: ` +
+        `${(tried ?? []).join(', ') || '(nothing usable)'}`
       );
     }
 
     const at = p.at;
+    if (p.kind === 'scroll') return this.#push({ op: 'scroll', target, at });
     if (p.kind === 'hover') return this.#push({ op: 'hover', target, at });
     if (p.kind === 'click') return this.#push({ op: 'click', target, at });
     if (p.kind === 'fill') {
@@ -302,6 +380,14 @@ export class Recorder {
         : { op: 'fill', target, value: p.value ?? '', at });
     }
   }
+}
+
+/** 1 match first, then unknown, then everything the page already doubts. */
+function rank(n) {
+  if (n === 1) return 0;
+  if (n === -1) return 1;      // `text:` — the page cannot count it
+  if (n === 0) return 2;       // gone already; only the click-time count can save it
+  return 3;                    // ambiguous
 }
 
 function pathOf(u) {

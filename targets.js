@@ -13,6 +13,23 @@
  *   placeholder:Search    -> getByPlaceholder
  *   testid:save-btn       -> getByTestId
  *   auth.email            an alias, which resolves to one of the above
+ *
+ * A target may be SCOPED with a `<scope>/` prefix:
+ *
+ *   navigation/link:Pricing   the Pricing link inside the nav
+ *   contentinfo/link:Pricing  the one in the footer
+ *   nth2/link:Pricing         the second one on the page, wherever it is
+ *
+ * This exists because real sites put the same link in the header and the
+ * footer, and a recorder with nothing but role+name has to either guess or
+ * drop the click. Dropping it is worse: you demonstrate eight steps and get a
+ * script with three, and the first thing you learn is that the tool lies.
+ *
+ * The landmark scopes are ARIA landmarks — still semantics, still resolved
+ * against the accessibility tree, still no selector. `nthN` is the last resort
+ * and is the one fragile form here: it survives a restyle but not a reorder,
+ * so it is proposed only after every semantic option has failed, and it is
+ * visible in the script so you can see you have one.
  */
 
 /** ARIA roles usable as a target prefix. Anything else is not a role. */
@@ -24,6 +41,18 @@ export const ROLES = new Set([
   'spinbutton', 'status', 'switch', 'tab', 'table', 'tabpanel', 'textbox',
   'tooltip', 'tree', 'treeitem',
 ]);
+
+/**
+ * Landmark roles usable as a scope. These are the regions a page divides
+ * itself into, and they are what tells the header's "Pricing" from the
+ * footer's without either of them needing a test id.
+ */
+export const LANDMARKS = new Set([
+  'banner', 'navigation', 'main', 'contentinfo', 'complementary', 'form',
+  'region', 'search',
+]);
+
+const NTH = /^nth(\d+)$/;
 
 const STRATEGIES = {
   // exact: a target names one element. Substring matching would make
@@ -63,7 +92,20 @@ export const aliasesFor = (origin) => ALIASES[origin] ?? {};
  */
 export function parseTarget(target, aliases = {}) {
   if (typeof target !== 'string' || !target.trim()) throw new Error('Empty target');
-  const raw = aliases[target] ?? target;
+  let raw = aliases[target] ?? target;
+
+  // A scope prefix, if there is one. Split on the FIRST slash and only when
+  // what precedes it is a landmark or an ordinal — so a name containing a
+  // slash ("text:and/or") is still just a name.
+  let scope = null;
+  const slash = raw.indexOf('/');
+  if (slash > 0) {
+    const head = raw.slice(0, slash);
+    if (LANDMARKS.has(head) || NTH.test(head)) {
+      scope = head;
+      raw = raw.slice(slash + 1);
+    }
+  }
 
   const i = raw.indexOf(':');
   if (i < 1 || i === raw.length - 1) {
@@ -76,15 +118,29 @@ export function parseTarget(target, aliases = {}) {
   const arg = raw.slice(i + 1).trim();
   if (!arg) throw new Error(`Bad target "${target}" — empty name`);
 
-  if (ROLES.has(kind)) return { kind: 'role', role: kind, name: arg, source: target };
-  if (kind in STRATEGIES) return { kind, name: arg, source: target };
+  if (ROLES.has(kind)) return { kind: 'role', role: kind, name: arg, scope, source: target };
+  if (kind in STRATEGIES) return { kind, name: arg, scope, source: target };
   throw new Error(`Unknown target strategy "${kind}" in "${target}"`);
 }
 
 /** Parsed target -> Playwright locator. */
 export function locate(page, t) {
-  if (t.kind === 'role') return page.getByRole(t.role, { name: t.name, exact: true });
-  return STRATEGIES[t.kind](page, t.name);
+  const base = t.kind === 'role'
+    ? page.getByRole(t.role, { name: t.name, exact: true })
+    : STRATEGIES[t.kind](page, t.name);
+
+  if (!t.scope) return base;
+
+  const nth = NTH.exec(t.scope);
+  if (nth) return base.nth(Number(nth[1]) - 1);          // 1-based, as written
+
+  // Scoped to a landmark. `.first()` on the landmark because a page may
+  // legitimately have several navs; the element's own landmark is the one the
+  // proposer measured, and taking the first keeps resolution deterministic.
+  const region = page.getByRole(t.scope).first();
+  return t.kind === 'role'
+    ? region.getByRole(t.role, { name: t.name, exact: true })
+    : STRATEGIES[t.kind](region, t.name);
 }
 
 export const resolve = (page, target, aliases) => locate(page, parseTarget(target, aliases));

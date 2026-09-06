@@ -39,6 +39,23 @@ export class VirtualCursor {
     }
   }
 
+  /**
+   * Turn the wheel, where the pointer is.
+   *
+   * Without this the console could point and click but never move the page, so
+   * anything below the fold was unreachable by hand — you could watch a footer
+   * go by on the feed and have no way to touch it. CCD's mouseWheel is the same
+   * event a real wheel produces, so momentum, sticky headers and scroll-linked
+   * animations all behave as they would for a person.
+   */
+  async wheel(deltaY, deltaX = 0) {
+    await this.cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseWheel', x: this.x, y: this.y,
+      deltaX, deltaY, buttons: this.buttons,
+    });
+    this.emit({ t: 'wheel', x: this.x, y: this.y, deltaY });
+  }
+
   async click() {
     const base = { x: this.x, y: this.y, button: 'left', clickCount: 1 };
     this.emit({ t: 'press', x: this.x, y: this.y });

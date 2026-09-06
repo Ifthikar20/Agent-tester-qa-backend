@@ -625,6 +625,13 @@ wss.on('connection', async (ws) => {
     if (!running) {
       if (m.t === 'human.move') return void cursor.moveTo(m.x, m.y);
       if (m.t === 'human.click') return void cursor.click();
+      if (m.t === 'human.wheel') {
+        // Clamped: a trackpad can emit enormous deltas, and a single event that
+        // scrolls a page five screens is not something a person can aim.
+        const dy = Math.max(-600, Math.min(600, Number(m.deltaY) || 0));
+        const dx = Math.max(-600, Math.min(600, Number(m.deltaX) || 0));
+        return void cursor.wheel(dy, dx);
+      }
       if (m.t === 'human.key') {
         if (typeof m.text === 'string' && m.text.length === 1) {
           return void page.keyboard.type(m.text).catch(() => {});
