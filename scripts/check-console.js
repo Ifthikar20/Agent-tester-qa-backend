@@ -234,6 +234,55 @@ if (mine) {
 }
 
 // ---------------------------------------------------------------------------
+console.log('\n— 4b · Console takes you to the suite\'s page ——————');
+
+/**
+ * The Console button used to pass the suite id and nothing else, so the
+ * breadcrumb read "Kestrel / Console" while the canvas showed whatever the
+ * runner had been driving an hour earlier. Labelled with the suite, pointed
+ * somewhere else.
+ */
+const other = (await post('/api/suites', { name: 'Check console other', baseUrl: API })).suite.id;
+await post(`/api/suites/${other}/pages`, { name: 'Links', path: '/links.html' });
+await post(`/api/suites/${sid}/pages`, { name: 'Results', path: '/results.html' });
+
+const topConsole = () => page.getByRole('main').getByRole('link', { name: 'Console', exact: true });
+const shown = () => page.evaluate(() => {
+  const el = [...document.querySelectorAll('p')].find((e) => /^https?:\/\//.test(e.textContent.trim()));
+  return el ? el.textContent.trim() : null;
+});
+
+// Park the runner somewhere unrelated, so a wrong answer is visible.
+await page.goto(`${APP}/console?url=${API}/demo.html`, { waitUntil: 'networkidle' });
+await page.waitForTimeout(2200);
+
+await page.goto(`${APP}/suites/${other}`, { waitUntil: 'networkidle' });
+await page.waitForTimeout(700);
+await topConsole().click();
+await page.waitForTimeout(3000);
+if (/links\.html/.test(await shown() ?? '')) ok('it opens that suite\'s page', await shown());
+else bad('it opens that suite\'s page', await shown());
+
+// Suite → suite, without a full reload: the console stays mounted, so a new
+// ?url= has to be acted on or the second button appears to do nothing.
+await page.goto(`${APP}/suites/${sid}`, { waitUntil: 'networkidle' });
+await page.waitForTimeout(700);
+await topConsole().click();
+await page.waitForTimeout(3000);
+if (/results\.html/.test(await shown() ?? '')) ok('and follows a second suite too', await shown());
+else bad('and follows a second suite too', await shown());
+
+// A page row points at its own page, which is the narrower meaning of "here".
+await page.goto(`${APP}/suites/${other}/pages`, { waitUntil: 'networkidle' });
+await page.waitForTimeout(700);
+await page.getByRole('link', { name: 'Open in console' }).first().click();
+await page.waitForTimeout(3000);
+if (/links\.html/.test(await shown() ?? '')) ok('and a page row opens that page');
+else bad('and a page row opens that page', await shown());
+
+await fetch(`${API}/api/suites/${other}`, { method: 'DELETE' }).catch(() => {});
+
+// ---------------------------------------------------------------------------
 console.log('\n— 5 · the script box keeps up with the recording ——');
 
 // Pressing Record produces a one-step flow immediately (the goto). The box used
