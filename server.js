@@ -6,6 +6,7 @@ import { VirtualCursor, sleep } from './cursor.js';
 import { OPS, validate } from './ops.js';
 import * as origins from './origins.js';
 import * as vault from './secrets.js';
+import * as history from './runs.js';
 import { discover } from './targets.js';
 import { parse } from './parse.js';
 import { parseFlow, flatten, toFlow } from './flow.js';
@@ -37,6 +38,8 @@ app.use('/api', (req, res, next) => {
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
+
+app.get('/api/runs', (_req, res) => res.json(history.summary()));
 
 app.post('/api/recording', (req, res) => {
   const flow = String(req.body?.flow ?? '');
@@ -216,6 +219,12 @@ async function run(plan) {
   }
 
   const ok = results.every((r) => r.ok);
+  history.record({
+    suite: plan.suite,
+    url: plan.steps.find((s) => s.op === 'goto')?.url ?? '',
+    ms: results.reduce((a, r) => a + (r.ms ?? 0), 0),
+    results,
+  });
   // Same function, same IR — with outcomes folded in, the plan diagram
   // becomes the run report.
   emit({ t: 'diagram', kind: 'report', mermaid: toMermaid(plan, { results }) });

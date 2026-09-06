@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+/* Scan the pages we actually serve. */
+@source "../public/*.html";
+
+/**
+ * Radiant's palette, as design tokens.
+ *
+ * Warm near-white ground, near-black ink, and the pastel yellow→pink→violet
+ * gradient it uses for hero panels and card washes. The two chart marks are
+ * deliberately NOT green-and-red: those separate by only ΔE 4.1 under
+ * deuteranopia, so a stacked bar would read as one block to a red-green
+ * colourblind viewer. Failures carry the colour; passes stay neutral —
+ * neutral vs critical measures ΔE 9.4 (deutan), clear of the ≥8 target.
+ */
+@theme {
+  --font-display: ui-sans-serif, -apple-system, "Segoe UI", Roboto, system-ui, sans-serif;
+
+  --color-ground:     #f7f7f6;
+  --color-panel:      #ffffff;
+  --color-ink:        #0f0f10;
+  --color-ink-2:      #55555a;
+  --color-ink-3:      #8b8b90;
+  --color-hairline:   #e9e8e5;
+
+  --color-night:      #0f1729;   /* Radiant's dark section */
+  --color-night-2:    #17203a;
+  --color-night-line: #26304d;
+
+  --color-glow-1:     #fef6c8;   /* the hero gradient, left to right */
+  --color-glow-2:     #f8c8dc;
+  --color-glow-3:     #c9a8f7;
+
+  --color-pass:       #8b8983;   /* chart: the ground */
+  --color-fail:       #d03b3b;   /* chart: the signal */
+  --color-good:       #0ca30c;   /* status pill only, never without its tick */
+  --color-critical:   #d03b3b;
+
+  --radius-card:      1rem;
+}
+
+/* The one flourish Radiant leans on: a soft pastel wash bled into a corner. */
+@utility wash {
+  background-image:
+    radial-gradient(60% 120% at 88% -10%, var(--color-glow-2) 0%, transparent 62%),
+    radial-gradient(40% 90% at 100% 0%, var(--color-glow-3) 0%, transparent 58%);
+}
+@utility wash-warm {
+  background-image:
+    radial-gradient(70% 130% at 92% -20%, var(--color-glow-1) 0%, transparent 60%),
+    radial-gradient(50% 100% at 100% 10%, var(--color-glow-2) 0%, transparent 55%);
+}

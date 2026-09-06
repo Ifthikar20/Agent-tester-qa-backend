@@ -10,12 +10,17 @@
     "check:diagram": "node scripts/check-diagram.js",
     "check:teach": "node scripts/check-teach.js",
     "check:extension": "node scripts/check-extension.js",
-    "check:fidelity": "node scripts/check-fidelity.js"
+    "check:fidelity": "node scripts/check-fidelity.js",
+    "build:css": "tailwindcss -i src/app.css -o public/assets/app.css --minify"
   },
   "dependencies": {
     "express": "^4.19.2",
     "mermaid": "^11.4.0",
     "playwright": "^1.47.0",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "tailwindcss": "^4.3.3"
   }
 }
