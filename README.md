@@ -474,6 +474,36 @@ offer the one action that unblocks it.
 
 ---
 
+## Buttons that admit they are working
+
+Half the actions here take seconds — a suite run drives a real browser — and a
+button that looks identical while it works is indistinguishable from one that
+is broken. **Run suite** was the worst of them: it awaited the whole run with no
+busy state at all, so the only honest reading of the screen was that the click
+had not registered. It counts the cases off now (`Running 2 of 4…`), with a
+spinner, disabled so a second press cannot queue a second run. Every button in
+the app also scales slightly on press, which is one CSS rule and the difference
+between "working" and "dead".
+
+## Scrolling with the wheel
+
+Point at the canvas and use your wheel or trackpad. It is the primary way; the
+↑ Top / ↓ Bottom buttons are for a page too long to roll through.
+
+Wheel events are coalesced into **one socket message per animation frame**. A
+trackpad emits well over a hundred a second, and the first version sent two
+messages for every one — several hundred CDP dispatches for a single flick,
+which scrolled, but in lurches. A 90-event burst is now one message carrying the
+full distance.
+
+Top and Bottom ask for a *position*. They used to send a wheel delta of ±100000
+and hope; the server clamped it, so they moved by exactly the clamp and never
+reached either end — and the check that was supposed to catch that passed three
+times before it was written honestly. Testing a scroll button with the scroll
+button is how.
+
+---
+
 ## “Run script does nothing”
 
 Three separate faults produced that one symptom, and not one of them printed

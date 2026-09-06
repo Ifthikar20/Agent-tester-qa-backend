@@ -22,8 +22,9 @@
  */
 import { chromium } from 'playwright';
 
-const APP = `${process.env.BASE_URL || 'http://localhost:3000'}/app`;
-const SITE = `${process.env.BASE_URL || 'http://localhost:3000'}/site.html`;
+const API = process.env.BASE_URL || 'http://localhost:3000';
+const APP = `${API}/app`;
+const SITE = `${API}/site.html`;
 
 let failures = 0;
 const ok = (l, d = '') => console.log(`  ✓  ${l.padEnd(46)} ${d}`);
@@ -66,8 +67,13 @@ page.on('domcontentloaded', async () => {
 await page.goto(`${APP}/console`, { waitUntil: 'networkidle' });
 await page.waitForTimeout(2500);
 
+// The property is "you never see a bare black rectangle" — not "a placeholder
+// always appears". On a warm socket the store already holds a frame and replays
+// it on attach, so there is legitimately nothing to wait for, and demanding the
+// placeholder would fail the better outcome.
 if (overlay) ok('says what it is waiting for', `“${overlay}”`);
-else bad('says what it is waiting for', 'no placeholder was ever shown');
+else if (await lit() > 50) ok('or paints immediately', 'nothing to wait for');
+else bad('says what it is waiting for', 'black, with no placeholder');
 
 const noOverlay = await page.evaluate(() =>
   ![...document.querySelectorAll('p')].some((e) => /Connecting to|Waiting for/.test(e.textContent)));
@@ -99,7 +105,7 @@ const box = await page.locator('canvas').boundingBox();
 const mid = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
 const frame = () => page.evaluate(() => {
   const c = document.querySelector('canvas');
-  const d = c.getContext('2d').getImageData(0, 0, c.width, Math.min(400, c.height)).data;
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
   let h = 0;
   for (let i = 0; i < d.length; i += 997) h = (h * 31 + d[i]) % 1e9;
   return h;
@@ -114,19 +120,68 @@ const after = await frame();
 if (before !== after) ok('the wheel moves the driven page', 'the feed changed');
 else bad('the wheel moves the driven page', 'the feed is identical — the wheel is not reaching it');
 
-// The buttons, for a page too long to wheel through.
-await page.getByRole('button', { name: '↑ Top' }).click();
+// The buttons must reach the actual end, not just move a bit.
+//
+// They used to send a wheel delta of ±100000 and hope; the server clamped it,
+// so they scrolled by exactly the clamp and stopped. "The feed changed" passed
+// happily on that, which is why this now asks the page where it is.
+/**
+ * Top must be a POSITION, not a large nudge.
+ *
+ * The broken version sent a wheel delta of ±100000 and let the server clamp it,
+ * so the buttons crept by the clamp and never reached either end. "The feed
+ * changed" passes happily on that — so test idempotence instead: pressing Top
+ * from two different places must land on the same view. A nudge cannot.
+ */
+const press = async (name, settle = 1400) => {
+  await page.getByRole('button', { name }).click();
+  await page.waitForTimeout(settle);
+  return frame();
+};
+const roll = async (ticks, dy = 400) => {
+  await page.mouse.move(mid.x, mid.y);
+  for (let i = 0; i < Math.abs(ticks); i++) {
+    await page.mouse.wheel(0, ticks > 0 ? dy : -dy);
+    await page.waitForTimeout(55);
+  }
+  await page.waitForTimeout(800);
+};
+
+/**
+ * Press Top from two GENUINELY different depths.
+ *
+ * The setup has to use the WHEEL, not the Top button, to get there — using the
+ * thing under test to prepare its own test is how the first two versions of
+ * this check passed against the broken button: a nudge left the page near the
+ * bottom, the short scroll that followed hit the bottom again, and both
+ * presses ended up starting from the same place, where a nudge is idempotent.
+ */
+await roll(-12);                     // definitively at the top, by wheel
+await roll(2);                       // ~800px down
+const shallow = await frame();
+const fromShallow = await press('↑ Top');
+
+await roll(-12);
+await roll(6);                       // ~2400px down — a different place
+const deep = await frame();
+const fromDeep = await press('↑ Top');
+
+if (shallow !== deep) ok('two scroll depths look different', 'the setup is honest');
+else bad('two scroll depths look different', 'the page is too short to tell them apart');
+
+if (fromDeep === fromShallow) ok('and Top reaches the top from either', 'a position, not a nudge');
+else bad('and Top reaches the top from either', 'it moved by a fixed amount instead');
+
+await page.getByRole('button', { name: '↓ Bottom' }).click();
 await page.waitForTimeout(1400);
-const top = await frame();
-if (top !== after) ok('and the Top button brings it back');
-else bad('and the Top button brings it back', 'no change');
+if ((await frame()) !== fromShallow) ok('and Bottom leaves it');
+else bad('and Bottom leaves it', 'nothing moved');
 
 // ---------------------------------------------------------------------------
 console.log('\n— 4 · loading a saved case ————————————————————————');
 
 // Self-contained: its own suite, removed at the end, so this does not depend on
 // whatever happens to be checked in.
-const API = process.env.BASE_URL || 'http://localhost:3000';
 const post = (path, body) => fetch(`${API}${path}`, {
   method: 'POST', headers: { 'content-type': 'application/json' },
   body: body === undefined ? undefined : JSON.stringify(body),

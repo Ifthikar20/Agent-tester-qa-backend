@@ -723,11 +723,25 @@ wss.on('connection', (ws) => {
       if (m.t === 'human.move') return void cursor.moveTo(m.x, m.y);
       if (m.t === 'human.click') return void cursor.click();
       if (m.t === 'human.wheel') {
-        // Clamped: a trackpad can emit enormous deltas, and a single event that
-        // scrolls a page five screens is not something a person can aim.
-        const dy = Math.max(-600, Math.min(600, Number(m.deltaY) || 0));
-        const dx = Math.max(-600, Math.min(600, Number(m.deltaX) || 0));
-        return void cursor.wheel(dy, dx);
+        // A sanity bound, not a speed limit. The client coalesces a frame's
+        // worth of wheel events into one message, so a fast flick legitimately
+        // carries far more than a single tick — clamping tightly here silently
+        // ate scroll distance. No real frame reaches ten thousand pixels.
+        const clamp = (v) => Math.max(-10000, Math.min(10000, Number(v) || 0));
+        return void cursor.wheel(clamp(m.deltaY), clamp(m.deltaX));
+      }
+
+      // Top and bottom are a position, not a very large wheel gesture.
+      //
+      // They used to send a delta of ±100000 and hope, which the clamp above
+      // then truncated — so the buttons moved the page by exactly the clamp and
+      // never reached either end. Asking for the position says what is meant
+      // and cannot be quietly rescaled.
+      if (m.t === 'human.scrollTo' && (m.to === 'top' || m.to === 'bottom')) {
+        return void page.evaluate(
+          (where) => window.scrollTo({ top: where === 'top' ? 0 : document.body.scrollHeight, behavior: 'instant' }),
+          m.to,
+        ).catch(() => {});
       }
       if (m.t === 'human.key') {
         if (typeof m.text === 'string' && m.text.length === 1) {
