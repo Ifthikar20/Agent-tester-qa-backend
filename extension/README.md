@@ -48,9 +48,10 @@ reads that same file off disk and injects it, because the extension proposes a
 target on your machine and the runner has to resolve the same one on ours. A
 second copy would drift and you would find out in CI.
 
-`lib/flow.js` is a copy of the repository's `flow.js`. `npm run check:extension`
-asserts the two are byte-identical, so a change to the language cannot silently
-leave the extension behind.
+`lib/flow.js` and `lib/vocabulary.js` are copies of the repository's `flow.js`
+and `vocabulary.js`. `npm run check:extension` asserts each is byte-identical to
+its original, so a change to the language cannot silently leave the extension
+behind.
 
 ## Replaying needs a session
 

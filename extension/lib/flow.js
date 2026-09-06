@@ -1,10 +1,11 @@
 /**
- * The flow language: a strict subset of mermaid `flowchart` that is also the
- * test script. One edge is exactly one browser interaction, so the source and
- * the picture are the same file — paste it into a README and GitHub draws
- * your suite.
+ * The test case language.
  *
- *   flowchart TD
+ * A case is a graph: nodes are places, edges are what you did to get from one
+ * to the next. One edge is exactly one transition, so the source reads like the
+ * test it is.
+ *
+ *   testcase TD
  *     home(("http://localhost:3000/demo.html"))
  *     dash["#/dashboard"]
  *     saved{{"Profile saved"}}
@@ -19,20 +20,32 @@
  *   id{{"text"}}   arrival asserts text   -> expect text visible
  *   id("name")     just a name            -> no assertion
  *
- * Edge label is the action, `;`-separated for several on one transition:
- *   click 'Name' : role
- *   hover 'Name' : role          (a menu that opens on hover)
- *   fill  'Name' : role = <value>
- *   check 'Name' : role is <n> chars
- *   wait  <n>ms
+ * Edge label is the action. Several on one transition can be `;`-separated, or
+ * written one per line underneath, indented — which is what a recording of any
+ * length produces, and the only form anybody can read:
  *
- * Values: 'literal' | $VAULT_KEY | 'a' * 20
+ *   n0 --> n1
+ *     scroll to top
+ *     click 'Learn' : navigation/link
+ *     click 'Changelog' : navigation/link
  *
- * Syntax constraints below are not stylistic — they are what mermaid's
- * flowchart parser actually accepts inside `|...|`, verified by rendering:
- * double quotes, parentheses and square brackets are all parse errors there.
- * Hence single-quoted names and `'a' * 20` rather than `repeat("a", 20)`.
+ * The vocabulary itself — every verb, how it is written and written back —
+ * lives in vocabulary.js. This file is the shape of the document.
+ *
+ * It is NOT mermaid. It used to be: the header said `flowchart` and the stored
+ * text was fed straight to a diagram renderer, which meant the grammar could
+ * only contain what mermaid's lexer accepts — no double quotes, parentheses or
+ * brackets anywhere in an action, so `Download (PDF)` was silently stored as
+ * `Download PDF` and stopped resolving. `asFlowchart()` below translates a case
+ * into mermaid when something wants to draw one, and takes that damage with it:
+ * the picture loses the parentheses, the test keeps them.
  */
+
+import {
+  VERBS, OP_NAMES, verbFor, parseAction, showAction, showTarget, unq, value, target,
+} from './vocabulary.js';
+
+export { VERBS, OP_NAMES, verbFor, parseAction, showAction, showTarget, unq, value, target };
 
 const SHAPES = [
   // order matters: (( )) must be tried before ( )
@@ -46,89 +59,8 @@ const SHAPES = [
 /** `a -->|label| b`, `a --> b`, and chains of either. */
 const EDGE = /\s*(-{2,3}>|={2,3}>)\s*(?:\|([^|]*)\|\s*)?/;
 
-const unq = (s) => s.trim().replace(/^'(.*)'$/s, '$1');
-
-/** `'a' * 20` -> 'aaa…'; `$KEY` -> a vault reference; else a literal. */
-function value(raw) {
-  const s = raw.trim();
-  if (s.startsWith('$')) return { valueRef: `secrets.${s.slice(1)}` };
-
-  const rep = s.match(/^'(.*)'\s*[*×]\s*(\d+)$/s);
-  if (rep) return { value: rep[1].repeat(Math.min(Number(rep[2]), 500)) };
-
-  const n = s.match(/^(\d+)\s*chars?$/);
-  if (n) return { value: 'a'.repeat(Math.min(Number(n[1]), 500)) };
-
-  return { value: unq(s) };
-}
-
-/** `'Sign in' : button` -> `button:Sign in`, the target grammar targets.js speaks. */
-function target(raw) {
-  // The strategy half may carry a scope prefix — `navigation/link`, `nth2/link`.
-  const m = raw.trim().match(/^(.*?)\s*:\s*((?:[A-Za-z0-9]+\/)?[A-Za-z]+)$/s);
-  if (!m) {
-    // Bare alias, e.g. `auth.submit`. Still goes through parseTarget later.
-    return unq(raw);
-  }
-  return `${m[2].trim()}:${unq(m[1])}`;
-}
-
-/** One `;`-separated clause of an edge label -> one IR step. */
-function op(clause) {
-  const s = clause.trim();
-  if (!s) return null;
-
-  let m;
-  if ((m = s.match(/^click\s+(.+)$/i))) {
-    return { op: 'click', target: target(m[1]) };
-  }
-  // Go there and stay, without clicking — for a menu that only exists while
-  // the pointer is on whatever opens it.
-  if ((m = s.match(/^hover\s+(.+)$/i))) {
-    return { op: 'hover', target: target(m[1]) };
-  }
-  if ((m = s.match(/^fill\s+(.+?)\s*=\s*(.+)$/i))) {
-    return { op: 'fill', target: target(m[1]), ...value(m[2]) };
-  }
-  if ((m = s.match(/^check\s+(.+?)\s+is\s+(.+)$/i))) {
-    return { op: 'expect', assert: 'valueEquals', target: target(m[1]), ...value(m[2]) };
-  }
-  if ((m = s.match(/^wait\s+(\d+)\s*ms$/i))) {
-    return { op: 'wait', ms: Number(m[1]) };
-  }
-  // Moving the page is an action, not scenery. `top` and `bottom` mean the
-  // same thing at any viewport; anything else scrolls a named element in.
-  if ((m = s.match(/^scroll\s+to\s+(top|bottom)$/i))) {
-    return { op: 'scroll', to: m[1].toLowerCase() };
-  }
-  if ((m = s.match(/^scroll\s+to\s+(.+)$/i))) {
-    return { op: 'scroll', target: target(m[1]) };
-  }
-  if (/^check\s+at\s+top$/i.test(s)) {
-    return { op: 'expect', assert: 'atTop' };
-  }
-  // What the last navigation did, which the final URL cannot tell you: a
-  // friendly 404 has a perfectly good URL, and so does a link that 301s
-  // through a path nobody maintains.
-  if ((m = s.match(/^check\s+status\s+(\d{3})$/i))) {
-    return { op: 'expect', assert: 'status', value: Number(m[1]) };
-  }
-  if (/^check\s+no\s+redirects?$/i.test(s)) {
-    return { op: 'expect', assert: 'redirects', value: 0 };
-  }
-  if ((m = s.match(/^check\s+(\d+)\s+redirects?$/i))) {
-    return { op: 'expect', assert: 'redirects', value: Number(m[1]) };
-  }
-  if ((m = s.match(/^check\s+redirect\s+via\s+(.+)$/i))) {
-    return { op: 'expect', assert: 'via', value: unq(m[1]) };
-  }
-  if ((m = s.match(/^see\s+(.+)$/i))) {
-    return { op: 'expect', assert: 'textVisible', value: unq(m[1]) };
-  }
-  // Mermaid is permissive; this runner must not be. An edge we cannot read is
-  // a hard error, never a silently skipped step — otherwise a typo passes.
-  throw new Error(`Unreadable edge action "${s}"`);
-}
+/** The header line. `flowchart`/`graph` still parse — every case on disk has one. */
+const HEADER = /^(testcase|flowchart|graph)\b\s*(TD|TB|LR|RL|BT)?/i;
 
 /** Arriving at a node is its assertion, if it has one. */
 function arrival(node) {
@@ -170,13 +102,29 @@ export function parseFlow(text) {
     throw new Error(`Cannot read node "${t}"`);
   };
 
+  // The edge an indented action line belongs to, and how far in its own line
+  // started. Anything indented past that continues it; anything at or before
+  // it closes the block.
+  let open = null;
+
   for (const raw of text.split('\n')) {
+    const indent = raw.length - raw.trimStart().length;
     const line = raw.trim().replace(/;+$/, '');
-    if (!line) continue;
+    // A block runs to the next blank line or dedent, so a stray indented line
+    // further down the file cannot silently join an edge it has nothing to do
+    // with.
+    if (!line) { open = null; continue; }
+
+    // A continuation: one action per line, under the edge it belongs to.
+    if (open && indent > open.indent && !line.startsWith('%%')) {
+      open.edge.label = open.edge.label ? `${open.edge.label}; ${line}` : line;
+      continue;
+    }
+    open = null;
 
     let m;
-    // The suite name rides in a mermaid comment, so the script stays a valid
-    // diagram while still carrying its own title.
+    // The suite name rides in a comment, so a case that is pasted somewhere
+    // still carries its own title.
     if ((m = line.match(/^(?:%%)?\s*suite\s+(.+)$/i))) {
       suite = unq(m[1].trim().replace(/^["']|["']$/g, ''));
       continue;
@@ -191,7 +139,7 @@ export function parseFlow(text) {
       continue;
     }
     if (line.startsWith('%%')) continue;
-    if (/^(flowchart|graph)\b/i.test(line)) continue;
+    if (HEADER.test(line)) continue;
     if (/^(classDef|class|style|linkStyle|subgraph|end)\b/.test(line)) continue;
 
     if (!EDGE.test(line)) { declare(line); continue; }
@@ -200,15 +148,22 @@ export function parseFlow(text) {
     const parts = line.split(new RegExp(EDGE.source, 'g'));
     // parts = [node, arrow, label, node, arrow, label, node, ...]
     let prev = declare(parts[0]);
+    let last = null;
     for (let i = 1; i < parts.length; i += 3) {
       const lbl = parts[i + 1];
       const next = declare(parts[i + 2]);
-      if (prev && next) edges.push({ from: prev, to: next, label: lbl ?? '' });
+      if (prev && next) {
+        last = { from: prev, to: next, label: lbl ?? '' };
+        edges.push(last);
+      }
       prev = next;
     }
+    // Indented lines below a chain continue its LAST edge, which is the only
+    // reading that means anything.
+    if (last) open = { edge: last, indent };
   }
 
-  if (!nodes.size) throw new Error('No nodes — is this a flowchart?');
+  if (!nodes.size) throw new Error('No nodes — is this a test case?');
 
   const entries = [...nodes.values()].filter((n) => n.kind === 'entry');
   const incoming = new Set(edges.map((e) => e.to));
@@ -235,7 +190,7 @@ export function parseFlow(text) {
 }
 
 /** An edge's label -> its steps. */
-const opsOf = (e) => (e.label ?? '').split(';').map(op).filter(Boolean);
+const opsOf = (e) => (e.label ?? '').split(';').map(parseAction).filter(Boolean);
 
 function walk(id, steps, seenEdges, edges, nodes, cases, path) {
   let cur = steps;
@@ -282,60 +237,28 @@ export function flatten({ suite, cases }) {
   return { suite, steps };
 }
 
-/** Convenience: flow text straight to the IR the executor already runs. */
+/** Convenience: case text straight to the IR the executor already runs. */
 export const parse = (text) => flatten(parseFlow(text));
 
 // ---------------------------------------------------------------- emitting
 
-/** Node/edge labels: strip what mermaid cannot lex rather than escape it. */
-const nodeText = (s) => String(s ?? '').replace(/["\n\r]/g, ' ').replace(/\s+/g, ' ').trim();
-const edgeText = (s) => String(s ?? '')
-  .replace(/["()[\]|\n\r]/g, ' ')   // all parse errors inside |...|
-  .replace(/\s+/g, ' ').trim();
-
 /**
- * `navigation/link:Pricing` -> `'Pricing' : navigation/link`
+ * What THIS language cannot lex, and nothing more.
  *
- * The scope rides with the strategy rather than being dropped, because a
- * script that silently forgets WHICH Pricing link you meant is a script that
- * clicks the footer on Tuesday.
+ * A node label is delimited by `"` and an edge label by `|`, so those two and a
+ * line break have to go. Everything else — parentheses, brackets, quotes inside
+ * a name — is kept, because it is part of the element's real accessible name
+ * and dropping it means the target stops resolving. Mermaid's narrower rules
+ * are mermaid's problem, and are applied in asFlowchart().
  */
-const showTarget = (t) => {
-  const i = t.indexOf(':');
-  return i < 1 ? t : `'${edgeText(t.slice(i + 1))}' : ${t.slice(0, i)}`;
-};
+const nodeText = (s) => String(s ?? '').replace(/["\n\r]/g, ' ').replace(/\s+/g, ' ').trim();
+const edgeText = (s) => String(s ?? '').replace(/[|\n\r]/g, ' ').replace(/\s+/g, ' ').trim();
 
-function showOp(step) {
-  switch (step.op) {
-    case 'click': return `click ${showTarget(step.target)}`;
-    case 'hover': return `hover ${showTarget(step.target)}`;
-    case 'fill': {
-      // A recorded password must never round-trip as its value.
-      const v = step.valueRef
-        ? `$${step.valueRef.replace(/^secrets\./, '')}`
-        : `'${edgeText(step.value)}'`;
-      return `fill ${showTarget(step.target)} = ${v}`;
-    }
-    case 'wait': return `wait ${step.ms}ms`;
-    case 'scroll':
-      return step.to ? `scroll to ${step.to}` : `scroll to ${showTarget(step.target)}`;
-    case 'expect':
-      if (step.assert === 'valueEquals') {
-        return `check ${showTarget(step.target)} is ${String(step.value).length} chars`;
-      }
-      if (step.assert === 'atTop') return 'check at top';
-      if (step.assert === 'status') return `check status ${step.value}`;
-      if (step.assert === 'redirects') {
-        return step.value === 0 ? 'check no redirect' : `check ${step.value} redirects`;
-      }
-      if (step.assert === 'via') return `check redirect via '${edgeText(step.value)}'`;
-      return null;   // url/text assertions become node shapes, not edges
-    default: return null;
-  }
-}
+/** More than this on one line and nobody reads it; it becomes a block instead. */
+const ONE_LINE_MAX = 2;
 
 /**
- * IR -> flow text. The inverse of parseFlow for anything parseFlow produces,
+ * IR -> case text. The inverse of parseFlow for anything parseFlow produces,
  * which is what lets teach-mode hand you a script you can edit and re-run.
  */
 export function toFlow(plan) {
@@ -354,8 +277,16 @@ export function toFlow(plan) {
     return id;
   };
   const flush = (to) => {
-    const label = pending.filter(Boolean).join('; ');
-    lines.push(label ? `  ${cur} -->|${label}| ${to}` : `  ${cur} --> ${to}`);
+    const acts = pending.filter(Boolean).map(edgeText);
+    if (!acts.length) {
+      lines.push(`  ${cur} --> ${to}`);
+    } else if (acts.length <= ONE_LINE_MAX) {
+      lines.push(`  ${cur} -->|${acts.join('; ')}| ${to}`);
+    } else {
+      // A recording of any length lands here. Four actions crammed into one
+      // `|...|` is a line nobody reads, and reading it is the entire point.
+      lines.push(`  ${cur} --> ${to}`, ...acts.map((a) => `    ${a}`));
+    }
     pending = [];
     cur = to;
   };
@@ -372,8 +303,9 @@ export function toFlow(plan) {
       flush(id);
       continue;
     }
-    const s = showOp(step);
-    if (s) pending.push(s);
+    // Not `if (s)`: a step the vocabulary cannot write back now throws, because
+    // being quietly dropped from a script you are about to trust is worse.
+    pending.push(showAction(step));
   }
   // Anything left over is a self-loop: more steps, same place.
   if (pending.length && cur) flush(cur);
@@ -398,10 +330,75 @@ export function toFlow(plan) {
 
   return [
     `%% suite "${nodeText(plan.suite ?? 'Recorded flow')}"`,
-    'flowchart TD',
+    'testcase TD',
     ...nodes,
     '',
     ...lines,
     ...(marks.length ? ['', ...marks] : []),
   ].join('\n');
+}
+
+// --------------------------------------------------------------- rendering
+
+/** Everything mermaid cannot lex inside `["…"]` or `|…|`, and only that. */
+const forMermaid = (s) => String(s).replace(/["()[\]|]/g, ' ').replace(/\s+/g, ' ').trim();
+
+/**
+ * A case -> a mermaid flowchart, for anywhere a picture is wanted: a README, a
+ * ticket, a pull request. Paste the output and GitHub draws your suite.
+ *
+ * This is a view, not the document. It folds indented action blocks back onto
+ * their edge and strips the characters mermaid's parser rejects — so a name
+ * containing brackets survives in the test and is merely tidied in the drawing.
+ */
+export function asFlowchart(text, direction = 'TD') {
+  const out = [];
+  let open = null;          // an edge line awaiting its indented actions
+
+  const closeBlock = () => {
+    if (!open) return;
+    const acts = open.actions.map(forMermaid).filter(Boolean);
+    out.push(acts.length ? `  ${open.from} -->|${acts.join('; ')}| ${open.to}` : `  ${open.from} --> ${open.to}`);
+    open = null;
+  };
+
+  let header = false;
+  for (const raw of text.split('\n')) {
+    const indent = raw.length - raw.trimStart().length;
+    const line = raw.trim();
+
+    if (open && line && indent > open.indent && !line.startsWith('%%')) {
+      open.actions.push(line);
+      continue;
+    }
+    closeBlock();
+
+    if (!line) { out.push(''); continue; }
+    if (HEADER.test(line)) {
+      out.push(`flowchart ${line.match(HEADER)[2] ?? direction}`);
+      header = true;
+      continue;
+    }
+    // Comments carry evidence (`%% at`, `%% via`) and the suite name. Mermaid
+    // ignores them, so they ride along untouched.
+    if (line.startsWith('%%')) { out.push(line); continue; }
+
+    // A single edge, labelled or not, may have indented actions under it —
+    // the same rule parseFlow reads by, or the two would disagree about what
+    // a case says.
+    const one = line.match(/^(\w+)\s*-{2,3}>\s*(?:\|([^|]*)\|\s*)?(\w+)$/);
+    if (one) {
+      open = { from: one[1], to: one[3], indent, actions: one[2] ? [one[2]] : [] };
+      continue;
+    }
+
+    // Node labels and edge labels: same treatment, different delimiters.
+    out.push('  ' + line
+      .replace(/"([^"]*)"/g, (_, t) => `"${forMermaid(t)}"`)
+      .replace(/\|([^|]*)\|/g, (_, t) => `|${forMermaid(t)}|`));
+  }
+  closeBlock();
+
+  if (!header) out.unshift(`flowchart ${direction}`);
+  return out.join('\n');
 }

@@ -1,5 +1,6 @@
 import { sleep } from './cursor.js';
 import { parseTarget, locate, aliasesFor, discover } from './targets.js';
+import { OP_NAMES, checkAction } from './vocabulary.js';
 import * as origins from './origins.js';
 import * as vault from './secrets.js';
 
@@ -333,10 +334,13 @@ async function pointAt(page, target, ctx, opts = {}) {
 }
 
 /**
- * The whole executable vocabulary. Five hand-written functions.
+ * The running half of the vocabulary — one hand-written function per verb.
  * There is no `eval`, no `evaluate`, no raw-selector op. That absence is the
  * security model: there is structurally no path from generated text to
  * arbitrary code, whichever page the plan is pointed at.
+ *
+ * The writing half — how each verb is spelled, written back, drawn and gated —
+ * is vocabulary.js. The two are checked against each other below.
  */
 export const OPS = {
   async goto(page, step, ctx) {
@@ -551,6 +555,25 @@ export const OPS = {
 };
 
 /**
+ * A verb is only finished when both halves exist.
+ *
+ * Written-but-not-runnable used to fail at the moment the step executed, deep
+ * in a run; runnable-but-not-written was worse — `showOp` returned null for it
+ * and the step vanished from the script silently. Both are now a refusal to
+ * start, naming the verb, before anything opens a browser.
+ */
+for (const name of OP_NAMES) {
+  if (!OPS[name]) {
+    throw new Error(`vocabulary.js declares "${name}" but ops.js has no runner for it`);
+  }
+}
+for (const name of Object.keys(OPS)) {
+  if (!OP_NAMES.includes(name)) {
+    throw new Error(`ops.js runs "${name}" but vocabulary.js does not declare it`);
+  }
+}
+
+/**
  * Validation gate. Runs between "something produced a plan" and "the browser
  * did something". With dynamic URLs the set of valid targets is no longer
  * known ahead of time, so the gate is two-layer:
@@ -569,7 +592,9 @@ export function validate(plan, baseOrigin = DEFAULT_ORIGIN) {
   let origin = baseOrigin;
 
   plan.steps.forEach((s, i) => {
-    if (!OPS[s.op]) throw new Error(`Step ${i}: unknown op "${s.op}"`);
+    // Shape first, from the one table that defines it.
+    const why = checkAction(s);
+    if (why !== true) throw new Error(`Step ${i}: ${why}`);
 
     if (s.op === 'goto') {
       try { origin = checkUrl(s.url).origin; }
@@ -580,9 +605,6 @@ export function validate(plan, baseOrigin = DEFAULT_ORIGIN) {
         if (e.origin) { err.origin = e.origin; err.url = e.url; }
         throw err;
       }
-    }
-    if (s.op === 'scroll' && !s.target && s.to !== 'top' && s.to !== 'bottom') {
-      throw new Error(`Step ${i}: scroll needs a target, or "top"/"bottom"`);
     }
     if ('target' in s) {
       // Walking the plan's navigation means aliases are checked against the

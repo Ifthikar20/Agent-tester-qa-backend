@@ -1,3 +1,5 @@
+import { labelAction } from './vocabulary.js';
+
 /**
  * IR -> mermaid `block-beta`.
  *
@@ -38,30 +40,18 @@ function trunc(s, n) {
   return c.length > n ? c.slice(0, n - 1) + '…' : c;
 }
 
-/** Step -> the text in its block. Secrets are named, never expanded. */
+/**
+ * Step -> the text in its block.
+ *
+ * Each verb draws itself — the label and its character budget are declared
+ * beside that verb's syntax in vocabulary.js, so a new verb arrives in the
+ * diagram already knowing how to appear rather than falling through to a
+ * default that prints its op name and nothing else. Secrets are named, never
+ * expanded.
+ */
 export function label(step, n) {
   const i = n === undefined ? '' : `${n} `;
-  switch (step.op) {
-    case 'goto':  return `${i}▶ ${trunc(step.url, BUDGET.page - 4)}`;
-    case 'click': return `${i}click ${trunc(step.target, BUDGET.action - 8)}`;
-    case 'fill':  return step.valueRef
-      ? `${i}fill ${trunc(step.target, BUDGET.action - 12)} ← vault`
-      : `${i}fill ${trunc(step.target, BUDGET.action - 7)}`;
-    case 'wait':  return `${i}wait ${step.ms}ms`;
-    case 'scroll': return step.to
-      ? `${i}scroll ${step.to}`
-      : `${i}scroll to ${trunc(step.target, BUDGET.action - 12)}`;
-    case 'expect': {
-      if (step.assert === 'atTop') return `${i}at top of page`;
-      if (step.assert === 'urlContains') return `${i}url ~ ${trunc(step.value, BUDGET.check - 8)}`;
-      if (step.assert === 'textVisible') return `${i}text: ${trunc(step.value, BUDGET.check - 8)}`;
-      if (step.assert === 'valueEquals') {
-        return `${i}${trunc(step.target, BUDGET.check - 12)} = ${String(step.value).length} chars`;
-      }
-      return `${i}expect ${trunc(step.assert, BUDGET.check - 8)}`;
-    }
-    default: return `${i}${trunc(step.op, BUDGET.action)}`;
-  }
+  return `${i}${labelAction(step, trunc)}`;
 }
 
 /** A step that gets its own full-width band rather than a grid cell. */

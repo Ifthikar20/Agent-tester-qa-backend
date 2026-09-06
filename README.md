@@ -223,7 +223,7 @@ in with the same function the executor uses, so a case that cannot run is
 refused at save rather than discovered at 2am:
 
 ```
-POST /api/suites/x/cases  {"flow": "flowchart TD\n a((\"https://evil.example.com/\"))"}
+POST /api/suites/x/cases  {"flow": "testcase TD\n a((\"https://evil.example.com/\"))"}
 → 400  Step 0: origin https://evil.example.com is not allowed yet
 ```
 
@@ -249,9 +249,9 @@ off during a run so the two never feed each other.
 
 What comes back is the script:
 
-```mermaid
+```
 %% suite "Recorded flow"
-flowchart TD
+testcase TD
   n0(("http://localhost:3000/demo.html"))
   n1["/demo.html#/dashboard"]
   n2["/demo.html#/settings"]
@@ -956,8 +956,9 @@ click  button:Add Widget
 expect text "Widget × 2"
 ```
 
-The flow language is a strict subset of mermaid `flowchart`, so the script *is*
-the picture — paste it in a README and GitHub draws your suite:
+A case is a graph: nodes are places, edges are what you did to get from one to
+the next. It is its own language — the header says `testcase` — and a diagram is
+one *view* of it, produced on demand by `asFlowchart()`:
 
 ```mermaid
 %% suite "Login outcomes"
@@ -972,6 +973,17 @@ flowchart TD
   locked -->|click 'Reset password' : link| reset
 ```
 
+That is the picture. The case itself says `testcase TD`, and past two actions on
+one transition it puts them one per line, indented, because the alternative is
+what a real recording used to look like:
+
+```
+n0 --> n1
+  scroll to top
+  click 'Learn' : navigation/link
+  click 'Changelog' : navigation/link
+```
+
 Node shape is the assertion; edge label is the action.
 
 | syntax | meaning |
@@ -981,23 +993,68 @@ Node shape is the assertion; edge label is the action.
 | `id{{"Profile saved"}}` | on arrival, assert that text is visible |
 | `id("Profile tab")` | just a name, no assertion |
 | `--\|click 'Sign in' : button\|--` | `click` |
+| `--\|hover 'Products' : link\|--` | `hover` — a menu that only exists under the pointer |
 | `--\|fill 'Email' : textbox = $QA_USER\|--` | `fill` from the vault |
 | `--\|fill 'User' : textbox = 'a' * 20\|--` | `fill`, repeated value |
 | `--\|check 'User' : textbox is 20 chars\|--` | assert value |
-| `--\|wait 500ms\|--` | `wait` |
+| `--\|scroll to top\|--` · `--\|scroll to 'Docs' : link\|--` | move the page on purpose |
+| `--\|see 'Profile saved'\|--` | assert text without making a node of it |
+| `--\|check status 404\|--` · `--\|check 2 redirects\|--` · `--\|check redirect via '/go'\|--` | what the last navigation *did* |
+| `--\|check at top\|--` · `--\|wait 500ms\|--` | position, patience |
 | `-->` bare | no action, just assert the destination |
 | `a; b; c` in one label | three ops on one transition |
+| indented lines under an edge | the same, readable |
 
 Two rules the graph needs. **Order**: depth-first from each entry, edges in
 declaration order; a self-loop is the next step in the same place, and several
 edges leaving one node fork into separate cases — which is how a shared login
-prefix gets written once. **Strictness**: mermaid is permissive, the runner is
-not. An edge label it cannot read is a hard error, never a silently skipped
-step, or a typo becomes a no-op that quietly passes.
+prefix gets written once. **Strictness**: an edge label the runner cannot read
+is a hard error, never a silently skipped step, or a typo becomes a no-op that
+quietly passes.
 
-Those `'single quotes'` and `'a' * 20` are not stylistic. Verified against the
-real parser: double quotes, parentheses and square brackets inside `|...|` are
-all lexical errors.
+### It used to be a flowchart, and that cost it
+
+The stored text was literal mermaid, which meant the grammar could only contain
+what mermaid's lexer accepts. Double quotes, parentheses and square brackets are
+all lexical errors inside `|...|`, so the emitter **stripped them** — an element
+whose accessible name is `Download (PDF)` was written to disk as `Download PDF`
+and stopped resolving. Every verb had to fit a diagramming tool.
+
+Now the case keeps its own text and `asFlowchart()` takes the damage: the
+picture loses the brackets, the test keeps them. `check:vocabulary` asserts
+exactly that, and `check:diagram` renders the translation through the real
+mermaid parser so a case that cannot be drawn is caught here rather than inside
+somebody's pull request.
+
+Cases written as `flowchart TD` — which is every case on disk — still parse.
+Saving one rewrites it.
+
+### One verb, one row
+
+A verb used to be four things in four files: parsed in `flow.js`, written back
+in `flow.js`, executed in `ops.js`, gated in `ops.js`, drawn in `diagram.js`,
+echoed again in `ConsoleView.vue`, produced in `recorder.js`, and copied into
+the extension. Eight places, and the vocabulary stayed seven verbs wide because
+of it.
+
+The worst of the drift was silent. `showOp` ended in `default: return null`, and
+`toFlow` skipped anything that came back null — so a step nobody had taught to
+write itself was quietly *dropped from the script*. You got a shorter recording
+that looked complete.
+
+`vocabulary.js` is now one row per verb — its syntax, how it writes itself back,
+how it draws, and what makes it valid — with `ops.js` attaching the runners by
+name and **refusing to load** if the two sets differ:
+
+```
+vocabulary.js declares "select" but ops.js has no runner for it
+```
+
+`check:vocabulary` walks the table itself: every row must round-trip through
+parse → write → parse unchanged, draw as more than its own op name, and have a
+runner — and every row must bring a sample, so a verb added tomorrow without
+finishing it fails there rather than in front of somebody. A step the table does
+not know now throws instead of vanishing.
 
 ## The run report
 
@@ -1049,8 +1106,9 @@ silently inside someone else's docs.
 | `cursor.js` | `VirtualCursor` — sole authority for pointer position |
 | `targets.js` | target grammar, aliases, page discovery |
 | `recorder.js` | teach mode — proposes targets in the page, verifies them here |
-| `flow.js` | mermaid flow language: text ↔ IR, both directions |
-| `ops.js` | op vocabulary, origin allowlist, validation gate |
+| `vocabulary.js` | every verb, declared once: syntax, how it writes back, how it draws |
+| `flow.js` | the test case language: text ↔ IR, and `asFlowchart()` for a picture |
+| `ops.js` | what each verb does, origin allowlist, validation gate |
 | `parse.js` | DSL text → JSON IR |
 | `diagram.js` | JSON IR → mermaid `block-beta` |
 | `suites.js` | the suite model — one origin, pages, expectations, cases |
@@ -1065,6 +1123,7 @@ silently inside someone else's docs.
 | `scripts/check-extension.js` | picker suppression, replay, hand-off, real Chrome load |
 | `extension/` | Chrome recorder for apps ghostclick cannot reach |
 | `scripts/check-diagram.js` | generated mermaid vs. the real parser |
+| `scripts/check-vocabulary.js` | every verb parses, writes back, draws and runs |
 | `scripts/start.js` | build what changed, then run — this is `npm start` |
 | `scripts/check-freshness.js` | rebuild-when-stale, cache headers, the version stamp |
 | `scripts/check-runner.js` | dropped commands, the run lock, surviving a throw |

@@ -303,8 +303,10 @@ else bad('it goes to the console', page.url());
 await page.waitForTimeout(5000);
 const steps = await page.locator('section').filter({ has: page.locator('ol') }).first()
   .innerText().catch(() => '');
-if (/goto/.test(steps)) ok('and the steps are there to watch', steps.split('\n').filter(Boolean)[1] ?? '');
-else bad('and the steps are there to watch', steps.slice(0, 50) || '(no run panel)');
+// What the panel says, not how it spells it: the run's own entry has to be in
+// there. Asserting on a verb's wording only tests the wording.
+if (/links\.html/.test(steps)) ok('and the steps are there to watch', steps.split('\n').filter(Boolean)[1] ?? '');
+else bad('and the steps are there to watch', steps.replace(/\s+/g, ' ').slice(0, 60) || '(no run panel)');
 
 // ---------------------------------------------------------------------------
 console.log('\n— 4d · a suite page shows ITS OWN runs ————————————');

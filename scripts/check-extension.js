@@ -18,10 +18,15 @@ const ok = (label, detail = '') => console.log(`  ok    ${label.padEnd(46)} ${de
 
 // ---------------------------------------------------------------- one copy
 console.log('\n— one source of truth ————————————————————————————————————');
-if (readFileSync(root('flow.js'), 'utf8') !== readFileSync(root('extension/lib/flow.js'), 'utf8')) {
-  fail('extension/lib/flow.js has drifted from flow.js — copy it again');
+// flow.js and the vocabulary it reads are both copied in, because the panel
+// parses and writes cases without a server. They drift the moment either is
+// edited, which is the point of checking.
+for (const f of ['flow.js', 'vocabulary.js']) {
+  if (readFileSync(root(f), 'utf8') !== readFileSync(root(`extension/lib/${f}`), 'utf8')) {
+    fail(`extension/lib/${f} has drifted from ${f} — copy it again`);
+  }
+  ok(`extension/lib/${f} matches ${f}`);
 }
-ok('extension/lib/flow.js matches flow.js');   // it drifts the moment flow.js changes
 const proposeSrc = readFileSync(root('extension/lib/propose.js'), 'utf8');
 if (!readFileSync(root('recorder.js'), 'utf8').includes('extension/lib/propose.js')) {
   fail('recorder.js no longer reads the shared proposer');

@@ -656,7 +656,7 @@ wss.on('connection', (ws) => {
       try {
         // Two front ends, one IR: the line DSL and the mermaid flow language
         // meet at validate() and the executor never learns which was typed.
-        const isFlow = /\b(flowchart|graph)\s+(TD|TB|LR|RL|BT)\b/.test(m.text) || /-{2,3}>/.test(m.text);
+        const isFlow = /\b(testcase|flowchart|graph)\s+(TD|TB|LR|RL|BT)\b/.test(m.text) || /-{2,3}>/.test(m.text);
         plan = validate(isFlow ? flatten(parseFlow(m.text)) : parse(m.text));
       } catch (err) {
         emit({ t: 'log', level: 'error', msg: err.message });

@@ -77,7 +77,7 @@ writeFileSync('/tmp/gc-taught.mmd', flow);
 if (errors.length) console.log(`\n  recorder notes: ${errors.join(' | ')}`);
 
 // ------------------------------------------------------------------ assertions
-if (!flow.includes('flowchart')) fail('no flow emitted');
+if (!/^testcase\b/m.test(flow)) fail('no case emitted');
 if (count < 5) fail(`expected at least 5 recorded steps, got ${count}`);
 if (flow.includes(TYPED_PASSWORD)) fail('THE TYPED PASSWORD IS IN THE SCRIPT');
 if (!/\$TODO/.test(flow)) fail('password should have been recorded as a vault reference');

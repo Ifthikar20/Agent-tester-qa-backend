@@ -277,7 +277,7 @@ export function removeCase(id, caseId) {
  * on it is already a test, and it is the one that catches "the URL moved".
  */
 export function pageCheckFlow(suite, page) {
-  const lines = [`%% suite "${suite.name} · ${page.name}"`, 'flowchart TD', `  n0(("${page.url}"))`];
+  const lines = [`%% suite "${suite.name} · ${page.name}"`, 'testcase TD', `  n0(("${page.url}"))`];
   const edges = [];
   let prev = 'n0', n = 1;
   for (const e of page.expect) {

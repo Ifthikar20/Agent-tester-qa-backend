@@ -8,6 +8,7 @@ import { writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { parse } from '../parse.js';
 import { toMermaid } from '../diagram.js';
+import { asFlowchart, toFlow } from '../flow.js';
 
 const require = createRequire(import.meta.url);
 const MERMAID = require.resolve('mermaid/dist/mermaid.min.js');
@@ -63,6 +64,30 @@ for (const [name, [text]] of Object.entries(CASES)) {
     docs.push({ name, src: toMermaid(parse(text)) });
   }
 }
+
+/**
+ * A test case is not a flowchart — but it must still become one on demand, or
+ * the "paste it into a README and GitHub draws your suite" promise is a lie.
+ * These go through the same real parser as the block-beta reports, because a
+ * translation nobody renders is a translation nobody knows is broken.
+ */
+const FLOWS = {
+  'case → flowchart': toFlow({ suite: 'Recorded flow', steps: [
+    { op: 'goto', url: 'https://example.com/learn' },
+    { op: 'scroll', to: 'top' },
+    { op: 'click', target: 'navigation/link:Learn' },
+    { op: 'click', target: 'navigation/link:Changelog' },
+    { op: 'expect', assert: 'urlContains', value: '/changelog' },
+  ] }),
+  // The characters mermaid cannot lex, which the case is now allowed to keep.
+  'case with brackets': toFlow({ suite: 'Downloads (2024)', steps: [
+    { op: 'goto', url: 'https://example.com/files' },
+    { op: 'click', target: 'link:Download (PDF) [2024]' },
+    { op: 'fill', target: 'textbox:Note', value: 'a "quoted" note' },
+    { op: 'expect', assert: 'urlContains', value: '/files' },
+  ] }),
+};
+for (const [name, text] of Object.entries(FLOWS)) docs.push({ name, src: asFlowchart(text) });
 
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
 const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
