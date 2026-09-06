@@ -598,6 +598,14 @@ wss.on('connection', async (ws) => {
       return;
     }
 
+    // The canvas asks for a picture. Frames are damage-driven, so a viewer that
+    // arrives while the page is sitting still has nothing to show and no reason
+    // to expect anything — this is how it gets the current one.
+    if (m.t === 'frame.request') {
+      if (lastFrame && ws.readyState === 1) ws.send(lastFrame, { binary: true });
+      return;
+    }
+
     if (m.t === 'inspect' && !running) return void publishTargets();
 
     // ------------------------------------------------------------ teach mode

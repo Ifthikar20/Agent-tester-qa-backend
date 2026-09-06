@@ -15,6 +15,7 @@ npm start                         # → http://localhost:3000
 npm run check                     # end-to-end, against a running server
 npm run check:suites              # onboarding, the origin gate, suite runs
 npm run check:recording           # repeated links, scrolling, jump-to-top, timeouts
+npm run check:console             # the canvas paints, and the wheel reaches the page
 npm run check:teach               # demonstrate by hand, then replay what it wrote
 npm run check:fidelity            # does the replay reproduce it? would coordinates have?
 npm run check:extension           # the picker, the shared proposer, the hand-off
@@ -433,6 +434,26 @@ turns out to be true:
 Each of those is a real gap, not a subtlety. If your flow needs one, say so and
 it becomes an op.
 
+## A black canvas is not a crash
+
+Chrome's screencast is damage-driven: a page sitting still emits no frames at
+all. The server primes each new socket with the last one it saw — but the socket
+opens when the app loads, and the canvas only exists once you navigate to the
+console. So that frame arrived, found no canvas, and was dropped. Open the
+console on an idle page and you waited forever for a second frame that was never
+coming.
+
+The store keeps the most recent frame now and replays it when a canvas attaches,
+and the canvas can ask for one (`frame.request`) — on mount, and after any
+reconnect.
+
+Until a frame lands there is a placeholder that says which kind of waiting this
+is: connecting to the runner, opening a page, or waiting on an idle one. A black
+rectangle is indistinguishable from a crash, and sends you to read the wrong
+three files.
+
+---
+
 ## When the page has two of everything
 
 Three things broke the first time this met a real marketing site, and the first
@@ -460,8 +481,9 @@ read.
 
 **Scrolling did not exist.** Not as an op, and not even as a gesture — the
 console forwarded clicks and keys but never the wheel, so anything below the
-fold could be watched going past and never touched. The canvas now forwards the
-wheel over CDP, there are ↑ Top / ↓ Bottom buttons, and `scroll` is an op:
+fold could be watched going past and never touched. **Scroll the driven page by
+putting the pointer over the canvas and using your wheel or trackpad**, or the
+↑ Top / ↓ Bottom buttons for a long one. And `scroll` is an op:
 
 ```
 scroll to bottom
@@ -706,6 +728,7 @@ silently inside someone else's docs.
 | `scripts/check-diagram.js` | generated mermaid vs. the real parser |
 | `scripts/check-suites.js` | onboarding, the one-origin rule, the gate, suite runs |
 | `scripts/check-recording.js` | ambiguous links, scrolling, jump-to-top, URL timeouts |
+| `scripts/check-console.js` | the canvas paints on arrival, and the wheel reaches the page |
 | `public/site.html` | Harbour — the same links in header and footer, and a long page |
 
 ---

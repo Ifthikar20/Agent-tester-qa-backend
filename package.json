@@ -11,6 +11,7 @@
     "check": "node scripts/check.js",
     "check:suites": "node scripts/check-suites.js",
     "check:recording": "node scripts/check-recording.js",
+    "check:console": "node scripts/check-console.js",
     "check:diagram": "node scripts/check-diagram.js",
     "check:teach": "node scripts/check-teach.js",
     "check:extension": "node scripts/check-extension.js",
