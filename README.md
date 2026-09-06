@@ -477,6 +477,44 @@ offer the one action that unblocks it.
 
 ---
 
+## The sidebar is not a navy slab
+
+It was, and a dark rail is a decade-old convention that puts the heaviest block
+of colour on the part of the screen carrying the least information. On a tool
+whose whole point is watching a browser being driven, the loudest thing on the
+page should not be the table of contents.
+
+It is white now, separated by a hairline, with one magenta accent that marks
+only what is selected — the open suite, the section you are in, the one button
+you are meant to press. Section labels, line icons at 16px drawn inline rather
+than pulled from a 40kB font, a tinted pill for the current item.
+
+Two magentas, because one cannot do both jobs: `brand` (#e6007c) is the fill,
+which white text clears 4.5:1 on, and `brand-2` (#c2006a) is the same hue dark
+enough to be 13px text on white at 6.0:1. Reaching for the bright one as small
+text is the usual way an accent ends up illegible.
+
+Three things the repaint fixed rather than caused:
+
+**A disabled button was unreadable.** Every primary action carried
+`disabled:opacity-40`, which was survivable on near-black and is not on
+magenta — white on 40%-opacity pink. Disabled controls are exempt from the
+contrast rules and should still be legible; they now go neutral grey instead of
+transparent.
+
+**The selected section came out grey.** The sub-nav used `active-class` to swap
+`text-ink-3` for `text-brand-2`, and both are plain text utilities, so which one
+won was decided by stylesheet order rather than by the order they were written.
+It is bound by route name now.
+
+**The onboarding stepper could not tell you where you were:** the current step
+and a finished step were both `bg-ink text-white`, character for character.
+Current is the accent, done is ink.
+
+The pass/fail chart pair is deliberately unchanged — grey and red separate by
+ΔE 9.4 under deuteranopia and that was measured, not guessed. Repainting the
+chrome is no reason to re-roll it.
+
 ## Buttons that admit they are working
 
 Half the actions here take seconds — a suite run drives a real browser — and a
