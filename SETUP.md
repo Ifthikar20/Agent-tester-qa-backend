@@ -20,31 +20,43 @@ It prints what it starts with:
   secrets     ->  QA_PASS, QA_USER
 ```
 
-Open `http://localhost:3000` and press **Run script** to watch it drive the
-bundled demo app and go red on a planted bug. If that works, everything works.
+Open `http://localhost:3000`. It lands on **Test suites**.
 
-**Watch the canvas, not your own page.** Run script drives a *separate* browser
-that ghostclick launched and streams it onto that canvas — your mouse and your
-tabs are never touched. If you would rather see a real window being driven:
+There is no build step to run first: the UI is a Vue app whose build is
+committed, so `npm start` serves it. (`npm run dev` puts Vite in front of it on
+:5173 if you want to work on the UI itself.)
+
+## 2 · Point it at your app
+
+Paste your app's URL into the field on that screen and press **Add and test**.
+
+It stops once to say the origin is not allowed yet, with a button. Press it. The
+runner refuses to open an origin nobody approved and no script can approve one,
+so this is a person deciding, once, per origin.
+
+Then it opens the page, names the suite from the page title, reads what is on it,
+asserts you reached it, and runs that. You land on a suite that is already green
+or red — which tells you whether the runner can drive your app at all, before you
+invest in describing it properly.
+
+If it went green, click **Pages**. The links your app's own nav points at are
+offered as one-click adds, so the rest of the pages take a few clicks rather than
+a few minutes of typing routes.
+
+**Watch the canvas, not your own page.** Everything ghostclick drives happens in
+a *separate* browser it launched and streams onto the canvas in **Console** —
+your mouse and your tabs are never touched. If you would rather see a real
+window being driven:
 
 ```bash
 HEADED=1 npm start
 ```
 
-## 2 · Point it at your app
-
-On startup it drives the bundled demo app, because it has to drive something.
-That is what the feed shows and what the target panel scans until you point it
-elsewhere.
-
-Type the host into **Page** — `treasury.acme.com` is enough, no scheme needed —
-and press **Open**.
-
-Or start on your own app directly, which allows that origin at the same time,
-since naming it on the command line is the same decision the Allow button is:
+You can also start pointed at your own app, which allows that origin at the same
+time — naming it on the command line is the same decision the Allow button is:
 
 ```bash
-PORT=3100 HOME_URL=http://18.208.3.3/ npm start
+PORT=3100 HOME_URL=https://staging.acme.com/ npm start
 ```
 
 The first time, it stops and says the origin is not allowed yet, with a button
