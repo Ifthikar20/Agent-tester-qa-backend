@@ -40,6 +40,9 @@
     font-size:13px; color:var(--ink-dim); background:var(--panel); }
   .dot { width:7px; height:7px; border-radius:50%; background:var(--ink-dim); }
   .dot.live { background:var(--pass); } .dot.busy { background:var(--signal); }
+  #status.failtext { color:var(--fail); }
+  .statusbar { min-width:0; }
+  #status { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .spacer { margin-left:auto; }
 
   .card { background:var(--panel); border:1px solid var(--edge); border-radius:4px;
@@ -194,6 +197,7 @@
       <p class="empty" style="margin-bottom:10px">
         Hit record, then click and type on the feed. Your demonstration becomes the script.
       </p>
+      <p id="rhint" class="fine hide" style="margin-bottom:10px;color:var(--signal)"></p>
       <div class="row" style="margin-top:0">
         <button class="go" id="rec">Record</button>
         <button id="recStop" disabled>Stop</button>
@@ -366,6 +370,14 @@ function handle(ev) {
 
     case 'record.state':
       recording = ev.on;
+      if (ev.on) {
+        $('rhint').textContent =
+          `Starts from ${$('url').value} — make sure that URL alone reaches this screen, ` +
+          `or the replay will land somewhere else.`;
+        $('rhint').classList.remove('hide');
+      } else {
+        $('rhint').classList.add('hide');
+      }
       $('rec').disabled = ev.on;
       $('recStop').disabled = !ev.on;
       $('view').parentElement.classList.toggle('rec', ev.on);
@@ -374,6 +386,7 @@ function handle(ev) {
       break;
 
     case 'run.start':
+      lastError = null;
       $('log').innerHTML = ''; $('run').disabled = true;
       $('dot').className = 'dot busy';
       $('status').textContent = `Running — ${ev.suite}`;
@@ -381,12 +394,21 @@ function handle(ev) {
 
     case 'step.start': line(ev.i, describe(ev.step), '·'); break;
     case 'step.pass':  mark(ev.i, 'pass', '✓', ev.ms); break;
-    case 'step.fail':  mark(ev.i, 'fail', '✕', ev.ms, ev.error); break;
+    case 'step.fail':
+      lastError = ev.error;
+      mark(ev.i, 'fail', '✕', ev.ms, ev.error);
+      break;
 
     case 'run.end':
       $('run').disabled = false;
       $('dot').className = 'dot live';
-      $('status').textContent = ev.ok ? 'Live — run passed' : 'Live — run failed';
+      // "run failed" on its own sends you hunting through the log. Say what
+      // broke, right here.
+      $('status').textContent = ev.ok
+        ? 'Live — run passed'
+        : `Live — run failed: ${firstLine(lastError) || 'see the run log'}`;
+      $('status').title = lastError ?? '';
+      $('status').className = ev.ok ? '' : 'failtext';
       break;
 
     case 'log':
@@ -467,7 +489,14 @@ function mark(i, cls, glyph, ms, err) {
   if (err) line(`${i}e`, err, ' ', 'fail');
 }
 
-let recording = false, lastFlow = '', pendingUrl = null;
+let recording = false, lastFlow = '', pendingUrl = null, lastError = null;
+
+/** The first line of an error, short enough for a status bar. */
+const firstLine = (e) => {
+  if (!e) return '';
+  const l = String(e).split('\n')[0].trim();
+  return l.length > 96 ? l.slice(0, 93) + '…' : l;
+};
 
 function chips(box, items, onRemove) {
   box.innerHTML = '';

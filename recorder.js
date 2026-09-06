@@ -136,9 +136,15 @@ export class Recorder {
     return this.steps;
   }
 
-  start(url) {
+  /**
+   * @param entry what the page offered when recording began. Loading a URL is
+   *   not the same as being where you were: in an SPA the path can be decorative
+   *   and give you the login screen instead. Keeping a fingerprint lets replay
+   *   say THAT, instead of timing out on an element three steps later.
+   */
+  start(url, entry) {
     this.recording = true;
-    this.steps = url ? [{ op: 'goto', url }] : [];
+    this.steps = url ? [{ op: 'goto', url, entry }] : [];
     this.lastUrl = url ?? null;
     return this.steps;
   }

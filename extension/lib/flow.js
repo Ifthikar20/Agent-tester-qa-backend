@@ -115,6 +115,7 @@ export function parseFlow(text) {
   const nodes = new Map();
   const edges = [];
   const marks = new Map();      // step index -> where the click landed
+  let entry = null;             // what the entry page offered when recorded
   let suite = 'Flow';
 
   const declare = (token) => {
@@ -145,6 +146,10 @@ export function parseFlow(text) {
     // diagram while still carrying its own title.
     if ((m = line.match(/^(?:%%)?\s*suite\s+(.+)$/i))) {
       suite = unq(m[1].trim().replace(/^["']|["']$/g, ''));
+      continue;
+    }
+    if ((m = line.match(/^%%\s*entry\s+(\[.*\])$/))) {
+      try { entry = JSON.parse(m[1]); } catch { /* unreadable, so ignore it */ }
       continue;
     }
     if ((m = line.match(/^%%\s*at\s+(\d+)\s+(-?\d+),(-?\d+)\s+(\d+)x(\d+)\s+in\s+(\d+)x(\d+)$/))) {
@@ -192,6 +197,7 @@ export function parseFlow(text) {
   if (marks.size) {
     for (const c of cases) c.steps.forEach((s, i) => { if (marks.has(i)) s.at = marks.get(i); });
   }
+  if (entry) for (const c of cases) { const g = c.steps.find((s) => s.op === 'goto'); if (g) g.entry = entry; }
   return { suite, cases };
 }
 
@@ -328,6 +334,10 @@ export function toFlow(plan) {
   const marks = plan.steps
     .map((s, i) => (s.at ? `%% at ${i} ${s.at.x},${s.at.y} ${s.at.w}x${s.at.h} in ${s.at.vw}x${s.at.vh}` : null))
     .filter(Boolean);
+
+  // What the entry page offered when this was recorded.
+  const entry = plan.steps.find((s) => s.op === 'goto' && s.entry?.length);
+  if (entry) marks.unshift(`%% entry ${JSON.stringify(entry.entry)}`);
 
   return [
     `%% suite "${nodeText(plan.suite ?? 'Recorded flow')}"`,

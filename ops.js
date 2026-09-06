@@ -1,5 +1,5 @@
 import { sleep } from './cursor.js';
-import { parseTarget, locate, aliasesFor } from './targets.js';
+import { parseTarget, locate, aliasesFor, discover } from './targets.js';
 import * as origins from './origins.js';
 import * as vault from './secrets.js';
 
@@ -103,8 +103,42 @@ async function pointAt(page, target, ctx, opts = {}) {
 export const OPS = {
   async goto(page, step, ctx) {
     checkUrl(step.url);                       // re-checked at run time, not just at validate
+
+    // A goto to the URL already on screen does NOT reload — Chrome treats it as
+    // a same-document navigation. So without this a run inherits whatever the
+    // last one left behind: the flow passes because the app happened to still
+    // be logged in, and fails on a machine that starts cold. performance
+    // .timeOrigin only changes when a real document loads, so it is the honest
+    // test for whether one did.
+    const before = await page.evaluate(() => performance.timeOrigin).catch(() => null);
     await page.goto(step.url, { waitUntil: 'domcontentloaded' });
+    const after = await page.evaluate(() => performance.timeOrigin).catch(() => null);
+    if (before !== null && after === before) {
+      await page.reload({ waitUntil: 'domcontentloaded' });
+    }
+
     if (ctx.onNavigate) await ctx.onNavigate(page);
+
+    // Loading a URL is not the same as being where you were. In an SPA the path
+    // is often decorative — pushed with history.pushState and never read on load
+    // — so the entry URL of a recording made mid-session hands you the login
+    // screen. Without this the run limps on and times out several steps later on
+    // an element that was never going to be there.
+    if (step.entry?.length) {
+      const here = (await discover(page).catch(() => [])).map((t) => t.target);
+      const found = step.entry.filter((t) => here.includes(t)).length;
+      if (found / step.entry.length < 0.5) {
+        throw new Error(
+          `This recording starts part-way through a session. ${step.url} loads a ` +
+          `different page than the one it was recorded on — ` +
+          `${found} of ${step.entry.length} expected elements are here.\n` +
+          `  expected: ${step.entry.slice(0, 6).join(', ')}\n` +
+          `  found:    ${here.slice(0, 6).join(', ') || '(nothing interactive)'}\n` +
+          `Record again from a URL that reaches this screen on its own — usually ` +
+          `the login — so the flow can get itself back here.`
+        );
+      }
+    }
   },
 
   async click(page, step, ctx) {

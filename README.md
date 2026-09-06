@@ -206,6 +206,37 @@ Fine if the layout moved; suspicious if it did not.
 That is the case coordinates genuinely catch and a name cannot: a target that
 resolves cleanly to exactly one element — the wrong one.
 
+### “Live — run failed”, with no reason
+
+Two things used to make that unhelpful, and both are fixed.
+
+The status bar now carries the first line of whatever broke, and the full text
+is in its tooltip and the run log.
+
+And the most common failure now names itself. If you press **Record** while
+already deep in the app — logged in, three screens down — the recording's entry
+URL is wherever you happened to be. In a single-page app the path is usually
+decorative: pushed with `history.pushState`, never read on load. So replaying
+`/app#/settings` hands the runner the **login screen**, and the first step waits
+eight seconds for a field that was never going to appear.
+
+Recording now fingerprints what the entry page offered, and replay checks it
+before doing anything else:
+
+```
+✕ step 0 — This recording starts part-way through a session.
+  http://localhost:3000/demo.html#/settings loads a different page than the one
+  it was recorded on — 1 of 4 expected elements are here.
+    expected: link:Settings, button:General, button:Profile, textbox:Time zone
+    found:    link:Settings, textbox:Email, textbox:Password, button:Sign in
+  Record again from a URL that reaches this screen on its own — usually the
+  login — so the flow can get itself back here.
+```
+
+**Start recording from a URL that stands on its own.** Usually the login page.
+Record the sign-in as part of the flow; that is what makes it repeatable on a
+machine that has never seen your session.
+
 ### What a recording still does not capture
 
 Being straight about the edges, because this is where “it didn’t run what I did”

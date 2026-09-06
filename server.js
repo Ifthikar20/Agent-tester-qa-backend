@@ -269,7 +269,10 @@ wss.on('connection', async (ws) => {
 
     // ------------------------------------------------------------ teach mode
     if (m.t === 'record.start' && !running) {
-      const steps = recorder.start(page.url());
+      // Fingerprint where the recording begins, so replay can tell you when the
+      // entry URL does not actually get you back here.
+      const entry = await discover(page).then((i) => i.map((t) => t.target)).catch(() => []);
+      const steps = recorder.start(page.url(), entry);
       emit({ t: 'record.state', on: true });
       emit({ t: 'recorded', step: steps[0], count: steps.length,
              flow: toFlow({ suite: 'Recorded flow', steps }) });

@@ -82,7 +82,12 @@ Undo step            drop the last one
 Stop                 done
 ```
 
-Record the login as part of the flow. When you type the password, tick
+Start recording from a URL that stands on its own — the login page. Pressing
+Record while already three screens deep produces a flow whose first step is
+"go to wherever I happened to be", and in a single-page app that URL usually
+lands on the login screen instead.
+
+Record the sign-in as part of the flow. When you type the password, tick
 **secret** — the value is dropped in the browser and the step becomes `$TODO`.
 
 Then **Send to ghostclick**. It is validated and dropped into the script box;
@@ -107,6 +112,10 @@ below the feed turns green step by step, and red at whatever breaks.
 
 **“This step still says $TODO”** — the recorder deliberately never captured that
 password. Rename it to a vault key you have set.
+
+**“This recording starts part-way through a session”** — you pressed Record
+while already deep in the app, and its URL does not get anyone back there.
+Record again from the login page, with the sign-in as part of the flow.
 
 **A step cannot find its element** — open **Targets on this page** to see what
 that page actually offers, and click a chip to drop it into the script.

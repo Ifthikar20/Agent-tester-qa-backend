@@ -97,8 +97,32 @@ for (const s of steps) {
 }
 if (!end.ok) fail('the taught script did not replay cleanly');
 
+// ------------------------------------------------- recorded mid-session
+console.log('\n— a recording that starts part-way through ————————————————');
+// The most common way a recording fails: you hit record while already deep in
+// the app, and its URL does not get anyone back there. In an SPA the path is
+// often decorative, so the entry URL hands you the login screen instead.
+steps = [];
+send({ t: 'command', text: `%% suite "Mid-session"
+flowchart TD
+  n0(("${BASE}/demo.html#/settings"))
+
+  n0 -->|fill 'Time zone' : label = 'x'| n0
+
+%% entry ["link:Settings","button:General","button:Profile","textbox:Time zone"]` });
+const midEnd = await new Promise((r) => { waiter = r; });
+const first = steps[0];
+if (midEnd.ok) fail('a mid-session recording replayed clean, which it should not');
+if (first?.ok !== false) fail('it failed somewhere other than the goto — the entry check did not run');
+if (!/part-way through a session/.test(first.error ?? '')) {
+  fail(`the failure did not explain itself:\n        ${first.error}`);
+}
+console.log(`  ✕ step 0 — ${first.error.split('\n')[0]}`);
+console.log('  fails at the goto, not eight seconds later on an unrelated element');
+
 console.log(`
   OK — demonstrated by hand, written as mermaid, replayed against the app.
-       The typed password never entered the script.
+       The typed password never entered the script, and a recording that
+       begins mid-session says so instead of timing out downstream.
 `);
 ws.close();
