@@ -155,6 +155,18 @@ password. Rename it to a vault key you have set.
 while already deep in the app, and its URL does not get anyone back there.
 Record again from the login page, with the sign-in as part of the flow.
 
+**A step waits 8 seconds for something in a menu** — the menu was open while you
+recorded and is shut on replay. The recorder usually catches this and writes a
+`hover` step for you; if it did not, add one by hand:
+
+```
+home -->|hover 'Use Cases' : link; click 'Catch harmful answers' : menuitem| home
+```
+
+The failure message lists what the page does have, which is often a plain
+`link:` version of the same thing — a better target, since it does not need a
+menu to be open.
+
 **A step cannot find its element** — open **Targets on this page** to see what
 that page actually offers, and click a chip to drop it into the script.
 

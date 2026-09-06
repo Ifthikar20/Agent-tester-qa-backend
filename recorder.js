@@ -68,6 +68,64 @@ const LISTENERS = `
 
   var FIELD = /^(input|textarea|select)$/;
 
+  // ---- what the pointer revealed -------------------------------------------
+  // A dropdown's items are not in the page until the pointer is on the thing
+  // that opens them. Recording only the click gives you a script that waits
+  // eight seconds for a menu nobody opened. So: keep a short trail of what the
+  // pointer has been over, and a periodic sample of what is actually visible.
+  // If a click lands on something that was NOT visible a moment ago, the
+  // pointer put it there, and the last thing it was over that WAS already
+  // visible is what opened it.
+  var trail = [];
+  var baseline = new WeakSet();
+  var onScope = false;
+
+  function isVisible(el) {
+    return !!(el.offsetParent !== null || el.getClientRects().length);
+  }
+
+  /**
+   * What is on the page when the pointer is NOT provoking anything.
+   *
+   * Sampling on a plain timer was wrong: pause on a menu for longer than the
+   * interval and the open menu becomes the baseline, so the click that follows
+   * looks like it was always available and the hover goes unrecorded. The
+   * baseline is only refreshed while nothing interactive is hovered.
+   */
+  function sample() {
+    if (onScope) return;
+    baseline = new WeakSet();
+    var all = document.querySelectorAll(SCOPE);
+    for (var i = 0; i < all.length && i < 400; i++) {
+      if (isVisible(all[i])) baseline.add(all[i]);
+    }
+  }
+  sample();
+  setInterval(sample, 600);
+
+  document.addEventListener('mouseover', function (e) {
+    var el = e.target.closest && e.target.closest(SCOPE);
+    if (!el) return;
+    onScope = true;
+    if (trail[trail.length - 1] !== el) trail.push(el);
+    if (trail.length > 8) trail.shift();
+  }, true);
+
+  document.addEventListener('mouseout', function (e) {
+    var to = e.relatedTarget;
+    if (to && to.closest && to.closest(SCOPE)) return;   // still on something
+    onScope = false;
+    sample();                                            // pointer is idle: re-baseline
+  }, true);
+
+  /** The most recent thing the pointer was over that was already on the page. */
+  function openerOf(el) {
+    for (var i = trail.length - 1; i >= 0; i--) {
+      if (trail[i] !== el && baseline.has(trail[i])) return trail[i];
+    }
+    return null;
+  }
+
   document.addEventListener('click', function (e) {
     // A click on nothing in particular is not an action. Recording it anyway
     // means naming a <div> by whatever text happens to be inside it, which is
@@ -78,6 +136,12 @@ const LISTENERS = `
     // Clicking a text field is just focus; the change that follows carries the
     // real intent. Checkboxes and radios are the exception — the click IS it.
     if (FIELD.test(tag) && ['checkbox','radio','submit','button'].indexOf(el.type) === -1) return;
+
+    // Was this even on the page before the pointer went looking for it?
+    if (!baseline.has(el)) {
+      var opener = openerOf(el);
+      if (opener) report('hover', opener, null, null);
+    }
     report('click', el, null, e);
   }, true);
 
@@ -230,6 +294,7 @@ export class Recorder {
     }
 
     const at = p.at;
+    if (p.kind === 'hover') return this.#push({ op: 'hover', target, at });
     if (p.kind === 'click') return this.#push({ op: 'click', target, at });
     if (p.kind === 'fill') {
       return this.#push(p.secret

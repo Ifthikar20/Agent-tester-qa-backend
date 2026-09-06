@@ -77,6 +77,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
       await noteUrl(state, m.pick.href);
       const target = m.target;
       if (m.op === 'click') state.steps.push({ op: 'click', target });
+      if (m.op === 'hover') state.steps.push({ op: 'hover', target });
       if (m.op === 'fill') {
         state.steps.push(m.secret
           ? { op: 'fill', target, valueRef: 'secrets.TODO' }
@@ -87,6 +88,8 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
       await save(state);
       tell({ t: 'state', state });
 
+      // A hover is recorded but not performed: the pointer is already there,
+      // and re-firing it would close what it just opened.
       if ((m.op === 'click' || m.op === 'fill') && state.tabId) {
         chrome.tabs.sendMessage(state.tabId, { t: 'perform', op: m.op, value: m.value })
           .catch(() => {});

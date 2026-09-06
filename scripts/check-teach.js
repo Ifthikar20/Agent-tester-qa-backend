@@ -97,6 +97,50 @@ for (const s of steps) {
 }
 if (!end.ok) fail('the taught script did not replay cleanly');
 
+// --------------------------------------------------- a hover-only menu
+console.log('\n— a menu that only exists while the pointer is on it ————————');
+// The shape that breaks a recorder which only records clicks: the items are
+// not in the page until something is hovered.
+const probe2 = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
+const mp = await probe2.newPage({ viewport: VIEW });
+await mp.goto(`${BASE}/menu.html`);
+const ucBox = await mp.getByRole('link', { name: 'Use Cases', exact: true }).boundingBox();
+const UC = { x: Math.round(ucBox.x + ucBox.width / 2), y: Math.round(ucBox.y + ucBox.height / 2) };
+await mp.mouse.move(UC.x, UC.y);
+const miBox = await mp.getByRole('menuitem').first().boundingBox();
+const MI = { x: Math.round(miBox.x + miBox.width / 2), y: Math.round(miBox.y + miBox.height / 2) };
+await probe2.close();
+
+flow = '';
+send({ t: 'open', url: `${BASE}/menu.html` });
+await wait(1400);
+// Park the pointer somewhere harmless first. The previous section left it on
+// the nav, which meant the menu was already open when recording began — the
+// recorder was right that nothing had been revealed.
+send({ t: 'human.move', x: 640, y: 520 });
+await wait(600);
+send({ t: 'record.start' });
+await wait(500);
+send({ t: 'human.move', ...UC });      // pointer on the trigger — menu opens
+await wait(500);
+await clickAt(MI);                     // and straight to the item it revealed
+await wait(700);
+send({ t: 'record.stop' });
+await wait(800);
+
+console.log(flow.split('\n').map((l) => '  ' + l).join('\n'));
+if (!/hover 'Use Cases'/.test(flow)) {
+  fail('the recorder did not notice that a hover opened the menu');
+}
+console.log('  the hover was recorded on its own — no one had to know to add it');
+
+steps = [];
+send({ t: 'command', text: flow });
+const menuEnd = await new Promise((r) => { waiter = r; });
+for (const s of steps) console.log(`  ${s.ok ? '✓' : '✕'} ${s.desc}` + (s.error ? `\n      ${s.error.split('\n')[0]}` : ''));
+if (!menuEnd.ok) fail('the recording of a hover menu did not replay');
+console.log('  and it replays');
+
 // ------------------------------------------------- recorded mid-session
 console.log('\n— a recording that starts part-way through ————————————————');
 // The most common way a recording fails: you hit record while already deep in

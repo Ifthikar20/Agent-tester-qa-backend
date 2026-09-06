@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Aperture — Use cases</title>
+<style>
+  :root { font-family: ui-sans-serif, system-ui, sans-serif; }
+  body { margin:0; background:#fbfaf9; color:#1b1b1f; }
+  nav { background:#14141a; color:#fff; padding:0 28px; display:flex; gap:26px; align-items:center; height:56px; }
+  nav strong { font-size:16px; }
+  .item { position:relative; height:56px; display:flex; align-items:center; }
+  .item > a { color:#e7e7ee; text-decoration:none; font-size:14px; }
+  /* The menu does not exist in the page until the pointer is on its parent.
+     This is the shape that breaks a recorder which only records clicks. */
+  .menu { display:none; position:absolute; top:56px; left:0; width:290px;
+          background:#fff; border:1px solid #dcdce4; border-radius:9px;
+          box-shadow:0 12px 28px rgba(0,0,0,.14); padding:8px; z-index:5; }
+  .item:hover .menu { display:block; }
+  .menu a { display:block; padding:11px 12px; border-radius:6px; color:#1b1b1f;
+            text-decoration:none; font-size:14px; }
+  .menu a:hover { background:#f1f1f6; }
+  .menu a small { display:block; color:#6a6a78; font-size:12px; margin-top:2px; }
+  section { padding:44px 28px; border-bottom:1px solid #e8e8ef; min-height:200px; }
+  h1 { font-size:22px; margin:0 0 8px; }
+  p { color:#5a5a68; margin:0; }
+</style>
+</head>
+<body>
+<nav>
+  <strong>Aperture</strong>
+  <div class="item">
+    <a href="#features" id="uc">Use Cases</a>
+    <div class="menu" role="menu">
+      <a role="menuitem" href="#uc-security">Catch harmful answers
+        <small>Brand Security — false or unfavourable claims, flagged</small></a>
+      <a role="menuitem" href="#uc-ingest">Measure if it gets you right
+        <small>Brand Ingestion — which facts the answers reflect</small></a>
+    </div>
+  </div>
+  <div class="item"><a href="#pricing">Pricing</a></div>
+</nav>
+
+<section id="features"><h1>Features</h1><p>What the product does.</p></section>
+<section id="uc-security"><h1>Catch harmful answers</h1><p>Flagged with the exact sentence.</p></section>
+<section id="uc-ingest"><h1>Measure if it gets you right</h1><p>Fact coverage across engines.</p></section>
+<section id="pricing"><h1>Pricing</h1><p>Per seat, per month.</p></section>
+</body>
+</html>

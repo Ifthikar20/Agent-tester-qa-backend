@@ -21,6 +21,7 @@
  *
  * Edge label is the action, `;`-separated for several on one transition:
  *   click 'Name' : role
+ *   hover 'Name' : role          (a menu that opens on hover)
  *   fill  'Name' : role = <value>
  *   check 'Name' : role is <n> chars
  *   wait  <n>ms
@@ -79,6 +80,11 @@ function op(clause) {
   let m;
   if ((m = s.match(/^click\s+(.+)$/i))) {
     return { op: 'click', target: target(m[1]) };
+  }
+  // Go there and stay, without clicking — for a menu that only exists while
+  // the pointer is on whatever opens it.
+  if ((m = s.match(/^hover\s+(.+)$/i))) {
+    return { op: 'hover', target: target(m[1]) };
   }
   if ((m = s.match(/^fill\s+(.+?)\s*=\s*(.+)$/i))) {
     return { op: 'fill', target: target(m[1]), ...value(m[2]) };
@@ -268,6 +274,7 @@ const showTarget = (t) => {
 function showOp(step) {
   switch (step.op) {
     case 'click': return `click ${showTarget(step.target)}`;
+    case 'hover': return `hover ${showTarget(step.target)}`;
     case 'fill': {
       // A recorded password must never round-trip as its value.
       const v = step.valueRef

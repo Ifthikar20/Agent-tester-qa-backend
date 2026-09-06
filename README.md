@@ -291,6 +291,56 @@ before doing anything else:
 Record the sign-in as part of the flow; that is what makes it repeatable on a
 machine that has never seen your session.
 
+### A menu that is only there while you point at it
+
+The most common way a recording of a real site fails. A dropdown's items do not
+exist in the page until the pointer is on whatever opens them, so a script that
+only clicks waits eight seconds for a menu nobody opened:
+
+```
+✕ click menuitem:Catch harmful AI answers …
+  locator.waitFor: Timeout 8000ms exceeded
+```
+
+Three things now deal with it.
+
+**The recorder notices.** It keeps a baseline of what is on the page when the
+pointer is *not* provoking anything, and a short trail of what the pointer has
+been over. A click on something that was not in the baseline was revealed by the
+pointer, so the last thing it was over that *was* already there gets recorded as
+a `hover` first — without anyone having to know to add it:
+
+```
+n0 -->|hover 'Use Cases' : link; click 'Catch harmful answers …' : menuitem| n1
+```
+
+The baseline is only refreshed while nothing is hovered. Sampling on a plain
+timer was wrong: pause on an open menu for longer than the interval and the open
+menu becomes the baseline, so the click that follows looks like it was always
+available.
+
+**The cursor approaches instead of lunging.** It used to glide straight from the
+trigger to the item, which cuts the corner and leaves the region keeping the menu
+open — the menu shut mid-glide and the runner waited for an element that had
+stopped existing. It now enters the target's box at the point nearest the cursor
+and then settles to the aim point: two short legs that stay inside.
+
+**And `hover` is an op you can write by hand**, in the flow language and in the
+extension's picker (**Hover it**), for the cases nothing infers.
+
+**When a target still cannot be found**, the failure names what the page does
+have, which is usually the answer:
+
+```
+"menuitem:Catch harmful answers …" never became visible.
+  The page does have: link:Catch harmful AI answers.
+  If yours lives in a menu, put a hover step before it:
+    home -->|hover 'Use Cases' : link; click '…' : menuitem| home
+```
+
+Often the plain `link:` version is the better target anyway — it does not depend
+on a menu being open.
+
 ### What a recording still does not capture
 
 Being straight about the edges, because this is where “it didn’t run what I did”
@@ -298,7 +348,6 @@ turns out to be true:
 
 - **Scroll position.** Steps scroll their own element into view; a scroll you did
   for its own sake is not a step.
-- **Hover.** A menu that opens on hover and closes on leave is not recorded.
 - **Drag, and anything mid-gesture.**
 - **Keyboard-only navigation** — tabbing to a control and pressing Enter records
   as nothing, because no element was clicked.
@@ -510,6 +559,7 @@ silently inside someone else's docs.
 | `public/index.html` | canvas feed, cursor overlay, editor, targets, diagram |
 | `public/demo.html` | Meridian — truncates a username to 16 chars |
 | `public/shop.html` | Nimbus — cart total ignores quantity |
+| `public/menu.html` | Aperture — a dropdown that only exists on hover |
 | `scripts/check.js` | end-to-end: rejections, discovery, all three runs |
 | `scripts/check-teach.js` | demonstrate by hand, replay what it wrote |
 | `scripts/check-extension.js` | picker suppression, replay, hand-off, real Chrome load |

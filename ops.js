@@ -69,9 +69,39 @@ function drift(at, box, viewport) {
            dist: Math.round(Math.hypot(cx - px, cy - py)) };
 }
 
+/** `menuitem:Catch harmful AI answers …` and `link:Catch harmful AI answers`. */
+function nearby(target, here) {
+  const name = target.slice(target.indexOf(':') + 1).toLowerCase().slice(0, 40);
+  if (name.length < 4) return [];
+  return here
+    .filter((t) => t !== target)
+    .filter((t) => {
+      const other = t.slice(t.indexOf(':') + 1).toLowerCase();
+      return other.startsWith(name.slice(0, 20)) || name.startsWith(other.slice(0, 20));
+    })
+    .slice(0, 4);
+}
+
 async function pointAt(page, target, ctx, opts = {}) {
   const node = el(page, target, ctx);
-  await node.waitFor({ state: 'visible', timeout: 8000 });
+  try {
+    await node.waitFor({ state: 'visible', timeout: 8000 });
+  } catch {
+    // "waiting for getByRole(…) to be visible" is true and useless. What the
+    // page DOES offer is the thing that tells you why — most often a menu that
+    // was open while you recorded and is shut now.
+    const here = (await discover(page).catch(() => [])).map((t) => t.target);
+    const near = nearby(target, here);
+    throw new Error(
+      `"${target}" never became visible.` +
+      (near.length
+        ? `\n  The page does have: ${near.join(', ')}.` +
+          `\n  If yours lives in a menu, put a hover step before it:` +
+          `\n    home -->|hover 'Use Cases' : link; click '…' : menuitem| home`
+        : `\n  Nothing with a similar name is on the page right now.` +
+          `\n  ${here.length} targets are — open "Targets on this page" to see them.`)
+    );
+  }
   await node.scrollIntoViewIfNeeded();
 
   const box0 = await boxOf(node, target);
@@ -83,7 +113,22 @@ async function pointAt(page, target, ctx, opts = {}) {
   }
 
   const [x, y] = point(box0, opts);
-  await ctx.cursor.glideTo(x, y, opts.ms);
+
+  // Enter the box at the point nearest the cursor, THEN settle to the aim
+  // point. A straight line from a menu trigger to an item below it cuts the
+  // corner and leaves the region that keeps the menu open — the menu shuts
+  // mid-glide and the element we were travelling to stops existing. Two short
+  // legs stay inside, and it reads as an approach rather than a lunge.
+  const inset = 4;
+  const outside =
+    ctx.cursor.x < box0.x || ctx.cursor.x > box0.x + box0.width ||
+    ctx.cursor.y < box0.y || ctx.cursor.y > box0.y + box0.height;
+  if (outside) {
+    const ex = Math.min(Math.max(ctx.cursor.x, box0.x + inset), box0.x + box0.width - inset);
+    const ey = Math.min(Math.max(ctx.cursor.y, box0.y + inset), box0.y + box0.height - inset);
+    await ctx.cursor.glideTo(ex, ey, Math.round((opts.ms ?? 420) * 0.7));
+  }
+  await ctx.cursor.glideTo(x, y, outside ? 140 : opts.ms);
 
   // The page can reflow during the glide — async content landing, a smooth
   // scroll still settling. Re-read and correct, or we click stale pixels.
@@ -139,6 +184,18 @@ export const OPS = {
         );
       }
     }
+  },
+
+  /**
+   * Be somewhere, without clicking.
+   *
+   * A dropdown that opens on hover has no existence of its own — its items are
+   * only in the page while the pointer is on the thing that opens them. Without
+   * a way to say "go here and stay", such a menu is simply not expressible.
+   */
+  async hover(page, step, ctx) {
+    await pointAt(page, step.target, ctx, { at: step.at });
+    await sleep(Math.min(step.ms ?? 300, 5000));
   },
 
   async click(page, step, ctx) {

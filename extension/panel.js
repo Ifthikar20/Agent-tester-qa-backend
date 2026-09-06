@@ -41,6 +41,7 @@ function render() {
 function describe(s) {
   if (s.op === 'goto') return `go to ${s.url}`;
   if (s.op === 'click') return `click ${s.target}`;
+  if (s.op === 'hover') return `hover ${s.target}`;
   if (s.op === 'fill') return s.valueRef ? `type into ${s.target} ← vault` : `type "${s.value}" into ${s.target}`;
   if (s.op === 'expect' && s.assert === 'urlContains') return `assert url contains ${s.value}`;
   if (s.op === 'expect' && s.assert === 'textVisible') return `assert text "${s.value}"`;
@@ -72,6 +73,7 @@ const answer = async (op, extra = {}) => {
 };
 
 $('opClick').onclick  = () => answer('click');
+$('opHover').onclick  = () => answer('hover');   // for whatever opens a menu
 $('opSee').onclick    = () => answer('seeText', { value: pick.name });
 $('opCancel').onclick = () => { pick = null; render(); };
 $('opFill').onclick   = () => {
