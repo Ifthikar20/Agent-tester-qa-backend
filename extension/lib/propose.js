@@ -148,21 +148,34 @@
     return null;
   };
 
+  /**
+   * Same rule the runner uses: a whole name, ignoring case and spacing.
+   *
+   * These counts only order the candidates, but an ordering built on a stricter
+   * comparison than the one that will actually resolve them is a lie — it says
+   * "exactly one" about a name the runner will find twice.
+   */
+  const sameName = (a, b) =>
+    squash(a || '').toLowerCase() === squash(b || '').toLowerCase();
+
   /** Everything a bare `<kind>:<arg>` would match, within root. */
   const matchesFor = (kind, arg, root) => {
     const all = [...(root || document).querySelectorAll(SCOPE)];
     if (kind === 'testid') {
       return all.filter((e) => (e.getAttribute('data-testid') ?? e.getAttribute('data-test-id')) === arg);
     }
-    if (kind === 'label') return all.filter((e) => labelText(e) === arg);
-    if (kind === 'placeholder') return all.filter((e) => e.getAttribute('placeholder') === arg);
+    if (kind === 'label') return all.filter((e) => sameName(labelText(e), arg));
+    if (kind === 'placeholder') return all.filter((e) => sameName(e.getAttribute('placeholder'), arg));
     // `text:` matches on a substring, so count the elements whose text contains
     // it. Playwright picks the SMALLEST such element and this counts every one
     // in SCOPE, so the numbers can differ — but a count is still far better
     // than "unknown", which parked every text proposal behind the long exact
     // names it exists to replace.
-    if (kind === 'text') return all.filter((e) => squash(ownText(e)).includes(arg));
-    return all.filter((e) => roleOf(e) === kind && nameOf(e) === arg);
+    if (kind === 'text') {
+      const needle = squash(arg).toLowerCase();
+      return all.filter((e) => squash(ownText(e)).toLowerCase().includes(needle));
+    }
+    return all.filter((e) => roleOf(e) === kind && sameName(nameOf(e), arg));
   };
 
   /** How many elements would this proposal match, right now? */

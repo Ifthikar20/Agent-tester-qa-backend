@@ -415,10 +415,17 @@ export class Recorder {
         //    that is the case — and accepting it anyway used to hand back a
         //    target that could not possibly resolve, which then failed at
         //    replay, minutes into a run, having looked fine in the script.
-        const survived = await tagged.count();
-        if (!survived && n === 1) return { target, via: 'click-time' };
-        tried.push(`${target} (${survived
-          ? 'the element is still on the page, so this name does not describe it'
+        // Is it still REACHABLE, or merely still in the document?
+        //
+        // Visibility, not DOM presence. A submit hides its own form: the button
+        // stays in the tree and leaves the accessibility tree, which is exactly
+        // why a role query finds nothing and exactly when the click-time count
+        // is the honest evidence. Testing for DOM presence rejected that whole
+        // legitimate case and dropped the click that submits a login.
+        const reachable = await tagged.and(this.page.locator('*:visible')).count();
+        if (!reachable && n === 1) return { target, via: 'click-time' };
+        tried.push(`${target} (${reachable
+          ? 'the element is still visible, so this name does not describe it'
           : n < 0 ? 'ambiguous by nature' : `${n} at click time`})`);
         continue;
       }

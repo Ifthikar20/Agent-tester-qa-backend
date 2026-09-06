@@ -54,12 +54,45 @@ export const LANDMARKS = new Set([
 
 const NTH = /^nth(\d+)$/;
 
+/**
+ * Exact on CONTENT, forgiving about case and spacing.
+ *
+ * A whole name, not a fragment: `button:Add Widget` must not also match "Add
+ * Widget Pro", or one target quietly becomes two elements. That part is not
+ * negotiable and is why substring matching is not used here.
+ *
+ * But insisting on the exact CASE was never protecting anything, and it cost a
+ * great deal. A person reading the page sees `BIWEEKLY PAYCHECK` — because the
+ * heading is styled uppercase — and writes that. A redesign adds
+ * `text-transform` and every target naming that element breaks, though nothing
+ * about the page really changed. Spacing is the same story: a name recorded
+ * across a line break has a different run of whitespace than the same name on
+ * one line.
+ *
+ * So the name becomes an anchored, case-insensitive pattern with flexible
+ * whitespace. Still one whole name; just not a spelling test.
+ *
+ * If two elements really do differ only by case, the target resolves to both
+ * and the run says so — which is the honest outcome, and `nth`/landmark
+ * scoping is there to separate them.
+ */
+const rxEscape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+export function nameMatcher(name) {
+  const pattern = rxEscape(String(name).trim()).replace(/(?:\\?\s)+/g, '\\s+');
+  // Surrounding whitespace is not part of a name. Playwright normalises most
+  // of it, but a name that survives with a stray leading space should not turn
+  // a working target into a mystery.
+  return new RegExp(`^\\s*${pattern}\\s*$`, 'i');
+}
+
 const STRATEGIES = {
-  // exact: a target names one element. Substring matching would make
-  // `button:Add Widget` also match "Add Widget Pro" and resolve to two nodes.
-  label:       (p, arg) => p.getByLabel(arg, { exact: true }),
+  label:       (p, arg) => p.getByLabel(nameMatcher(arg)),
+  // `text:` is a substring by design — it is the handle for an element whose
+  // whole name is a paragraph. Playwright already matches it case-insensitively.
   text:        (p, arg) => p.getByText(arg, { exact: false }),
-  placeholder: (p, arg) => p.getByPlaceholder(arg),
+  placeholder: (p, arg) => p.getByPlaceholder(nameMatcher(arg)),
+  // A test id is an identifier, not prose. It means what it says, exactly.
   testid:      (p, arg) => p.getByTestId(arg),
 };
 
@@ -126,7 +159,7 @@ export function parseTarget(target, aliases = {}) {
 /** Parsed target -> Playwright locator. */
 export function locate(page, t) {
   const base = t.kind === 'role'
-    ? page.getByRole(t.role, { name: t.name, exact: true })
+    ? page.getByRole(t.role, { name: nameMatcher(t.name) })
     : STRATEGIES[t.kind](page, t.name);
 
   if (!t.scope) return base;
@@ -139,7 +172,7 @@ export function locate(page, t) {
   // proposer measured, and taking the first keeps resolution deterministic.
   const region = page.getByRole(t.scope).first();
   return t.kind === 'role'
-    ? region.getByRole(t.role, { name: t.name, exact: true })
+    ? region.getByRole(t.role, { name: nameMatcher(t.name) })
     : STRATEGIES[t.kind](region, t.name);
 }
 

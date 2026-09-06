@@ -150,6 +150,44 @@ if (asRole === 'button:Load more results') ok('and the role proposal has the rea
 else bad('and the role proposal has the real casing', asRole ?? '(none offered)');
 
 // ---------------------------------------------------------------------------
+console.log('\n— 1b2 · however you spell the name ————————————————');
+
+/**
+ * A whole name, not a fragment — but not a spelling test either.
+ *
+ * You read `LOAD MORE RESULTS` off the screen and write that; the accessible
+ * name is `Load more results`. Insisting on the exact case protected nothing
+ * and broke every uppercase-styled element, so the name is matched
+ * case-insensitively with flexible whitespace.
+ *
+ * What must NOT change: a fragment still matches nothing. `button:Load more`
+ * naming a button called "Load more results" would turn one target into
+ * however many elements start with those words.
+ */
+const spell = async (target) => {
+  await page.goto(PAGE, { waitUntil: 'domcontentloaded' });
+  try {
+    await OPS.click(page, validate({ suite: 'x', steps: [{ op: 'click', target, timeout: 2500 }] }).steps[0], ctx);
+    return true;
+  } catch { return false; }
+};
+
+const spellings = [
+  ['button:Load more results', true,  'as the DOM has it'],
+  ['button:LOAD MORE RESULTS', true,  'as you see it on screen'],
+  ['button:load more results', true,  'as you might type it'],
+  ['button:Load  more   results', true, 'with odd spacing'],
+  ['button:Load more',         false, 'a fragment — must stay refused'],
+];
+for (const [target, want, why] of spellings) {
+  const got = await spell(target);
+  if (got === want) ok(`${want ? 'matches' : 'refuses'}: ${why}`, target);
+  else bad(`${want ? 'should match' : 'should refuse'}: ${why}`, target);
+}
+
+await page.goto(PAGE, { waitUntil: 'domcontentloaded' });
+
+// ---------------------------------------------------------------------------
 console.log('\n— 1c · a name with a colon in it ——————————————————');
 
 /**

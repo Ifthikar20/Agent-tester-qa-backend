@@ -23,6 +23,15 @@ const DEFAULT_ORIGIN = `http://localhost:${process.env.PORT || 3000}`;
  */
 const TIMEOUT = Number(process.env.GC_TIMEOUT_MS) || 8000;
 const SETTLE = Number(process.env.GC_SETTLE_MS) || 250;
+/**
+ * How long to keep watching after a step gives up, purely to say WHY.
+ *
+ * This is paid on every failing step, so it is deliberately short. Something
+ * that arrives within a couple of seconds of the deadline is the race worth
+ * naming; something that takes another ten was never a timing problem you
+ * would have solved by nudging the number.
+ */
+const GRACE = Number(process.env.GC_GRACE_MS) || 2500;
 const SETTLE_CAP = Math.max(SETTLE * 8, 3000);
 
 /**
@@ -246,7 +255,7 @@ async function pointAt(page, target, ctx, opts = {}) {
      * waiting was ever going to help and the message should not imply otherwise.
      */
     const t0 = Date.now();
-    const late = await node.waitFor({ state: 'visible', timeout: 6000 })
+    const late = await node.waitFor({ state: 'visible', timeout: GRACE })
       .then(() => Date.now() - t0).catch(() => null);
     if (late !== null) {
       const waited = opts.timeout ?? TIMEOUT;
@@ -277,7 +286,7 @@ async function pointAt(page, target, ctx, opts = {}) {
     const near = nearby(target, here);
     throw new Error(
       `"${target}" never became visible — and it did not turn up in the ` +
-      `${Math.round((opts.timeout ?? TIMEOUT) / 1000) + 6}s this waited, so waiting longer will not help.` +
+      `${(((opts.timeout ?? TIMEOUT) + GRACE) / 1000).toFixed(1)}s this waited, so waiting longer will not help.` +
       (near.length
         ? `\n  The page does have: ${near.join(', ')}.` +
           `\n  If yours lives in a menu, put a hover step before it:` +

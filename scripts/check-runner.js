@@ -75,7 +75,10 @@ if (second.started) ok('and the next one is not refused');
 else bad('and the next one is not refused', first.ended ? 'lock still held' : 'no run.end was sent');
 
 // A step that fails must not take the lock with it.
-const failing = await command(BAD, { wait: 12000 });
+// Generous: a failing step waits its full timeout AND a grace period to say
+// why it failed. Pinning this to a number that happened to work is how a check
+// starts reporting a wedged lock every time the runner gets more patient.
+const failing = await command(BAD, { wait: 20000 });
 if (failing.ended) ok('a failing step still releases it', 'run.end was sent');
 else bad('a failing step still releases it', 'no run.end');
 

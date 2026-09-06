@@ -559,6 +559,33 @@ three files.
 
 ---
 
+## However you spell the name
+
+A whole name, not a fragment — `button:Add Widget` must never also match "Add
+Widget Pro", or one target quietly becomes two elements. That part is not
+negotiable.
+
+But insisting on the exact **case** was protecting nothing and cost a great
+deal. You read `LOAD MORE RESULTS` off the screen and write that; the
+accessible name is `Load more results`. A redesign adds `text-transform` and
+every target naming that element breaks, though nothing really changed. So a
+name is matched case-insensitively, with flexible whitespace:
+
+```
+button:Load more results     ✓  as the DOM has it
+button:LOAD MORE RESULTS     ✓  as you see it on screen
+button:load more results     ✓  as you might type it
+button:Load  more   results  ✓  odd spacing
+button:Load more             ✕  a fragment — still refused
+```
+
+Still one whole name; just not a spelling test. If two elements really do differ
+only by case the target resolves to both and the run says so, which is the
+honest outcome — `nth`/landmark scoping is there to separate them. `testid:`
+stays exact, because an identifier means what it says.
+
+---
+
 ## Late, or never coming?
 
 Those two failures look identical from the outside, and guessing between them
