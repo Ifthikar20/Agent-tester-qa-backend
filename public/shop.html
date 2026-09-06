@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nimbus Supply — Store</title>
+<style>
+  :root { font-family: ui-sans-serif, system-ui, sans-serif; }
+  body { margin:0; background:#fbfaf8; color:#241f1a; }
+  .bar { background:#2b2622; color:#fff; padding:14px 28px; display:flex; gap:22px; align-items:center; }
+  .bar strong { font-size:17px; }
+  .bar a { color:#e8ddd0; text-decoration:none; font-size:14px; }
+  .wrap { max-width:720px; margin:44px auto; padding:0 24px; }
+  h1 { font-size:22px; margin:0 0 20px; }
+  .search { display:flex; gap:10px; margin-bottom:26px; }
+  input { flex:1; padding:11px 13px; font-size:15px; border:1px solid #d6cec4; border-radius:7px; }
+  input:focus { outline:2px solid #b4741f; outline-offset:1px; }
+  button { padding:11px 18px; font-size:14px; font-weight:600; background:#b4741f;
+           color:#fff; border:0; border-radius:7px; cursor:pointer; }
+  .item { display:flex; align-items:center; gap:16px; padding:14px 0; border-bottom:1px solid #eae3da; }
+  .item span { flex:1; }
+  .item b { font-variant-numeric:tabular-nums; }
+  .item button { background:#3c3630; }
+  .total { margin-top:22px; font-size:18px; font-weight:650; }
+  .hide { display:none; }
+  .muted { color:#7a7068; font-size:14px; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <strong>Nimbus Supply</strong>
+  <a href="#" id="navCart">Cart</a>
+</div>
+
+<div class="wrap" id="store">
+  <h1>Catalogue</h1>
+  <div class="search">
+    <label for="q" class="hide">Search</label>
+    <input id="q" placeholder="Search products" aria-label="Search">
+    <button id="go">Search</button>
+  </div>
+  <div id="results"><p class="muted">Search to see products.</p></div>
+</div>
+
+<div class="wrap hide" id="cart">
+  <h1>Your cart</h1>
+  <div id="lines"></div>
+  <div class="total" id="total">Total: $0.00</div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const show = (el, on) => el.classList.toggle('hide', !on);
+  const CATALOGUE = [
+    { name: 'Widget', price: 20 },
+    { name: 'Widget Pro', price: 45 },
+    { name: 'Grommet', price: 12 },
+  ];
+  const basket = [];
+
+  $('go').onclick = () => {
+    const q = $('q').value.trim().toLowerCase();
+    const hits = CATALOGUE.filter((p) => p.name.toLowerCase().includes(q));
+    $('results').innerHTML = hits.length
+      ? `<p class="muted">${hits.length} results</p>` + hits.map((p, i) =>
+          `<div class="item"><span>${p.name}</span><b>$${p.price.toFixed(2)}</b>
+           <button data-i="${CATALOGUE.indexOf(p)}">Add ${p.name}</button></div>`).join('')
+      : '<p class="muted">0 results</p>';
+    for (const b of $('results').querySelectorAll('button')) {
+      b.onclick = () => { basket.push(CATALOGUE[+b.dataset.i]); render(); };
+    }
+  };
+
+  $('navCart').onclick = (e) => {
+    e.preventDefault();
+    show($('store'), false); show($('cart'), true);
+    history.pushState({}, '', '/shop.html#/cart');
+    render();
+  };
+
+  function render() {
+    const counts = new Map();
+    for (const p of basket) counts.set(p.name, (counts.get(p.name) ?? 0) + 1);
+    $('lines').innerHTML = [...counts].map(([name, n]) => {
+      const p = CATALOGUE.find((c) => c.name === name);
+      return `<div class="item"><span>${name} × ${n}</span><b>$${p.price.toFixed(2)}</b></div>`;
+    }).join('') || '<p class="muted">Empty.</p>';
+    // The bug under test: the line shows a quantity but the total charges once.
+    const total = [...counts].reduce((s, [name]) =>
+      s + CATALOGUE.find((c) => c.name === name).price, 0);
+    $('total').textContent = `Total: $${total.toFixed(2)}`;
+  }
+</script>
+</body>
+</html>

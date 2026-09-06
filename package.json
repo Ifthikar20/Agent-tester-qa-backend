@@ -6,10 +6,12 @@
   "description": "PoC: drive headless Chrome from a small DSL, stream it to a canvas, draw a synthetic cursor over it.",
   "scripts": {
     "start": "node server.js",
-    "check": "node scripts/check.js"
+    "check": "node scripts/check.js",
+    "check:diagram": "node scripts/check-diagram.js"
   },
   "dependencies": {
     "express": "^4.19.2",
+    "mermaid": "^11.4.0",
     "playwright": "^1.47.0",
     "ws": "^8.18.0"
   }

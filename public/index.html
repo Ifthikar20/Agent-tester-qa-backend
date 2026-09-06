@@ -6,95 +6,82 @@
 <title>ghostclick</title>
 <style>
   :root {
-    --ground:  #0f1d24;
-    --panel:   #162b35;
-    --edge:    #23434f;
-    --ink:     #dceaef;
-    --ink-dim: #7d9aa5;
-    --signal:  #e8a33d;
-    --pass:    #79cfa4;
-    --fail:    #e8705f;
+    --ground:#0f1d24; --panel:#162b35; --edge:#23434f; --ink:#dceaef;
+    --ink-dim:#7d9aa5; --signal:#e8a33d; --pass:#79cfa4; --fail:#e8705f;
   }
   * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--ground); color: var(--ink);
-    font: 15px/1.5 ui-sans-serif, "Segoe UI", Roboto, system-ui, sans-serif;
-    -webkit-font-smoothing: antialiased;
-  }
-  .shell {
-    display: grid; grid-template-columns: minmax(0,1fr) 360px;
-    gap: 20px; padding: 20px; max-width: 1700px; margin: 0 auto; align-items: start;
-  }
-  @media (max-width: 1100px) { .shell { grid-template-columns: 1fr; } }
-  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 14px; }
-  header h1 { font-size: 19px; font-weight: 650; letter-spacing: -.02em; margin: 0; }
-  header p { margin: 0; color: var(--ink-dim); font-size: 13.5px; }
+  body { margin:0; background:var(--ground); color:var(--ink);
+    font:15px/1.5 ui-sans-serif,"Segoe UI",Roboto,system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased; }
+  .shell { display:grid; grid-template-columns:minmax(0,1fr) 380px; gap:20px;
+    padding:20px; max-width:1760px; margin:0 auto; align-items:start; }
+  @media (max-width:1150px) { .shell { grid-template-columns:1fr; } }
+  header { display:flex; align-items:baseline; gap:14px; margin-bottom:14px; }
+  header h1 { font-size:19px; font-weight:650; letter-spacing:-.02em; margin:0; }
+  header p { margin:0; color:var(--ink-dim); font-size:13.5px; }
 
   /* ---- the feed, and the cursor that floats over it ---- */
-  .stage {
-    position: relative; line-height: 0;
-    border: 1px solid var(--edge); border-radius: 4px;
-    overflow: hidden; background: #08131a;
-  }
-  #view { width: 100%; height: auto; display: block; }
+  .stage { position:relative; line-height:0; border:1px solid var(--edge);
+    border-radius:4px; overflow:hidden; background:#08131a; }
+  #view { width:100%; height:auto; display:block; }
   /* pointer-events:none so the overlay never eats a click meant for the page */
-  .ptr, .ripple { position: absolute; top: 0; left: 0; pointer-events: none; }
-  .ptr {
-    width: 21px; height: 21px; opacity: 0;
-    filter: drop-shadow(0 2px 4px rgba(0,0,0,.6));
-    transition: opacity .2s;
-  }
-  .ptr.on { opacity: 1; }
-  .ripple {
-    width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%;
-    border: 2px solid var(--signal); opacity: 0;
-  }
-  .ripple.fire { animation: pop .42s ease-out; }
-  @keyframes pop {
-    from { opacity: .95; transform: scale(.4); }
-    to   { opacity: 0;   transform: scale(3.6); }
-  }
-  @media (prefers-reduced-motion: reduce) { .ripple.fire { animation: none; } }
+  .ptr, .ripple { position:absolute; top:0; left:0; pointer-events:none; }
+  .ptr { width:21px; height:21px; opacity:0; transition:opacity .2s;
+    filter:drop-shadow(0 2px 4px rgba(0,0,0,.6)); }
+  .ptr.on { opacity:1; }
+  .ripple { width:12px; height:12px; margin:-6px 0 0 -6px; border-radius:50%;
+    border:2px solid var(--signal); opacity:0; }
+  .ripple.fire { animation:pop .42s ease-out; }
+  @keyframes pop { from{opacity:.95;transform:scale(.4)} to{opacity:0;transform:scale(3.6)} }
+  @media (prefers-reduced-motion:reduce) { .ripple.fire { animation:none; } }
 
-  .statusbar {
-    display: flex; align-items: center; gap: 10px;
-    padding: 9px 12px; border: 1px solid var(--edge); border-top: 0;
-    border-radius: 0 0 4px 4px; font-size: 13px;
-    color: var(--ink-dim); background: var(--panel);
-  }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-dim); }
-  .dot.live { background: var(--pass); }
-  .dot.busy { background: var(--signal); }
-  .statusbar .spacer { margin-left: auto; }
+  .statusbar { display:flex; align-items:center; gap:10px; padding:9px 12px;
+    border:1px solid var(--edge); border-top:0; border-radius:0 0 4px 4px;
+    font-size:13px; color:var(--ink-dim); background:var(--panel); }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--ink-dim); }
+  .dot.live { background:var(--pass); } .dot.busy { background:var(--signal); }
+  .spacer { margin-left:auto; }
 
-  /* ---- side panel ---- */
-  .card {
-    background: var(--panel); border: 1px solid var(--edge);
-    border-radius: 4px; padding: 14px; margin-bottom: 16px;
-  }
-  .card h2 { font-size: 13px; font-weight: 600; margin: 0 0 10px; color: var(--ink-dim); }
-  textarea {
-    width: 100%; height: 220px; resize: vertical; color: var(--ink);
-    background: #0d1f27; border: 1px solid var(--edge); border-radius: 4px;
-    padding: 11px; font: 13px/1.65 ui-monospace, "SF Mono", Menlo, monospace;
-  }
-  textarea:focus, button:focus-visible { outline: 2px solid var(--signal); outline-offset: 1px; }
-  .row { display: flex; gap: 8px; margin-top: 10px; }
-  button {
-    font: inherit; font-size: 13.5px; font-weight: 550; cursor: pointer;
-    padding: 9px 15px; border-radius: 4px; border: 1px solid var(--edge);
-    background: transparent; color: var(--ink);
-  }
-  button.go { background: var(--signal); border-color: var(--signal); color: #17242b; }
-  button:disabled { opacity: .45; cursor: not-allowed; }
-  #log { max-height: 340px; overflow-y: auto; font-size: 13px; }
-  #log div { padding: 4px 0; border-bottom: 1px solid rgba(35,67,79,.5); display: flex; gap: 8px; }
-  #log div:last-child { border-bottom: 0; }
-  #log .mark { width: 13px; flex: none; color: var(--ink-dim); }
-  #log .pass .mark { color: var(--pass); }
-  #log .fail .mark, #log .fail { color: var(--fail); }
-  #log .ms { margin-left: auto; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
-  .empty { color: var(--ink-dim); font-size: 13px; margin: 0; }
+  .card { background:var(--panel); border:1px solid var(--edge); border-radius:4px;
+    padding:14px; margin-bottom:16px; }
+  .card h2 { font-size:13px; font-weight:600; margin:0 0 10px; color:var(--ink-dim);
+    display:flex; align-items:center; gap:8px; }
+  .card h2 .spacer + button { padding:4px 9px; font-size:12px; }
+
+  input[type=url], textarea, select {
+    width:100%; color:var(--ink); background:#0d1f27; border:1px solid var(--edge);
+    border-radius:4px; padding:9px 11px;
+    font:13px/1.6 ui-monospace,"SF Mono",Menlo,monospace; }
+  textarea { height:230px; resize:vertical; }
+  select { font-family:inherit; font-size:13px; }
+  :focus-visible { outline:2px solid var(--signal); outline-offset:1px; }
+  .row { display:flex; gap:8px; margin-top:10px; }
+  button { font:inherit; font-size:13.5px; font-weight:550; cursor:pointer;
+    padding:9px 15px; border-radius:4px; border:1px solid var(--edge);
+    background:transparent; color:var(--ink); }
+  button.go { background:var(--signal); border-color:var(--signal); color:#17242b; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+
+  #log { max-height:280px; overflow-y:auto; font-size:13px; }
+  #log div { padding:4px 0; border-bottom:1px solid rgba(35,67,79,.5); display:flex; gap:8px; }
+  #log div:last-child { border-bottom:0; }
+  #log .mark { width:13px; flex:none; color:var(--ink-dim); }
+  #log .pass .mark { color:var(--pass); }
+  #log .fail .mark, #log .fail { color:var(--fail); }
+  #log .ms { margin-left:auto; color:var(--ink-dim); font-variant-numeric:tabular-nums; }
+
+  #targets { max-height:220px; overflow-y:auto; display:flex; flex-wrap:wrap; gap:6px; }
+  #targets button { padding:4px 9px; font-size:12px; font-weight:400;
+    font-family:ui-monospace,Menlo,monospace; background:#0d1f27; }
+  #targets button:hover { border-color:var(--signal); }
+
+  /* mermaid renders on a light ground; give it one rather than fighting it */
+  #diagram { background:#fff; border-radius:3px; padding:14px; overflow-x:auto; }
+  #diagram svg { max-width:100%; height:auto; display:block; margin:0 auto; }
+  #mmd { display:none; white-space:pre; overflow-x:auto; margin:10px 0 0;
+    background:#0d1f27; border:1px solid var(--edge); border-radius:4px;
+    padding:11px; font:12px/1.6 ui-monospace,Menlo,monospace; color:var(--ink); }
+  .empty { color:var(--ink-dim); font-size:13px; margin:0; }
 </style>
 </head>
 <body>
@@ -120,17 +107,47 @@
       <span class="spacer"></span>
       <span id="fps">—</span>
     </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>Diagram
+        <span class="spacer"></span>
+        <button id="toggleSrc">Show mermaid</button>
+      </h2>
+      <div id="diagram"><p class="empty" style="color:#667">Run a script to draw it.</p></div>
+      <pre id="mmd"></pre>
+    </div>
   </main>
 
   <aside>
     <div class="card">
-      <h2>Script</h2>
+      <h2>Page</h2>
+      <input type="url" id="url" spellcheck="false" placeholder="https://…">
+      <div class="row">
+        <button id="open">Open</button>
+        <button id="inspect">Re-scan targets</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Script
+        <span class="spacer"></span>
+        <select id="example" style="width:auto">
+          <option value="meridian">Meridian (aliases)</option>
+          <option value="shop">Nimbus shop (no registry)</option>
+        </select>
+      </h2>
       <textarea id="script" spellcheck="false"></textarea>
       <div class="row">
         <button class="go" id="run">Run script</button>
         <button id="reset">Reload page</button>
       </div>
     </div>
+
+    <div class="card">
+      <h2>Targets on this page <span class="spacer"></span><span id="tcount" class="empty"></span></h2>
+      <div id="targets"><p class="empty">Scanning…</p></div>
+    </div>
+
     <div class="card">
       <h2>Run log</h2>
       <div id="log"><p class="empty">Nothing has run yet.</p></div>
@@ -138,12 +155,14 @@
   </aside>
 </div>
 
+<script src="/vendor/mermaid.min.js"></script>
 <script type="module">
 const $ = (id) => document.getElementById(id);
 const canvas = $('view'), ctx = canvas.getContext('2d');
 const ptr = $('ptr'), ripple = $('ripple');
 
-$('script').value = `suite "Username length boundary"
+const EXAMPLES = {
+  meridian: `suite "Username length boundary"
 goto   "http://localhost:3000/demo.html"
 fill   auth.email    with $secrets.QA_USER
 fill   auth.password with $secrets.QA_PASS
@@ -154,24 +173,40 @@ click  settings.profileTab
 fill   profile.username with repeat("a", 20)
 click  profile.save
 expect text "Profile saved"
-expect value profile.username is repeat("a", 20)`;
+expect value profile.username is repeat("a", 20)`,
+
+  // No aliases exist for this app. Targets are role:name pairs, which the
+  // page discovery panel lists for you.
+  shop: `suite "Cart total ignores quantity"
+goto   "http://localhost:3000/shop.html"
+fill   textbox:Search with "Widget"
+click  button:Search
+expect text "2 results"
+click  button:Add Widget
+click  button:Add Widget
+click  link:Cart
+expect text "Widget × 2"
+expect text "Total: $40.00"`,
+};
+$('script').value = EXAMPLES.meridian;
+$('example').onchange = () => { $('script').value = EXAMPLES[$('example').value]; };
 
 // Frames land ~120ms behind reality; cursor events land in ~10ms. Without this
-// delay the arrow clicks visibly before the frame showing the click, which
-// reads as broken. Measure and tune per deployment.
+// delay the arrow clicks before the frame showing the click, which reads as
+// broken. Measure and tune per deployment.
 const LAG = 120;
-
 // The arrow tip sits at (5,2) in a 24-unit viewBox rendered at 21px, i.e.
-// (4.375, 1.75) inside the SVG. Offset by that so the TIP lands on the point,
-// not the SVG's corner.
+// (4.375, 1.75) inside the SVG. Offset by that so the TIP lands on the point.
 const TIP_X = 4.375, TIP_Y = 1.75;
+
+mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral' });
+let drawn = 0, lastMermaid = '';
 
 const ws = new WebSocket(`ws://${location.host}`);
 ws.binaryType = 'arraybuffer';
 
 let frames = 0;
 setInterval(() => { $('fps').textContent = `${frames} fps`; frames = 0; }, 1000);
-
 ws.onopen  = () => { $('dot').className = 'dot live'; $('status').textContent = 'Live'; };
 ws.onclose = () => { $('dot').className = 'dot';      $('status').textContent = 'Disconnected'; };
 
@@ -191,6 +226,11 @@ const scale = () => canvas.getBoundingClientRect().width / canvas.width;
 
 function handle(ev) {
   switch (ev.t) {
+    case 'ready':
+      $('url').value = ev.url;
+      $('url').placeholder = `allowed: ${ev.origins.join(', ')}`;
+      break;
+
     case 'cursor':
       setTimeout(() => {
         const s = scale();
@@ -209,9 +249,11 @@ function handle(ev) {
       }, LAG);
       break;
 
+    case 'targets':  showTargets(ev); break;
+    case 'diagram':  draw(ev.mermaid); break;
+
     case 'run.start':
-      $('log').innerHTML = '';
-      $('run').disabled = true;
+      $('log').innerHTML = ''; $('run').disabled = true;
       $('dot').className = 'dot busy';
       $('status').textContent = `Running — ${ev.suite}`;
       break;
@@ -232,8 +274,49 @@ function handle(ev) {
   }
 }
 
+async function draw(src) {
+  lastMermaid = src;
+  $('mmd').textContent = src;
+  try {
+    const { svg } = await mermaid.render(`gc${++drawn}`, src);
+    $('diagram').innerHTML = svg;
+  } catch (err) {
+    $('diagram').innerHTML = '';
+    $('diagram').append(Object.assign(document.createElement('p'), {
+      className: 'empty', textContent: `diagram failed to render: ${err.message}`,
+    }));
+  }
+}
+
+function showTargets(ev) {
+  $('url').value = ev.url;
+  $('tcount').textContent = `${ev.items.length} found`;
+  const box = $('targets');
+  box.innerHTML = '';
+  if (!ev.items.length) {
+    box.append(Object.assign(document.createElement('p'),
+      { className: 'empty', textContent: 'Nothing interactive found.' }));
+    return;
+  }
+  for (const it of ev.items) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = it.target;
+    b.title = 'Insert into the script';
+    b.onclick = () => insert(it.target);
+    box.append(b);
+  }
+}
+
+function insert(target) {
+  const ta = $('script'), at = ta.selectionStart ?? ta.value.length;
+  ta.value = ta.value.slice(0, at) + target + ta.value.slice(ta.selectionEnd ?? at);
+  ta.focus();
+  ta.selectionStart = ta.selectionEnd = at + target.length;
+}
+
 function describe(s) {
-  if (s.op === 'goto')   return `goto ${new URL(s.url).pathname}`;
+  if (s.op === 'goto')   return `goto ${s.url}`;
   if (s.op === 'fill')   return `fill ${s.target}`;
   if (s.op === 'click')  return `click ${s.target}`;
   if (s.op === 'expect') return `expect ${s.assert} ${s.target ?? ''} ${trunc(s.value)}`;
@@ -263,10 +346,17 @@ function mark(i, cls, glyph, ms, err) {
   if (err) line(`${i}e`, err, ' ', 'fail');
 }
 
-$('run').onclick = () =>
-  ws.send(JSON.stringify({ t: 'command', text: $('script').value }));
-$('reset').onclick = () =>
-  ws.send(JSON.stringify({ t: 'command', text: 'goto "http://localhost:3000/demo.html"' }));
+const send = (o) => ws.send(JSON.stringify(o));
+$('run').onclick     = () => send({ t: 'command', text: $('script').value });
+$('open').onclick    = () => send({ t: 'open', url: $('url').value.trim() });
+$('inspect').onclick = () => send({ t: 'inspect' });
+$('reset').onclick   = () => send({ t: 'open', url: $('url').value.trim() });
+$('url').onkeydown   = (e) => { if (e.key === 'Enter') $('open').click(); };
+$('toggleSrc').onclick = () => {
+  const on = $('mmd').style.display === 'block';
+  $('mmd').style.display = on ? 'none' : 'block';
+  $('toggleSrc').textContent = on ? 'Show mermaid' : 'Hide mermaid';
+};
 </script>
 </body>
 </html>
