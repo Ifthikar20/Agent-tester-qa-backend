@@ -488,6 +488,48 @@ spinner, disabled so a second press cannot queue a second run. Every button in
 the app also scales slightly on press, which is one CSS rule and the difference
 between "working" and "dead".
 
+## Run takes you to the run
+
+A run drives a real browser for tens of seconds. **Run suite** used to start one
+and leave you on the summary page, so everything worth watching — the canvas, the
+steps ticking off, the log — happened on a screen you were not on. A progress bar
+with the bar taken out.
+
+Both buttons go to the console first now, and start the run there. The order
+matters: `router.push` is awaited and a tick is allowed to pass *before*
+`api.runSuite`, because the console has to be mounted and listening before the
+first step reports. Start the run first and you arrive halfway through, to an
+empty step list and a run that has already scrolled past.
+
+The query carries the suite and deliberately **no `url`**. The run's own first
+step navigates; pointing the console at a page at the same moment would have the
+two fighting over one browser.
+
+A failure now speaks in the console rather than as a sentence on a page you have
+left — including the origin gate, which is a decision rather than an error, so it
+arrives as the button that unblocks it.
+
+`check-console.js` presses Run on a suite and asserts both halves: that the URL
+became `/app/console`, and that the step list on it is really filling. Drop the
+`router.push` and it goes red on the suite's own URL, with `(no run panel)`.
+
+## A suite page showing another suite's runs
+
+Suite **te** had one case and had never been run. Its page said *4 runs this
+week*, and listed four passing runs — every one of them belonging to a different
+suite.
+
+Vue reuses a route component when only the parameter changes, so moving from one
+suite to another never re-ran `onMounted`; the fetch that filled *Latest runs*
+had fired once, for whichever suite you happened to open first, and the numbers
+sat there under every subsequent name. Reload the page and it was right, which is
+the worst kind of wrong — it looks like a fluke.
+
+Overview and Runs watch the suite id now, `immediate` so the mount case is the
+same code path, and they reload again when a run finishes so the numbers settle
+without a refresh. The check switches between two suites *without a reload* — the
+case that was broken — and the virgin one has to say `Nothing has run yet`.
+
 ## Scrolling with the wheel
 
 Point at the canvas and use your wheel or trackpad. It is the primary way; the

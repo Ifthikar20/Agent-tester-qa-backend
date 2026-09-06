@@ -280,7 +280,58 @@ await page.waitForTimeout(3000);
 if (/links\.html/.test(await shown() ?? '')) ok('and a page row opens that page');
 else bad('and a page row opens that page', await shown());
 
-await fetch(`${API}/api/suites/${other}`, { method: 'DELETE' }).catch(() => {});
+// ---------------------------------------------------------------------------
+console.log('\n— 4c · Run takes you to where it happens ——————————');
+
+/**
+ * A run drives a real browser for tens of seconds. Pressing the button used to
+ * leave you on a summary page while all of it happened somewhere you could not
+ * see — a progress bar with the bar taken out.
+ */
+await post(`/api/suites/${other}/cases`, {
+  name: 'Links loads',
+  flow: `%% suite "x"\nflowchart TD\n  a(("${API}/links.html"))\n  b["/links.html"]\n  a --> b`,
+});
+await page.goto(`${APP}/suites/${other}`, { waitUntil: 'networkidle' });
+await page.waitForTimeout(800);
+await page.getByRole('button', { name: /Run suite/ }).click();
+await page.waitForTimeout(1500);
+
+if (/\/app\/console/.test(page.url())) ok('it goes to the console', new URL(page.url()).search);
+else bad('it goes to the console', page.url());
+
+await page.waitForTimeout(5000);
+const steps = await page.locator('section').filter({ has: page.locator('ol') }).first()
+  .innerText().catch(() => '');
+if (/goto/.test(steps)) ok('and the steps are there to watch', steps.split('\n').filter(Boolean)[1] ?? '');
+else bad('and the steps are there to watch', steps.slice(0, 50) || '(no run panel)');
+
+// ---------------------------------------------------------------------------
+console.log('\n— 4d · a suite page shows ITS OWN runs ————————————');
+
+/**
+ * Vue reuses a route component when only the parameter changes, so moving from
+ * one suite to another never re-ran onMounted — and the new suite's page showed
+ * the previous suite's runs under the new suite's name. Four passing runs on a
+ * suite that had never been run once.
+ */
+const virgin = (await post('/api/suites', { name: 'Check console virgin', baseUrl: API })).suite.id;
+await post(`/api/suites/${virgin}/pages`, { name: 'Results', path: '/results.html' });
+
+await page.goto(`${APP}/suites/${other}`, { waitUntil: 'networkidle' });
+await page.waitForTimeout(1200);
+const busyLatest = await page.locator('section').filter({ hasText: 'Latest runs' }).first().innerText();
+if (/Links loads/.test(busyLatest)) ok('a suite with runs shows them');
+else bad('a suite with runs shows them', busyLatest.replace(/\s+/g, ' ').slice(0, 60));
+
+// Switch WITHOUT a reload — the case that was broken.
+await page.getByRole('link', { name: 'Check console virgin' }).first().click();
+await page.waitForTimeout(1500);
+const freshLatest = await page.locator('section').filter({ hasText: 'Latest runs' }).first().innerText();
+if (/Nothing has run yet/.test(freshLatest)) ok('and switching to one without runs shows none');
+else bad('and switching to one without runs shows none', freshLatest.replace(/\s+/g, ' ').slice(0, 70));
+
+await fetch(`${API}/api/suites/${virgin}`, { method: 'DELETE' }).catch(() => {});
 
 // ---------------------------------------------------------------------------
 console.log('\n— 5 · the script box keeps up with the recording ——');
@@ -288,6 +339,9 @@ console.log('\n— 5 · the script box keeps up with the recording ——');
 // Pressing Record produces a one-step flow immediately (the goto). The box used
 // to take that and then ignore everything you demonstrated afterwards, because
 // it only filled while empty — so a four-step recording showed one line.
+// Sections 4b-4d end on a suite page, so come back to the console first.
+await page.goto(`${APP}/console`, { waitUntil: 'networkidle' });
+await page.locator('textarea').last().waitFor();
 await page.getByRole('button', { name: 'clear' }).click().catch(() => {});
 await page.locator('textarea').last().fill('');
 await page.getByPlaceholder('localhost:3000/demo.html').fill(SITE);
@@ -314,6 +368,7 @@ if (atEnd > atStart) ok('it grows as you demonstrate', `${atStart} edges → ${a
 else bad('it grows as you demonstrate', `stuck at ${atEnd} edges`);
 
 await fetch(`${API}/api/suites/${sid}`, { method: 'DELETE' }).catch(() => {});
+await fetch(`${API}/api/suites/${other}`, { method: 'DELETE' }).catch(() => {});
 
 await browser.close();
 console.log(failures
