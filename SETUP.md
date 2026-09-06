@@ -36,6 +36,11 @@ is remembered in `.ghostclick/origins.json` and survives restarts.
 Allowed origins are listed under **Page → Allowed origins**, each with an × if
 you change your mind.
 
+Then pick **↳ This page (starter)** from the Script dropdown. It writes a
+runnable flow for whatever is open — the real URL, the targets actually
+discovered on it, and the node shapes listed as comments so you can add
+assertions. Nothing about the bundled demo apps is in your way.
+
 ## 3 · Put your credentials somewhere real
 
 A recorded password is never written into the script — it becomes `$TODO` and

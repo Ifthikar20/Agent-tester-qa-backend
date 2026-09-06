@@ -177,9 +177,10 @@
       <h2>Script
         <span class="spacer"></span>
         <select id="example" style="width:auto">
-          <option value="meridian">Meridian (line DSL)</option>
-          <option value="flow">Meridian (mermaid flow)</option>
-          <option value="shop">Nimbus shop (no registry)</option>
+          <option value="mine">↳ This page (starter)</option>
+          <option value="meridian">Demo · Meridian (line DSL)</option>
+          <option value="flow">Demo · Meridian (mermaid flow)</option>
+          <option value="shop">Demo · Nimbus shop (no registry)</option>
         </select>
       </h2>
       <textarea id="script" spellcheck="false"></textarea>
@@ -271,8 +272,49 @@ click  link:Cart
 expect text "Widget × 2"
 expect text "Total: $40.00"`,
 };
+/**
+ * A runnable starting point for whatever is open right now — the real URL and
+ * the targets actually discovered on it. Pointing this at your own app should
+ * not mean editing someone else's demo script.
+ */
+function starterForThisPage() {
+  const url = $('url').value.trim() || 'http://localhost:3000/demo.html';
+  const names = knownTargets.map((t) => t.target);
+  const host = (() => { try { return new URL(url).host; } catch { return 'this page'; } })();
+
+  const asEdge = (t) => {
+    const i = t.indexOf(':');
+    const role = t.slice(0, i), name = t.slice(i + 1).replace(/'/g, '');
+    return role === 'textbox' || role === 'searchbox'
+      ? `fill '${name}' : ${role} = 'something'`
+      : `click '${name}' : ${role}`;
+  };
+
+  const first = names[0] ? `  home -->|${asEdge(names[0])}| home` : '  %% nothing interactive found — press Re-scan targets';
+  return [
+    `%% suite "New flow on ${host}"`,
+    'flowchart TD',
+    `  home(("${url}"))`,
+    '',
+    first,
+    '',
+    '%% targets discovered on this page — click a chip to insert one:',
+    ...(names.length ? names.map((n) => `%%   ${n}`) : ['%%   (none yet)']),
+    '%%',
+    '%% node shapes are the assertions:',
+    '%%   id["/path"]      arriving asserts the url contains /path',
+    '%%   id{{"some text"}} arriving asserts that text is visible',
+  ].join('\n');
+}
+
+let knownTargets = [];
+const setExample = () => {
+  const k = $('example').value;
+  $('script').value = k === 'mine' ? starterForThisPage() : EXAMPLES[k];
+};
+$('example').value = 'meridian';
 $('script').value = EXAMPLES.meridian;
-$('example').onchange = () => { $('script').value = EXAMPLES[$('example').value]; };
+$('example').onchange = setExample;
 
 // Frames land ~120ms behind reality; cursor events land in ~10ms. Without this
 // delay the arrow clicks before the frame showing the click, which reads as
@@ -432,7 +474,10 @@ async function draw(src) {
 }
 
 function showTargets(ev) {
+  knownTargets = ev.items;
   $('url').value = ev.url;
+  // Keep a starter script in step with the page it is a starter for.
+  if ($('example').value === 'mine') $('script').value = starterForThisPage();
   $('tcount').textContent = `${ev.items.length} found`;
   const box = $('targets');
   box.innerHTML = '';
