@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ghostclick recorder</title>
+<style>
+  :root {
+    --ground:#0f1d24; --panel:#162b35; --edge:#23434f; --ink:#dceaef;
+    --dim:#7d9aa5; --signal:#e8a33d; --pass:#79cfa4; --fail:#e8705f;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:12px; background:var(--ground); color:var(--ink);
+    font:13.5px/1.5 ui-sans-serif,"Segoe UI",system-ui,sans-serif; }
+  h1 { font-size:14px; margin:0 0 2px; letter-spacing:-.01em; }
+  p.sub { margin:0 0 12px; color:var(--dim); font-size:12px; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
+  button { font:inherit; font-size:12.5px; font-weight:550; cursor:pointer;
+    padding:7px 11px; border-radius:4px; border:1px solid var(--edge);
+    background:transparent; color:var(--ink); }
+  button.go { background:var(--signal); border-color:var(--signal); color:#17242b; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  .card { background:var(--panel); border:1px solid var(--edge); border-radius:5px;
+    padding:11px; margin-bottom:10px; }
+  .card h2 { font-size:11px; text-transform:uppercase; letter-spacing:.05em;
+    margin:0 0 8px; color:var(--dim); }
+  code, pre { font-family:ui-monospace,Menlo,monospace; }
+  .target { display:inline-block; background:#0d1f27; border:1px solid var(--edge);
+    border-radius:3px; padding:3px 7px; font-size:12px; margin-bottom:8px;
+    max-width:100%; overflow-wrap:anywhere; }
+  input[type=text] { width:100%; background:#0d1f27; color:var(--ink);
+    border:1px solid var(--edge); border-radius:4px; padding:7px 9px;
+    font:12.5px ui-monospace,Menlo,monospace; margin-bottom:8px; }
+  label.chk { display:flex; align-items:center; gap:6px; font-size:12px;
+    color:var(--dim); margin-bottom:8px; }
+  ol { margin:0; padding-left:20px; font-size:12px; max-height:180px; overflow-y:auto; }
+  ol li { padding:2px 0; overflow-wrap:anywhere; }
+  pre { white-space:pre-wrap; overflow-wrap:anywhere; background:#0d1f27;
+    border:1px solid var(--edge); border-radius:4px; padding:9px;
+    font-size:11.5px; max-height:200px; overflow-y:auto; margin:0; }
+  .dim { color:var(--dim); }
+  .warn { color:var(--signal); }
+  .hide { display:none; }
+</style>
+</head>
+<body>
+  <h1>ghostclick recorder</h1>
+  <p class="sub">Pick an element, say what you meant, get a runnable flow.</p>
+
+  <div class="row">
+    <button class="go" id="start">Start recording</button>
+    <button id="stop" disabled>Stop</button>
+    <button id="undo" disabled>Undo step</button>
+  </div>
+
+  <div class="card" id="pickCard">
+    <h2>Next step</h2>
+    <div id="idle" class="dim">Not recording.</div>
+
+    <div id="armPrompt" class="hide">
+      <p class="dim" style="margin:0 0 8px">
+        Press <b>Pick element</b>, then click something on the page. The click is
+        held until you answer.
+      </p>
+      <div class="row" style="margin:0">
+        <button class="go" id="arm">Pick element</button>
+        <button id="assertUrl">Assert current URL</button>
+      </div>
+    </div>
+
+    <div id="answer" class="hide">
+      <div class="target" id="picked"></div>
+      <div class="row" style="margin:0 0 8px">
+        <button id="opClick">Click it</button>
+        <button id="opFill">Type into it</button>
+        <button id="opSee">Assert text visible</button>
+        <button id="opCancel">Cancel</button>
+      </div>
+      <div id="fillBox" class="hide">
+        <input type="text" id="fillValue" placeholder="value to type">
+        <label class="chk"><input type="checkbox" id="fillSecret"> secret — record as a vault reference, never the value</label>
+        <button class="go" id="fillGo">Add step</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Steps <span class="dim" id="count"></span></h2>
+    <ol id="steps"><li class="dim">Nothing yet.</li></ol>
+  </div>
+
+  <div class="card">
+    <h2>Flow</h2>
+    <pre id="flow" class="dim">Recording will appear here.</pre>
+    <div class="row" style="margin:10px 0 0">
+      <button id="copy">Copy mermaid</button>
+      <button id="send">Send to ghostclick</button>
+    </div>
+    <p class="sub" id="sendNote" style="margin:8px 0 0"></p>
+  </div>
+
+  <script type="module" src="panel.js"></script>
+</body>
+</html>

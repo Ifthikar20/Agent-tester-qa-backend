@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "ghostclick recorder",
+  "version": "0.1.0",
+  "description": "Pick an element, say what to do with it, get a runnable mermaid flow.",
+  "permissions": ["scripting", "storage", "tabs", "sidePanel"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "side_panel": { "default_path": "panel.html" },
+  "action": { "default_title": "ghostclick recorder" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["lib/propose.js", "content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

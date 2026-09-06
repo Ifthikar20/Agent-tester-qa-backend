@@ -292,6 +292,16 @@ function handle(ev) {
       }, LAG);
       break;
 
+    case 'imported':
+      // Arrived from the browser extension. Loaded, never auto-run.
+      $('script').value = ev.flow;
+      $('rcount').textContent = `${ev.steps} steps imported`;
+      $('flow').textContent = ev.flow;
+      $('flow').classList.add('on');
+      lastFlow = ev.flow;
+      $('recUse').disabled = false;
+      break;
+
     case 'targets':  showTargets(ev); break;
     case 'diagram':  draw(ev.mermaid); break;
 

@@ -17,6 +17,35 @@ const HOME = process.env.HOME_URL || `http://localhost:${PORT}/demo.html`;
 
 const app = express();
 app.use(express.static('public'));
+app.use(express.json({ limit: '512kb' }));
+
+/**
+ * Where the browser extension drops a recording.
+ *
+ * It is validated here and put in the viewer's script box — never run. Any
+ * page you visit can reach a localhost port, so an endpoint that executed what
+ * it was handed would be a remote-code path with extra steps. A human presses
+ * Run.
+ */
+app.use('/api', (req, res, next) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Headers', 'content-type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+app.post('/api/recording', (req, res) => {
+  const flow = String(req.body?.flow ?? '');
+  let plan;
+  try {
+    plan = validate(flatten(parseFlow(flow)));
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: err.message });
+  }
+  emit({ t: 'imported', flow, steps: plan.steps.length });
+  emit({ t: 'log', level: 'info', msg: `recording imported — ${plan.steps.length} steps, not run` });
+  res.json({ ok: true, steps: plan.steps.length });
+});
 // Vendored so the viewer works with no CDN and no network.
 app.get('/vendor/mermaid.min.js', (_req, res) =>
   res.sendFile(require.resolve('mermaid/dist/mermaid.min.js')));

@@ -1,13 +1,17 @@
 /**
- * Teach mode.
+ * Teach mode, server side.
  *
  * You drive the app by hand on the canvas; this watches and writes the script.
  * Because canvas clicks go through VirtualCursor -> CDP -> real DOM events, an
  * injected capture-phase listener sees them exactly as it would see a human on
- * a real browser. Nothing here is reachable from a generated plan: the script
- * below is fixed, shipped code, not something the DSL can produce.
+ * a real browser.
  *
- * Two things make it trustworthy rather than merely clever:
+ * How an element gets NAMED lives in extension/lib/propose.js, which is read
+ * off disk and injected here and loaded as a content script by the extension.
+ * One copy, because the extension proposes a target on the user's machine and
+ * this runner has to resolve the same one on ours.
+ *
+ * Two things make a recording trustworthy rather than merely clever:
  *
  *  - The page never decides on a target, it PROPOSES several. Each proposal is
  *    resolved with the same locator the executor will use and kept only if it
@@ -15,146 +19,80 @@
  *
  *  - A click usually destroys the thing that was clicked — submit a form and
  *    the form is gone before any async check can run. So the page also counts
- *    matches synchronously, at event time, while the DOM still looks the way
- *    it did. Playwright's verdict wins when the element survives; the in-page
+ *    matches synchronously, at event time, while the DOM still looks the way it
+ *    did. Playwright's verdict wins when the element survives; the click-time
  *    count is what stands in when it doesn't.
  *
  * Everything reaches the recorder through one ordered channel from the page,
  * URL changes included. Watching navigation separately raced the bindings and
  * filed clicks after the page transitions they caused.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { parseTarget, locate } from './targets.js';
 
-/** Runs in the page. Proposes and counts; never decides. */
-function inPageRecorder() {
+const PROPOSE_SRC = readFileSync(
+  fileURLToPath(new URL('./extension/lib/propose.js', import.meta.url)), 'utf8');
+
+/** The listeners. Naming is delegated to __gcPropose, above. */
+const LISTENERS = `
+(function () {
   if (window.__gcRecorderInstalled) return;
   window.__gcRecorderInstalled = true;
 
-  let n = 0;
-  const SCOPE = 'a,button,input,select,textarea,[role],[data-testid],[onclick],[tabindex]';
-  const txt = (s) => (s ?? '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  var SCOPE = self.__gcPropose.SCOPE;
+  var propose = self.__gcPropose.propose;
+  var n = 0;
 
-  const ROLE_BY_TAG = { a: 'link', button: 'button', select: 'combobox', textarea: 'textbox' };
-  const ROLE_BY_INPUT = {
-    button: 'button', submit: 'button', reset: 'button', image: 'button',
-    checkbox: 'checkbox', radio: 'radio', search: 'searchbox', range: 'slider',
-    number: 'spinbutton',
-  };
-
-  const roleOf = (el) => {
-    const explicit = el.getAttribute && el.getAttribute('role');
-    if (explicit) return explicit.trim().split(/\s+/)[0];
-    const tag = el.tagName.toLowerCase();
-    if (tag === 'input') return ROLE_BY_INPUT[el.type] ?? 'textbox';
-    if (tag === 'a') return el.hasAttribute('href') ? 'link' : null;
-    if (/^h[1-6]$/.test(tag)) return 'heading';
-    return ROLE_BY_TAG[tag] ?? null;
-  };
-
-  const labelText = (el) => {
-    if (el.labels && el.labels.length) return txt(el.labels[0].textContent);
-    const wrap = el.closest && el.closest('label');
-    if (wrap) return txt(wrap.textContent);
-    const by = el.getAttribute && el.getAttribute('aria-labelledby');
-    if (by) {
-      const t = by.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? '').join(' ');
-      if (txt(t)) return txt(t);
-    }
-    return '';
-  };
-
-  const ownText = (el) => {
-    if (el.tagName === 'INPUT') return el.type === 'submit' ? el.value : '';
-    // innerText is layout-aware, so it skips <style>/<script> and hidden nodes.
-    // textContent would happily scrape a stylesheet into an element's "name".
-    return el.innerText ?? el.textContent ?? '';
-  };
-
-  const nameOf = (el) =>
-    txt(el.getAttribute && el.getAttribute('aria-label')) ||
-    labelText(el) ||
-    txt(ownText(el)) ||
-    txt(el.getAttribute && el.getAttribute('title'));
-
-  /** How many elements would this proposal match, right now? */
-  const countMatching = (cand) => {
-    const i = cand.indexOf(':');
-    const kind = cand.slice(0, i);
-    const arg = cand.slice(i + 1);
-    const all = [...document.querySelectorAll(SCOPE)];
-    if (kind === 'testid') {
-      return all.filter((e) => (e.getAttribute('data-testid') ?? e.getAttribute('data-test-id')) === arg).length;
-    }
-    if (kind === 'label') return all.filter((e) => labelText(e) === arg).length;
-    if (kind === 'placeholder') return all.filter((e) => e.getAttribute('placeholder') === arg).length;
-    if (kind === 'text') return -1;   // ambiguous by nature; last resort only
-    return all.filter((e) => roleOf(e) === kind && nameOf(e) === arg).length;
-  };
-
-  // Most stable first. The server keeps the first that holds up.
-  const candidates = (el) => {
-    const out = [];
-    const testid = el.getAttribute && (el.getAttribute('data-testid') || el.getAttribute('data-test-id'));
-    if (testid) out.push(`testid:${testid}`);
-
-    const role = roleOf(el);
-    const name = nameOf(el);
-    const label = labelText(el);
-    if (label) out.push(`label:${label}`);
-    if (role && name) out.push(`${role}:${name}`);
-
-    const ph = el.getAttribute && el.getAttribute('placeholder');
-    if (ph) out.push(`placeholder:${txt(ph)}`);
-    if (name) out.push(`text:${name}`);
-
-    return [...new Set(out)].map((target) => ({ target, n: countMatching(target) }));
-  };
-
-  const report = (kind, el, extra = {}) => {
+  function report(kind, el, extra) {
     if (!el || !el.getAttribute) return;
-    const id = 'gc' + ++n;
+    var id = 'gc' + ++n;
     el.setAttribute('data-gc-el', id);
     try {
       // href rides along so URL changes stay ordered with the actions.
-      window.__gcRecord({ kind, id, href: location.href, candidates: candidates(el), ...extra });
-    } catch { /* binding not attached yet */ }
-  };
+      var msg = { kind: kind, id: id, href: location.href, candidates: propose(el) };
+      for (var k in (extra || {})) msg[k] = extra[k];
+      window.__gcRecord(msg);
+    } catch (e) { /* binding not attached yet */ }
+  }
 
-  const FIELD = /^(input|textarea|select)$/;
+  var FIELD = /^(input|textarea|select)$/;
 
-  document.addEventListener('click', (e) => {
+  document.addEventListener('click', function (e) {
     // A click on nothing in particular is not an action. Recording it anyway
     // means naming a <div> by whatever text happens to be inside it, which is
     // exactly the unstable target a recorder exists to avoid.
-    const el = e.target.closest(SCOPE);
+    var el = e.target.closest(SCOPE);
     if (!el) return;
-    const tag = el.tagName.toLowerCase();
-    // Clicking a text field is just focus; the `change` that follows carries
-    // the real intent. Checkboxes and radios are the exception — there the
-    // click IS the action.
-    if (FIELD.test(tag) && !['checkbox', 'radio', 'submit', 'button'].includes(el.type)) return;
+    var tag = el.tagName.toLowerCase();
+    // Clicking a text field is just focus; the change that follows carries the
+    // real intent. Checkboxes and radios are the exception — the click IS it.
+    if (FIELD.test(tag) && ['checkbox','radio','submit','button'].indexOf(el.type) === -1) return;
     report('click', el);
   }, true);
 
-  document.addEventListener('change', (e) => {
-    const el = e.target;
-    const tag = el.tagName && el.tagName.toLowerCase();
+  document.addEventListener('change', function (e) {
+    var el = e.target;
+    var tag = el.tagName && el.tagName.toLowerCase();
     if (!FIELD.test(tag)) return;
-    if (['checkbox', 'radio'].includes(el.type)) return;   // recorded as a click
+    if (['checkbox','radio'].indexOf(el.type) !== -1) return;   // recorded as a click
     report('fill', el, {
       // A typed password never leaves the page. The script gets a vault
       // reference that fails loudly until someone maps it.
       secret: el.type === 'password',
-      value: el.type === 'password' ? null : String(el.value ?? '').slice(0, 500),
+      value: el.type === 'password' ? null : String(el.value == null ? '' : el.value).slice(0, 500),
     });
   }, true);
 
-  for (const ev of ['popstate', 'hashchange']) {
-    window.addEventListener(ev, () => {
-      try { window.__gcRecord({ kind: 'url', href: location.href }); } catch {}
+  ['popstate', 'hashchange'].forEach(function (ev) {
+    window.addEventListener(ev, function () {
+      try { window.__gcRecord({ kind: 'url', href: location.href }); } catch (e) {}
     });
-  }
-}
+  });
+})();
+`;
+
+const INJECT = `${PROPOSE_SRC}\n${LISTENERS}`;
 
 export class Recorder {
   constructor(page, { onStep, onError } = {}) {
@@ -173,10 +111,19 @@ export class Recorder {
         .then(() => this.#ingest(payload))
         .catch((e) => this.onError(e.message));
     });
-    await this.page.addInitScript(inPageRecorder);
+    await this.page.addInitScript({ content: INJECT });
     // The page is already open, so install into it too rather than waiting for
-    // the next navigation.
-    await this.page.evaluate(inPageRecorder).catch(() => {});
+    // the next navigation. (A strict CSP can refuse this; the init script on
+    // the next navigation is not CSP-bound and will still land.)
+    await this.page.addScriptTag({ content: INJECT }).catch(() => {});
+  }
+
+  /** Adopt a recording made elsewhere — the browser extension, typically. */
+  adopt(steps) {
+    this.steps = Array.isArray(steps) ? steps.slice() : [];
+    this.lastUrl = null;
+    this.onStep(this.steps.at(-1), this.steps);
+    return this.steps;
   }
 
   start(url) {
@@ -214,8 +161,7 @@ export class Recorder {
   /**
    * Keep the first proposal that resolves to exactly one element AND to the
    * element that was interacted with. When that element is already gone — the
-   * usual case for a submit — fall back to what the page counted at the moment
-   * of the click.
+   * usual case for a submit — fall back to what the page counted at click time.
    */
   async #verify(candidates, id) {
     const tagged = this.page.locator(`[data-gc-el="${id}"]`);

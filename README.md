@@ -11,6 +11,7 @@ npm start                         # → http://localhost:3000
 
 npm run check                     # end-to-end, against a running server
 npm run check:teach               # demonstrate by hand, then replay what it wrote
+npm run check:extension           # the picker, the shared proposer, the hand-off
 npm run check:diagram             # generated mermaid vs. the real parser
 ```
 
@@ -119,7 +120,41 @@ script.
 `npm run check:teach` drives the canvas the way a human would, then replays the
 result and asserts the typed password is nowhere in it.
 
+## Recording somewhere you can't reach
+
+Teach mode only records apps ghostclick's own browser can open. An app behind
+SSO, a VPN, or a real login is a wall — your Chrome is already through it. So
+`extension/` is a Chrome extension that records there instead.
+
+Load it from `chrome://extensions` (Developer mode → Load unpacked), open the
+app, and click the toolbar icon. Then:
+
+```
+Pick element   →  the next click is HELD, not delivered
+panel asks     →  Click it / Type into it / Assert text visible
+you answer     →  the step is written, and the click is replayed for real
+```
+
+Pick, annotate, then perform — in that order. Arm the picker, click a sidebar
+link without suppressing it, and the page navigates away while the panel is
+still asking about a button that no longer exists.
+
+**Send to ghostclick** posts the flow to `/api/recording`, which validates it
+through the same gate as everything else and drops it in the script box. It is
+never run automatically: any page you visit can reach a localhost port, so an
+endpoint that executed what it was handed would be a remote-code path with
+extra steps.
+
+`extension/lib/propose.js` — how an element gets named — is read off disk and
+injected by the server's teach mode as well, so the extension and the runner
+cannot disagree about what a target means. `npm run check:extension` asserts
+that, drives the picker against a real page, and loads the extension in Chrome.
+
+See `extension/README.md` for the rest, including why replaying a login needs
+either the login recorded or a session you have chosen to export.
+
 ## Any URL
+
 
 
 `goto` reaches any origin on the allowlist:
@@ -310,6 +345,8 @@ silently inside someone else's docs.
 | `public/shop.html` | Nimbus — cart total ignores quantity |
 | `scripts/check.js` | end-to-end: rejections, discovery, all three runs |
 | `scripts/check-teach.js` | demonstrate by hand, replay what it wrote |
+| `scripts/check-extension.js` | picker suppression, replay, hand-off, real Chrome load |
+| `extension/` | Chrome recorder for apps ghostclick cannot reach |
 | `scripts/check-diagram.js` | generated mermaid vs. the real parser |
 
 ---
