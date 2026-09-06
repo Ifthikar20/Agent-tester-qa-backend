@@ -204,9 +204,13 @@
       const h = squash(domText(heading));
       if (h && h.length <= NAME_MAX) return h;
     }
-    // Otherwise the first sentence, which is usually the headline anyway.
-    const first = squash(squash(nameOf(el)).split(/(?<=[.?!])\s/)[0]);
-    return first && first.length <= NAME_MAX ? first : null;
+    // Otherwise a readable prefix, ending on a whole word — not on a sentence
+    // boundary, because "vs." and "e.g." are not the ends of sentences and
+    // cutting there produces a handle that reads as a bug.
+    const whole = squash(nameOf(el));
+    if (!whole) return null;
+    const first = whole.length <= NAME_MAX ? whole : whole.slice(0, NAME_MAX).replace(/\s+\S*$/, '');
+    return first.length > 11 ? first : null;
   };
 
   const propose = (el) => {

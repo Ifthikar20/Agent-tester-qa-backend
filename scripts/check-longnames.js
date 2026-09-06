@@ -150,6 +150,57 @@ if (asRole === 'button:Load more results') ok('and the role proposal has the rea
 else bad('and the role proposal has the real casing', asRole ?? '(none offered)');
 
 // ---------------------------------------------------------------------------
+console.log('\n— 1c · a name with a colon in it ——————————————————');
+
+/**
+ * The aria snapshot is YAML, and YAML single-quotes an entry whose content
+ * would otherwise be ambiguous — which happens as soon as a name contains
+ * ": ". A price, a stat, a headline with a colon. Discovery's pattern only
+ * accepted the bare form, so those elements vanished from the target panel,
+ * from the entry fingerprint, and from the "did you mean" hint: the tool
+ * insisted a link was not there while you were looking at it.
+ */
+const { discover } = await import('../targets.js');
+const found = (await discover(page)).map((t) => t.target);
+const withColon = found.find((t) => /Joint vs\. separate bank accounts: which/.test(t));
+if (withColon) ok('discovery sees a name containing ": "', `${found.length} targets in total`);
+else bad('discovery sees a name containing ": "', `not among ${found.length}: ${found.slice(0, 3).join(', ')}`);
+
+// ---------------------------------------------------------------------------
+console.log('\n— 1d · a step recorded before the fix ————————————');
+
+// A recording made by the old proposer keeps its mangled name — the fix
+// changes what gets written, not what is already written. So the failure has
+// to name the mangling and hand back something you can paste.
+const realName = await page.getByRole('link', { name: /Joint vs/ }).first()
+  .evaluate((e) => e.textContent.replace(/\s+/g, ' ').trim());
+const stale = `link:${realName.toUpperCase().slice(0, 17)}${realName.slice(17, 80)}`;
+
+let msg = null;
+try {
+  await OPS.click(page, validate({ suite: 'x', steps: [{ op: 'click', target: stale }] }).steps[0], ctx);
+} catch (e) { msg = e.message; }
+
+if (msg && /the page has that element/.test(msg)) ok('it says the element IS there');
+else bad('it says the element IS there', (msg ?? 'it passed').split('\n')[0].slice(0, 60));
+
+if (msg && /cut short and in the wrong case/.test(msg)) ok('and names both manglings');
+else bad('and names both manglings', 'the diagnosis is vague');
+
+const use = msg?.match(/use instead:\s+(\S.*)/)?.[1]?.trim();
+if (use) {
+  let works = false;
+  try {
+    await OPS.click(page, validate({ suite: 'x', steps: [{ op: 'click', target: use }] }).steps[0], ctx);
+    works = true;
+  } catch { /* no */ }
+  if (works) ok('and the replacement it offers works', use.slice(0, 52));
+  else bad('and the replacement it offers works', use);
+} else bad('and the replacement it offers works', 'none offered');
+
+await page.goto(PAGE, { waitUntil: 'domcontentloaded' });
+
+// ---------------------------------------------------------------------------
 console.log('\n— 2 · scrolling under a sticky header ————————————');
 
 await page.goto(PAGE, { waitUntil: 'domcontentloaded' });

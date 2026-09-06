@@ -162,7 +162,20 @@ export async function discover(page, limit = 80) {
 
   for (const line of snap.split('\n')) {
     // "- button "Sign in"" / "- textbox "Email":" — role then quoted name.
-    const m = line.match(/^\s*-\s+([a-z]+)\s+"((?:[^"\\]|\\.)*)"/);
+    //
+    // But the snapshot is YAML, and YAML single-quotes an entry whose content
+    // would otherwise be ambiguous — which happens as soon as the accessible
+    // name contains ": ". A price, a stat, a headline with a colon: all of them
+    // arrive as `- 'link "Take-home pay: $2,841"'`, and a pattern that only
+    // accepts the bare form drops them. Silently: they vanish from the target
+    // panel, from the entry fingerprint, and from the "did you mean" hint, so
+    // the tool insists a link is not there while you are looking at it.
+    let body = line.replace(/^\s*-\s+/, '');
+    if (body.startsWith("'")) {
+      const end = body.lastIndexOf("'");
+      if (end > 0) body = body.slice(1, end).replace(/''/g, "'");
+    }
+    const m = body.match(/^([a-z]+)\s+"((?:[^"\\]|\\.)*)"/);
     if (!m) continue;
     const [, role, name] = m;
     if (!INTERACTIVE.has(role)) continue;

@@ -120,17 +120,64 @@ function drift(at, box, viewport) {
            dist: Math.round(Math.hypot(cx - px, cy - py)) };
 }
 
+const nameOfTarget = (t) => t.slice(t.indexOf(':') + 1);
+
+/** A readable prefix, ending on a whole word. */
+const shorten = (s, max) => (s.length <= max ? s : s.slice(0, max).replace(/\s+\S*$/, ''));
+
 /** `menuitem:Catch harmful AI answers …` and `link:Catch harmful AI answers`. */
 function nearby(target, here) {
-  const name = target.slice(target.indexOf(':') + 1).toLowerCase().slice(0, 40);
+  const name = nameOfTarget(target).toLowerCase().slice(0, 40);
   if (name.length < 4) return [];
   return here
     .filter((t) => t !== target)
     .filter((t) => {
-      const other = t.slice(t.indexOf(':') + 1).toLowerCase();
+      const other = nameOfTarget(t).toLowerCase();
       return other.startsWith(name.slice(0, 20)) || name.startsWith(other.slice(0, 20));
     })
     .slice(0, 4);
+}
+
+/**
+ * Is this target a name the page still has, only mangled?
+ *
+ * Two mistakes produced exactly that, and both came from the recorder rather
+ * than from the page changing:
+ *
+ *  - the name was CUT to a fixed length, so an exact lookup could never match;
+ *  - the name was taken from RENDERED text, so `text-transform: uppercase`
+ *    made it SHOUT while the accessible name did not.
+ *
+ * Both are fixed at the source now, but a script recorded before that stays
+ * broken — the fix changes what gets written, not what is already written. So
+ * when the live page has a name this one is a case-insensitive prefix of, say
+ * so and hand back the target that would work, ready to paste.
+ */
+function repaired(target, here) {
+  const want = nameOfTarget(target);
+  const kind = target.slice(0, target.indexOf(':'));
+  if (want.length < 12) return null;
+
+  const hit = here.find((t) => {
+    const real = nameOfTarget(t);
+    return real.length > want.length && real.toLowerCase().startsWith(want.toLowerCase());
+  });
+  if (!hit) return null;
+
+  const real = nameOfTarget(hit);
+  const cut = real.length > want.length;
+  const shouted = want !== real.slice(0, want.length);
+
+  // Offer the shortest thing that still identifies it. A `text:` target matches
+  // on a substring, so a readable prefix is both enough and what the recorder
+  // produces now. Trimmed at a word boundary, not a sentence one — "vs." and
+  // "e.g." are not the ends of sentences, and cutting there reads as a bug.
+  const short = shorten(real, 72);
+  const suggestion = short.length < real.length && short.length > 11
+    ? `text:${short}`
+    : `${kind}:${real}`;
+
+  return { real, cut, shouted, suggestion };
 }
 
 async function pointAt(page, target, ctx, opts = {}) {
@@ -142,6 +189,21 @@ async function pointAt(page, target, ctx, opts = {}) {
     // page DOES offer is the thing that tells you why — most often a menu that
     // was open while you recorded and is shut now.
     const here = (await discover(page).catch(() => [])).map((t) => t.target);
+    const fix = repaired(target, here);
+    if (fix) {
+      // Not "it vanished" — it is right there under a name this one is a
+      // mangled version of. Say which mangling, and give the replacement.
+      const why = [fix.cut && 'cut short', fix.shouted && 'in the wrong case'].filter(Boolean).join(' and ');
+      throw new Error(
+        `"${target}" never became visible — but the page has that element, ` +
+        `under a name this one is ${why}.\n` +
+        `  on the page:  ${fix.real.slice(0, 96)}${fix.real.length > 96 ? '…' : ''}\n` +
+        `  use instead:  ${fix.suggestion}\n` +
+        `  Recordings made before this was fixed keep the old name — re-record the step, ` +
+        `or paste the line above over it.`
+      );
+    }
+
     const near = nearby(target, here);
     throw new Error(
       `"${target}" never became visible.` +

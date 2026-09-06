@@ -558,6 +558,43 @@ three files.
 
 ---
 
+## A name with a colon in it was invisible
+
+The aria snapshot Playwright returns is YAML, and YAML single-quotes an entry
+whose content would otherwise be ambiguous — which happens the moment a name
+contains `": "`:
+
+```
+  - link "Features":
+  - 'link "Take-home pay: $2,841.17 Free calculator"'
+```
+
+Discovery's pattern only accepted the bare form, so the second one was dropped.
+Silently. Those elements vanished from the target panel, from the entry
+fingerprint, and from the "did you mean" hint — so the tool would insist a link
+was not on the page while you were looking at it. Prices, stats and headlines
+are exactly the names this hits.
+
+## A step recorded before a fix stays broken
+
+Fixing the recorder changes what gets *written*, not what is already written. A
+script carrying an old mangled name — cut at 80 characters, or in the rendered
+casing rather than the accessible one — keeps failing until someone changes it.
+
+So the failure now recognises its own past mistakes and hands back the cure:
+
+```
+"link:BIWEEKLY PAYCHECK Example Gross pay $3,846.15 Taxes & deducti" never became
+visible — but the page has that element, under a name this one is cut short and
+in the wrong case.
+  on the page:  Biweekly paycheck Example Gross pay $3,846.15 Taxes & deductions …
+  use instead:  text:Biweekly paycheck Example Gross pay $3,846.15
+  Recordings made before this was fixed keep the old name — re-record the step,
+  or paste the line above over it.
+```
+
+---
+
 ## Where a click actually took you
 
 A link that "works" can still be wrong, and none of it is visible from the final
