@@ -13,6 +13,7 @@ npx playwright install chromium   # skip if your sandbox already ships one
 npm start                         # → http://localhost:3000
 
 npm run check                     # end-to-end, against a running server
+npm run check:runner              # a command is never dropped, the lock always clears
 npm run check:suites              # onboarding, the origin gate, suite runs
 npm run check:recording           # repeated links, scrolling, jump-to-top, timeouts
 npm run check:console             # the canvas paints, and the wheel reaches the page
@@ -434,6 +435,38 @@ turns out to be true:
 Each of those is a real gap, not a subtlety. If your flow needs one, say so and
 it becomes an op.
 
+## “Run script does nothing”
+
+Three separate faults produced that one symptom, and not one of them printed
+anything anywhere.
+
+**A dropped message.** The socket's connection handler awaited
+`publishTargets()` — a full read of the page's accessibility tree — *before*
+attaching its message listener, and `ws` discards messages that arrive with no
+listener on. Anything you did in that window vanished. The window is as long as
+that scan takes, which on a real site is comfortably long enough to click a
+button in. The listener is attached first now, before the greeting.
+
+**A wedged lock.** `run()` cleared `running` on the happy path only. A throw
+while writing history or drawing the report left the executor locked for the
+life of the process, and every later run was refused — as a `warn`, buried in
+the log. It clears in a `finally` now, and the refusal is an error.
+
+**A dead process.** `run(plan)` is called un-awaited so the socket stays
+responsive during a run. But an un-awaited rejection terminates Node, so one
+unexpected throw took the entire runner down. Both call sites catch now, and
+there is a last-resort `unhandledRejection` handler that says so out loud
+instead of dying quietly.
+
+The client had a matching version of the same problem: a socket that dropped
+mid-run never received `run.end`, so its Run button stayed disabled until you
+reloaded. The `ready` greeting carries the executor's real state now.
+
+`npm run check:runner` covers all three — including sending a command in the
+same tick as `open`, which is the race.
+
+---
+
 ## A black canvas is not a crash
 
 Chrome's screencast is damage-driven: a page sitting still emits no frames at
@@ -726,6 +759,7 @@ silently inside someone else's docs.
 | `scripts/check-extension.js` | picker suppression, replay, hand-off, real Chrome load |
 | `extension/` | Chrome recorder for apps ghostclick cannot reach |
 | `scripts/check-diagram.js` | generated mermaid vs. the real parser |
+| `scripts/check-runner.js` | dropped commands, the run lock, surviving a throw |
 | `scripts/check-suites.js` | onboarding, the one-origin rule, the gate, suite runs |
 | `scripts/check-recording.js` | ambiguous links, scrolling, jump-to-top, URL timeouts |
 | `scripts/check-console.js` | the canvas paints on arrival, and the wheel reaches the page |

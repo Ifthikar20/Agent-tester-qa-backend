@@ -9,6 +9,7 @@
     "dev": "vite --config web/vite.config.js",
     "build": "vite build --config web/vite.config.js",
     "check": "node scripts/check.js",
+    "check:runner": "node scripts/check-runner.js",
     "check:suites": "node scripts/check-suites.js",
     "check:recording": "node scripts/check-recording.js",
     "check:console": "node scripts/check-console.js",

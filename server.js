@@ -242,7 +242,11 @@ app.post('/api/suites/:id/run', async (req, res) => {
     }
     plan.suite = `${suite.name} · ${c.name}`;
     emit({ t: 'diagram', kind: 'plan', mermaid: toMermaid(plan) });
-    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name });
+    // Express 4 does not catch a rejection from an async handler, so an
+    // unexpected throw here would take the process with it rather than failing
+    // one case. A suite run survives a bad case.
+    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name })
+      .catch((err) => ({ ok: false, passed: 0, total: 0, error: err.message }));
     outcomes.push({ case: c.id, name: c.name, ...r });
   }
   const passed = outcomes.filter((o) => o.ok).length;
@@ -294,10 +298,10 @@ app.post('/api/suites/quickstart', async (req, res) => {
     });
     suites.updatePage(suite.id, pg.id, { targets: items, linked });
   } catch (err) {
-    running = false;
     return fail(res, err);
+  } finally {
+    running = false;
   }
-  running = false;
 
   const flow = suites.pageCheckFlow(suites.get(suite.id), suites.get(suite.id).pages[0]);
   const c = suites.addCase(suite.id, { name: `${pg.name} loads`, pageId: pg.id, flow }, checkFlow);
@@ -480,7 +484,9 @@ let running = false;
  */
 async function run(plan, meta = {}) {
   if (running) {
-    emit({ t: 'log', level: 'warn', msg: 'A run is already in progress' });
+    // An error, not a warning. A refused run does nothing visible, so if this
+    // is quiet the only symptom is a button that appears not to work.
+    emit({ t: 'log', level: 'error', msg: 'A run is already in progress — wait for it to finish' });
     return { ok: false, passed: 0, total: 0, error: 'A run is already in progress' };
   }
   running = true;
@@ -491,61 +497,71 @@ async function run(plan, meta = {}) {
   const ctx = { cursor, emit, onNavigate: publishTargets };
   emit({ t: 'run.start', total: plan.steps.length, suite: plan.suite, ...meta });
 
-  for (const [i, step] of plan.steps.entries()) {
-    emit({ t: 'step.start', i, step });
-    const t0 = Date.now();
-    try {
-      await OPS[step.op](page, step, ctx);
-      results.push({ i, ok: true, ms: Date.now() - t0 });
-      emit({ t: 'step.pass', i, ms: Date.now() - t0 });
-    } catch (err) {
-      results.push({ i, ok: false, ms: Date.now() - t0, error: err.message });
-      emit({ t: 'step.fail', i, ms: Date.now() - t0, error: err.message });
-      break;
+  // Everything from here to the finally must be able to throw without wedging
+  // the executor. It used to clear the lock on the happy path only, so a
+  // failure while recording history or drawing the report left `running` true
+  // for the life of the process — and from then on every Run was silently
+  // refused. "Run script does nothing" with no error in the log is exactly
+  // what that looks like from the outside.
+  try {
+    for (const [i, step] of plan.steps.entries()) {
+      emit({ t: 'step.start', i, step });
+      const t0 = Date.now();
+      try {
+        await OPS[step.op](page, step, ctx);
+        results.push({ i, ok: true, ms: Date.now() - t0 });
+        emit({ t: 'step.pass', i, ms: Date.now() - t0 });
+      } catch (err) {
+        results.push({ i, ok: false, ms: Date.now() - t0, error: err.message });
+        emit({ t: 'step.fail', i, ms: Date.now() - t0, error: err.message });
+        break;
+      }
+      await sleep(120);
     }
-    await sleep(120);
+
+    const passed = results.filter((r) => r.ok).length;
+    const ok = results.every((r) => r.ok);
+    const entry = history.record({
+      suite: plan.suite,
+      suiteId: meta.suiteId ?? null,
+      caseId: meta.caseId ?? null,
+      caseName: meta.caseName ?? null,
+      url: plan.steps.find((s) => s.op === 'goto')?.url ?? '',
+      ms: results.reduce((a, r) => a + (r.ms ?? 0), 0),
+      results,
+    });
+    // Same function, same IR — with outcomes folded in, the plan diagram
+    // becomes the run report. Drawing it is a nicety; failing to draw it must
+    // not cost you the run's verdict.
+    try {
+      emit({ t: 'diagram', kind: 'report', mermaid: toMermaid(plan, { results }) });
+    } catch (err) {
+      emit({ t: 'log', level: 'error', msg: `could not draw the report: ${err.message}` });
+    }
+    await publishTargets();
+    return { ok, passed, total: results.length, error: entry.error };
+  } finally {
+    // Clear the lock BEFORE announcing the end. run.end means "you may start
+    // another run"; emitting it while still locked makes a caller that runs
+    // back-to-back scripts hang on a silently refused second run.
+    running = false;
+    recorder.recording = wasRecording;
+    emit({ t: 'run.end', ok: results.every((r) => r.ok) && results.length > 0, ...meta });
   }
-
-  const passed = results.filter((r) => r.ok).length;
-  const ok = results.every((r) => r.ok);
-  const entry = history.record({
-    suite: plan.suite,
-    suiteId: meta.suiteId ?? null,
-    caseId: meta.caseId ?? null,
-    caseName: meta.caseName ?? null,
-    url: plan.steps.find((s) => s.op === 'goto')?.url ?? '',
-    ms: results.reduce((a, r) => a + (r.ms ?? 0), 0),
-    results,
-  });
-  // Same function, same IR — with outcomes folded in, the plan diagram
-  // becomes the run report.
-  emit({ t: 'diagram', kind: 'report', mermaid: toMermaid(plan, { results }) });
-  await publishTargets();
-
-  // Clear the lock BEFORE announcing the end. run.end means "you may start
-  // another run"; emitting it while still locked makes a caller that runs
-  // back-to-back scripts hang on a silently refused second run.
-  running = false;
-  recorder.recording = wasRecording;
-  emit({ t: 'run.end', ok, ...meta });
-  return { ok, passed, total: results.length, error: entry.error };
 }
 
 // ---------------------------------------------------------------- sockets
-wss.on('connection', async (ws) => {
+wss.on('connection', (ws) => {
   clients.add(ws);
 
-  // Frames are damage-driven: a static page emits nothing, so a viewer
-  // connecting to an idle session would stare at a blank canvas. Prime them
-  // with the last frame we held.
-  if (lastFrame) ws.send(lastFrame, { binary: true });
-  ws.send(JSON.stringify({
-    t: 'ready', url: page.url(),
-    origins: origins.list(),
-    secrets: vault.names(),        // names only — a value never leaves the server
-  }));
-  await publishTargets();
-
+  // LISTEN FIRST, then greet.
+  //
+  // This handler used to `await publishTargets()` before attaching the message
+  // listener, and 'ws' drops messages that arrive with no listener on. So
+  // anything you did in that window was silently discarded — and the window is
+  // exactly as long as it takes to read the accessibility tree of whatever page
+  // is open, which on a real site is long enough to click a button in. The
+  // symptom was Run script doing nothing at all, with no error anywhere.
   ws.on('message', async (raw) => {
     let m;
     try { m = JSON.parse(raw); } catch { return; }
@@ -563,7 +579,15 @@ wss.on('connection', async (ws) => {
       // Draw the plan before running it, so a diagram exists even if step 0
       // fails. The run replaces it with the outcome version.
       emit({ t: 'diagram', kind: 'plan', mermaid: toMermaid(plan) });
-      run(plan);
+      // Deliberately not awaited — the socket must stay responsive while a run
+      // is in flight. But an un-awaited promise that rejects is an unhandled
+      // rejection, and Node kills the process for those: one unexpected throw
+      // inside a step and the whole runner disappeared, which from the browser
+      // looks exactly like "Run script does nothing".
+      run(plan).catch((err) => {
+        emit({ t: 'log', level: 'error', msg: `run failed: ${err.message}` });
+        emit({ t: 'run.end', ok: false });
+      });
       return;
     }
 
@@ -672,6 +696,33 @@ wss.on('connection', async (ws) => {
   });
 
   ws.on('close', () => clients.delete(ws));
+
+  // Now say hello. Frames are damage-driven — a static page emits nothing — so
+  // prime the viewer with the last one we held rather than leaving it black.
+  if (lastFrame) ws.send(lastFrame, { binary: true });
+  ws.send(JSON.stringify({
+    t: 'ready', url: page.url(),
+    // The executor's real state. Without this a socket that reconnected during
+    // a run kept a disabled Run button until someone reloaded the page.
+    running,
+    recording: recorder.recording,
+    origins: origins.list(),
+    secrets: vault.names(),        // names only — a value never leaves the server
+  }));
+  publishTargets();
+});
+
+/**
+ * Last line of defence.
+ *
+ * Node terminates on an unhandled rejection, so a stray throw anywhere in an
+ * un-awaited path used to take the runner down with no message — the browser
+ * just stopped responding. Every known path is now caught at its source; this
+ * says so out loud if a new one appears, rather than dying silently.
+ */
+process.on('unhandledRejection', (err) => {
+  console.error(`\n  unhandled rejection: ${err?.stack ?? err}\n`);
+  try { emit({ t: 'log', level: 'error', msg: `internal error: ${err?.message ?? err}` }); } catch {}
 });
 
 process.on('SIGINT', async () => { await browser.close(); process.exit(0); });
