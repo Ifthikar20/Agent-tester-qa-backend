@@ -82,6 +82,12 @@
     background:#0d1f27; border:1px solid var(--edge); border-radius:4px;
     padding:11px; font:12px/1.6 ui-monospace,Menlo,monospace; color:var(--ink); }
   .empty { color:var(--ink-dim); font-size:13px; margin:0; }
+  #flow { display:none; white-space:pre; overflow-x:auto; margin:10px 0 0; max-height:260px;
+    overflow-y:auto; background:#0d1f27; border:1px solid var(--edge); border-radius:4px;
+    padding:11px; font:12px/1.6 ui-monospace,Menlo,monospace; color:var(--ink); }
+  #flow.on { display:block; }
+  .stage.rec { border-color:var(--fail); box-shadow:0 0 0 1px var(--fail); }
+  #view:focus-visible { outline:2px solid var(--signal); outline-offset:-2px; }
 </style>
 </head>
 <body>
@@ -93,7 +99,7 @@
     </header>
 
     <div class="stage">
-      <canvas id="view" width="1180" height="760"></canvas>
+      <canvas id="view" width="1180" height="760" tabindex="0" aria-label="Live page — click and type here to demonstrate"></canvas>
       <svg class="ptr" id="ptr" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M5 2 L5 19 L9.6 14.7 L12.4 21 L15.4 19.6 L12.6 13.4 L19 13.2 Z"
               fill="#fff" stroke="#0f1d24" stroke-width="1.6" stroke-linejoin="round"/>
@@ -132,7 +138,8 @@
       <h2>Script
         <span class="spacer"></span>
         <select id="example" style="width:auto">
-          <option value="meridian">Meridian (aliases)</option>
+          <option value="meridian">Meridian (line DSL)</option>
+          <option value="flow">Meridian (mermaid flow)</option>
           <option value="shop">Nimbus shop (no registry)</option>
         </select>
       </h2>
@@ -141,6 +148,22 @@
         <button class="go" id="run">Run script</button>
         <button id="reset">Reload page</button>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>Teach
+        <span class="spacer"></span>
+        <span id="rcount" class="empty"></span>
+      </h2>
+      <p class="empty" style="margin-bottom:10px">
+        Hit record, then click and type on the feed. Your demonstration becomes the script.
+      </p>
+      <div class="row" style="margin-top:0">
+        <button class="go" id="rec">Record</button>
+        <button id="recStop" disabled>Stop</button>
+        <button id="recUse" disabled>Use as script</button>
+      </div>
+      <pre id="flow" class="hide-empty"></pre>
     </div>
 
     <div class="card">
@@ -177,6 +200,26 @@ expect value profile.username is repeat("a", 20)`,
 
   // No aliases exist for this app. Targets are role:name pairs, which the
   // page discovery panel lists for you.
+  // The same run, written as mermaid. Paste it into a README and GitHub draws
+  // your suite; hand it to the runner and it drives the browser.
+  flow: `%% suite "Username length boundary"
+flowchart TD
+  home(("http://localhost:3000/demo.html"))
+  form("Sign-in form")
+  dash["#/dashboard"]
+  settings["#/settings"]
+  profile("Profile tab")
+  saved{{"Profile saved"}}
+
+  home     -->|fill 'Email' : textbox = $QA_USER| form
+  form     -->|fill 'Password' : textbox = $QA_PASS| form
+  form     -->|click 'Sign in' : button| dash
+  dash     -->|click 'Settings' : link| settings
+  settings -->|click 'Profile' : button| profile
+  profile  -->|fill 'Username' : textbox = 'a' * 20| profile
+  profile  -->|click 'Save changes' : button| saved
+  saved    -->|check 'Username' : textbox is 20 chars| saved`,
+
   shop: `suite "Cart total ignores quantity"
 goto   "http://localhost:3000/shop.html"
 fill   textbox:Search with "Widget"
@@ -251,6 +294,23 @@ function handle(ev) {
 
     case 'targets':  showTargets(ev); break;
     case 'diagram':  draw(ev.mermaid); break;
+
+    case 'recorded':
+      lastFlow = ev.flow;
+      $('flow').textContent = ev.flow;
+      $('flow').classList.add('on');
+      $('rcount').textContent = `${ev.count} step${ev.count === 1 ? '' : 's'}`;
+      $('recUse').disabled = !ev.count;
+      break;
+
+    case 'record.state':
+      recording = ev.on;
+      $('rec').disabled = ev.on;
+      $('recStop').disabled = !ev.on;
+      $('view').parentElement.classList.toggle('rec', ev.on);
+      $('status').textContent = ev.on ? 'Recording — demonstrate on the feed' : 'Live';
+      if (ev.on) $('view').focus();
+      break;
 
     case 'run.start':
       $('log').innerHTML = ''; $('run').disabled = true;
@@ -346,7 +406,42 @@ function mark(i, cls, glyph, ms, err) {
   if (err) line(`${i}e`, err, ' ', 'fail');
 }
 
+let recording = false, lastFlow = '';
 const send = (o) => ws.send(JSON.stringify(o));
+
+$('rec').onclick     = () => send({ t: 'record.start' });
+$('recStop').onclick = () => send({ t: 'record.stop' });
+$('recUse').onclick  = () => { $('script').value = lastFlow; $('script').focus(); };
+
+// Human takeover: canvas input goes to the SAME VirtualCursor the executor
+// drives, so the arrow tracks the demonstration and the page receives genuine
+// events — which is what the recorder is listening for.
+const toPage = (e) => {
+  const r = $('view').getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * ($('view').width / r.width),
+    y: (e.clientY - r.top) * ($('view').height / r.height),
+  };
+};
+let lastMove = 0;
+$('view').addEventListener('mousemove', (e) => {
+  if (Date.now() - lastMove < 33) return;     // ~30Hz; unthrottled floods the socket
+  lastMove = Date.now();
+  send({ t: 'human.move', ...toPage(e) });
+});
+$('view').addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  $('view').focus();
+  send({ t: 'human.move', ...toPage(e) });
+  send({ t: 'human.click' });
+});
+$('view').addEventListener('keydown', (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  e.preventDefault();
+  if (e.key.length === 1) send({ t: 'human.key', text: e.key });
+  else send({ t: 'human.key', key: e.key });
+});
+
 $('run').onclick     = () => send({ t: 'command', text: $('script').value });
 $('open').onclick    = () => send({ t: 'open', url: $('url').value.trim() });
 $('inspect').onclick = () => send({ t: 'inspect' });

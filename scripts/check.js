@@ -26,6 +26,26 @@ click  profile.save
 expect text "Profile saved"
 expect value profile.username is repeat("a", 20)`,
 
+  // The same test written as mermaid. Different front end, identical IR —
+  // the executor never learns which was typed.
+  'meridian (mermaid flow)': `%% suite "Username length boundary"
+flowchart TD
+  home(("${BASE}/demo.html"))
+  form("Sign-in form")
+  dash["#/dashboard"]
+  settings["#/settings"]
+  profile("Profile tab")
+  saved{{"Profile saved"}}
+
+  home     -->|fill 'Email' : textbox = $QA_USER| form
+  form     -->|fill 'Password' : textbox = $QA_PASS| form
+  form     -->|click 'Sign in' : button| dash
+  dash     -->|click 'Settings' : link| settings
+  settings -->|click 'Profile' : button| profile
+  profile  -->|fill 'Username' : textbox = 'a' * 20| profile
+  profile  -->|click 'Save changes' : button| saved
+  saved    -->|check 'Username' : textbox is 20 chars| saved`,
+
   // A different app with NO registry entries at all — every target is a
   // role:name pair resolved against the live accessibility tree.
   'nimbus shop (no registry)': `suite "Cart total ignores quantity"
@@ -41,6 +61,8 @@ expect text "Total: $40.00"`,
 };
 
 const REJECTIONS = [
+  ['flowchart TD\n  a(("http://localhost:3000/")) -->|clik \'Go\' : button| b', /Unreadable edge action/i],
+  ['flowchart TD\n  a["x"] --> b\n  b --> a', /No entry node/i],
   ['click nope.nothing',                             /Bad target|Unknown target strategy/i],
   ['click css:#usr_nm_2',                            /Unknown target strategy/i],
   ['click button',                                   /Bad target/i],
@@ -91,7 +113,8 @@ for (const [text, want] of REJECTIONS) {
   await wait(220);
   const got = errors[0] ?? '(no error — IT RAN)';
   const ok = want.test(got);
-  console.log(`  ${ok ? 'rejected' : 'LEAKED  '}  ${text.padEnd(44)} ${got}`);
+  const shown = text.replace(/\s*\n\s*/g, ' ⏎ ');
+  console.log(`  ${ok ? 'rejected' : 'LEAKED  '}  ${shown.padEnd(52)} ${got}`);
   if (!ok) fail(`"${text}" was not rejected`);
 }
 
@@ -125,17 +148,21 @@ for (const [name, text] of Object.entries(SCRIPTS)) {
 console.log('\n— stream ——————————————————————————————————————————————————');
 console.log(`  screencast frames ${frames} · cursor events ${cursorEvents} · clicks ${presses}`);
 
-const m = outcomes['meridian (aliases)'];
-if (m.end.ok) fail('meridian run passed — the truncation bug was NOT caught');
-if (!/16 chars/.test(m.last.error ?? '')) fail(`expected a 16-char truncation failure, got: ${m.last.error}`);
+for (const name of ['meridian (aliases)', 'meridian (mermaid flow)']) {
+  const m = outcomes[name];
+  if (m.end.ok) fail(`${name} passed — the truncation bug was NOT caught`);
+  if (!/16 chars/.test(m.last.error ?? '')) fail(`${name}: expected a 16-char truncation failure, got: ${m.last.error}`);
+}
 
 const s = outcomes['nimbus shop (no registry)'];
 if (s.end.ok) fail('shop run passed — the cart total bug was NOT caught');
 if (!/Total: \$40\.00/.test(s.last.desc + (s.last.error ?? ''))) {
   fail(`expected the total assertion to fail, got: ${s.last.desc} / ${s.last.error}`);
 }
-for (const d of [...m.diagrams, ...s.diagrams]) {
-  if (!d.mermaid.startsWith('block-beta')) fail('diagram is not block-beta');
+for (const o of Object.values(outcomes)) {
+  for (const d of o.diagrams) {
+    if (!d.mermaid.startsWith('block-beta')) fail('diagram is not block-beta');
+  }
 }
 if (!frames) fail('no screencast frames arrived (did you ack?)');
 if (!cursorEvents) fail('no cursor events — overlay would never move');

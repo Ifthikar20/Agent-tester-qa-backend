@@ -6,7 +6,9 @@ import { VirtualCursor, sleep } from './cursor.js';
 import { OPS, validate, ALLOWED_ORIGINS } from './ops.js';
 import { discover } from './targets.js';
 import { parse } from './parse.js';
+import { parseFlow, flatten, toFlow } from './flow.js';
 import { toMermaid } from './diagram.js';
+import { Recorder } from './recorder.js';
 
 const require = createRequire(import.meta.url);
 const PORT = Number(process.env.PORT) || 3000;
@@ -67,6 +69,30 @@ await cdp.send('Page.startScreencast', {
 });
 
 const cursor = new VirtualCursor(cdp, emit);
+
+// Teach mode. Canvas clicks reach the page as real DOM events, so the same
+// listener sees a human demonstrating and would see the executor replaying —
+// which is why recording is gated off during a run.
+const recorder = new Recorder(page, {
+  onStep: (step, steps) => emit({
+    t: 'recorded',
+    step,
+    count: steps.length,
+    flow: toFlow({ suite: 'Recorded flow', steps }),
+  }),
+  onError: (msg) => emit({ t: 'log', level: 'error', msg }),
+});
+await recorder.attach();
+
+// An SPA route change is an assertion worth keeping, and it means the target
+// panel is stale.
+// Only for refreshing the target panel. URL changes reach the recorder
+// through the page's own ordered event channel, not from here — watching
+// navigation separately filed clicks after the transitions they caused.
+page.on('framenavigated', (f) => {
+  if (f === page.mainFrame()) publishTargets();
+});
+
 await page.goto(HOME);
 
 /** What can the current page be told to do? Emitted whenever it changes. */
@@ -84,6 +110,8 @@ let running = false;
 async function run(plan) {
   if (running) return emit({ t: 'log', level: 'warn', msg: 'A run is already in progress' });
   running = true;
+  const wasRecording = recorder.recording;
+  recorder.recording = false;
 
   const results = [];
   const ctx = { cursor, emit, onNavigate: publishTargets };
@@ -114,6 +142,7 @@ async function run(plan) {
   // another run"; emitting it while still locked makes a caller that runs
   // back-to-back scripts hang on a silently refused second run.
   running = false;
+  recorder.recording = wasRecording;
   emit({ t: 'run.end', ok });
 }
 
@@ -135,7 +164,10 @@ wss.on('connection', async (ws) => {
     if (m.t === 'command') {
       let plan;
       try {
-        plan = validate(parse(m.text));
+        // Two front ends, one IR: the line DSL and the mermaid flow language
+        // meet at validate() and the executor never learns which was typed.
+        const isFlow = /\b(flowchart|graph)\s+(TD|TB|LR|RL|BT)\b/.test(m.text) || /-{2,3}>/.test(m.text);
+        plan = validate(isFlow ? flatten(parseFlow(m.text)) : parse(m.text));
       } catch (err) {
         return emit({ t: 'log', level: 'error', msg: err.message });
       }
@@ -158,7 +190,39 @@ wss.on('connection', async (ws) => {
       return;
     }
 
-    if (m.t === 'inspect' && !running) await publishTargets();
+    if (m.t === 'inspect' && !running) return void publishTargets();
+
+    // ------------------------------------------------------------ teach mode
+    if (m.t === 'record.start' && !running) {
+      const steps = recorder.start(page.url());
+      emit({ t: 'record.state', on: true });
+      emit({ t: 'recorded', step: steps[0], count: steps.length,
+             flow: toFlow({ suite: 'Recorded flow', steps }) });
+      return;
+    }
+    if (m.t === 'record.stop') {
+      const steps = recorder.stop(page.url());
+      emit({ t: 'record.state', on: false });
+      emit({ t: 'recorded', count: steps.length,
+             flow: toFlow({ suite: 'Recorded flow', steps }) });
+      return;
+    }
+
+    // Human takeover. The same VirtualCursor the executor uses, so the drawn
+    // arrow stays authoritative across the handoff — and so the demonstration
+    // reaches the page as genuine input events the recorder can see.
+    if (!running) {
+      if (m.t === 'human.move') return void cursor.moveTo(m.x, m.y);
+      if (m.t === 'human.click') return void cursor.click();
+      if (m.t === 'human.key') {
+        if (typeof m.text === 'string' && m.text.length === 1) {
+          return void page.keyboard.type(m.text).catch(() => {});
+        }
+        if (typeof m.key === 'string' && /^[A-Za-z0-9]+$/.test(m.key)) {
+          return void page.keyboard.press(m.key).catch(() => {});
+        }
+      }
+    }
   });
 
   ws.on('close', () => clients.delete(ws));

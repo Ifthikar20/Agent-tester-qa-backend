@@ -10,6 +10,7 @@ npx playwright install chromium   # skip if your sandbox already ships one
 npm start                         # → http://localhost:3000
 
 npm run check                     # end-to-end, against a running server
+npm run check:teach               # demonstrate by hand, then replay what it wrote
 npm run check:diagram             # generated mermaid vs. the real parser
 ```
 
@@ -80,7 +81,46 @@ after with outcomes folded in as a report.
 
 ---
 
+## Teach mode
+
+Press **Record**, then click and type on the feed. Canvas input goes through the
+same `VirtualCursor` the executor drives, so it reaches Chrome as genuine DOM
+events — which means one injected capture-phase listener sees a human
+demonstrating exactly as it would see the executor replaying. Recording is gated
+off during a run so the two never feed each other.
+
+What comes back is the script:
+
+```mermaid
+%% suite "Recorded flow"
+flowchart TD
+  n0(("http://localhost:3000/demo.html"))
+  n1["/demo.html#/dashboard"]
+  n2["/demo.html#/settings"]
+
+  n0 -->|fill 'Email' : label = 'qa@example.com'; click 'Sign in' : button| n1
+  n1 -->|click 'Settings' : link| n2
+```
+
+Two things make it trustworthy rather than merely clever.
+
+**The page proposes; the server decides.** For each interaction the page offers
+several candidate targets, most stable first — `testid:`, `label:`, `role:name`,
+`placeholder:`, `text:`. Each is resolved with the same locator the executor will
+use and kept only if it matches exactly one element, and that element is the one
+interacted with. A recorder that emits targets it has not proved is how you get a
+suite that passes on the machine that recorded it and nowhere else.
+
+**A typed password never leaves the page.** A `type=password` field records as
+`$TODO`, which fails loudly on replay until someone maps it to a vault key. The
+value is dropped in the browser, so it is never in the socket, the log, or the
+script.
+
+`npm run check:teach` drives the canvas the way a human would, then replays the
+result and asserts the typed password is nowhere in it.
+
 ## Any URL
+
 
 `goto` reaches any origin on the allowlist:
 
@@ -155,29 +195,68 @@ evaluate "fetch(1)"                             → unknown verb
 
 ---
 
-## The DSL, and its picture
+## Two front ends, one IR
+
+The line DSL and the mermaid flow language meet at `validate()`; the executor
+never learns which was typed.
 
 ```
 suite  "Cart total ignores quantity"
 goto   "http://localhost:3000/shop.html"
 fill   textbox:Search with "Widget"
-fill   auth.password  with $secrets.QA_PASS
-fill   profile.username with repeat("a", 20)
 click  button:Add Widget
-expect url contains "/cart"
 expect text "Widget × 2"
-expect value profile.username is repeat("a", 20)
-wait   500
 ```
 
-`parse.js` is a placeholder for a model emitting IR through a tool-use schema.
-The validator and the diagram generator downstream don't care which produced
-it — that's the point.
+The flow language is a strict subset of mermaid `flowchart`, so the script *is*
+the picture — paste it in a README and GitHub draws your suite:
+
+```mermaid
+%% suite "Login outcomes"
+flowchart TD
+  home(("https://app.acme.com/login"))
+  dash["#/dashboard"]
+  locked{{"Account locked"}}
+  reset["#/reset"]
+
+  home   -->|fill 'Email' : textbox = $QA_USER; click 'Sign in' : button| dash
+  home   -->|fill 'Email' : textbox = $LOCKED_USER; click 'Sign in' : button| locked
+  locked -->|click 'Reset password' : link| reset
+```
+
+Node shape is the assertion; edge label is the action.
+
+| syntax | meaning |
+|---|---|
+| `id(("http://…"))` | entry point → `goto` |
+| `id["/settings"]` | on arrival, assert url contains `/settings` |
+| `id{{"Profile saved"}}` | on arrival, assert that text is visible |
+| `id("Profile tab")` | just a name, no assertion |
+| `--\|click 'Sign in' : button\|--` | `click` |
+| `--\|fill 'Email' : textbox = $QA_USER\|--` | `fill` from the vault |
+| `--\|fill 'User' : textbox = 'a' * 20\|--` | `fill`, repeated value |
+| `--\|check 'User' : textbox is 20 chars\|--` | assert value |
+| `--\|wait 500ms\|--` | `wait` |
+| `-->` bare | no action, just assert the destination |
+| `a; b; c` in one label | three ops on one transition |
+
+Two rules the graph needs. **Order**: depth-first from each entry, edges in
+declaration order; a self-loop is the next step in the same place, and several
+edges leaving one node fork into separate cases — which is how a shared login
+prefix gets written once. **Strictness**: mermaid is permissive, the runner is
+not. An edge label it cannot read is a hard error, never a silently skipped
+step, or a typo becomes a no-op that quietly passes.
+
+Those `'single quotes'` and `'a' * 20` are not stylistic. Verified against the
+real parser: double quotes, parentheses and square brackets inside `|...|` are
+all lexical errors.
+
+## The run report
 
 `diagram.js` turns the same IR into `block-beta`. Actions become grid cells,
-`goto` becomes a full-width band, assertions become hexagons on the arrow
-spine, and a credential shows as `← vault` — the value was never in the IR, so
-the diagram is safe to paste into a ticket.
+`goto` a full-width band, assertions hexagons on the arrow spine — and a
+credential shows as `← vault`, since the value was never in the IR, so the
+diagram is safe to paste into a ticket.
 
 ```mermaid
 block-beta
@@ -221,18 +300,21 @@ silently inside someone else's docs.
 | `server.js` | express + ws, CDP screencast pump, executor loop |
 | `cursor.js` | `VirtualCursor` — sole authority for pointer position |
 | `targets.js` | target grammar, aliases, page discovery |
+| `recorder.js` | teach mode — proposes targets in the page, verifies them here |
+| `flow.js` | mermaid flow language: text ↔ IR, both directions |
 | `ops.js` | op vocabulary, origin allowlist, validation gate |
 | `parse.js` | DSL text → JSON IR |
 | `diagram.js` | JSON IR → mermaid `block-beta` |
 | `public/index.html` | canvas feed, cursor overlay, editor, targets, diagram |
 | `public/demo.html` | Meridian — truncates a username to 16 chars |
 | `public/shop.html` | Nimbus — cart total ignores quantity |
-| `scripts/check.js` | end-to-end: rejections, discovery, both runs |
+| `scripts/check.js` | end-to-end: rejections, discovery, all three runs |
+| `scripts/check-teach.js` | demonstrate by hand, replay what it wrote |
 | `scripts/check-diagram.js` | generated mermaid vs. the real parser |
 
 ---
 
-## Five things that will bite you
+## Seven things that will bite you
 
 **Ack every frame, first thing.** `Page.screencastFrameAck` is Chrome's
 backpressure valve. Skip it and you get exactly one frame and then silence,
@@ -252,6 +334,19 @@ page is this, not a stall.)
 may start another run". Emitting it while still locked makes a caller that runs
 back-to-back scripts hang on a silently refused second run.
 
+**A recorder's verification races the app's own reaction.** Submitting a form
+hides the form; a button behind `display:none` stays in the DOM but leaves the
+accessibility tree, so the role query that would have named it returns nothing.
+Any check that runs after the click is checking a page that no longer exists.
+`recorder.js` therefore counts matches synchronously in the page at event time
+and uses that when the live check comes back empty.
+
+**`pushState` fires neither `popstate` nor `hashchange`.** An SPA route change
+has nothing to announce it, so a recording loses its last navigation unless you
+read the URL when the recording stops. Related: watching `framenavigated` to
+record URLs raced the bindings and filed clicks *after* the transitions they
+caused — everything now arrives through one ordered channel from the page.
+
 **block-beta sizes cells roughly square, so label length drives the diagram's
 height.** A 24-character budget produced 550×478 for eleven steps; leaving the
 labels long produced 983×1192 for the same steps. Nested `block:…end` groups
@@ -264,8 +359,9 @@ because their angled sides eat usable width.
 ## Deliberately not here yet
 
 - Screenshot artifacts, and shipping them to S3 rather than over the socket
-- Human takeover (canvas clicks routed through the same `VirtualCursor`)
 - Pause/resume gate in the executor loop
+- Recording `select`, drag, hover and keyboard-only navigation
+- Merging a new recording into an existing flow rather than replacing it
 - `theatrical` / `normal` / `fast` modes — glide and typing delays turn a
   4-second test into ~25 seconds, right for demos and wrong for CI
 - Timestamp-based overlay sync instead of a fixed `LAG` constant
