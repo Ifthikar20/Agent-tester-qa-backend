@@ -23,6 +23,11 @@ cart and charges for one. Both bugs turn their run red.
 
 ## How it works
 
+The whole pipeline, editable: [`docs/ghostclick-end-to-end.drawio`](docs/ghostclick-end-to-end.drawio)
+— open it at [app.diagrams.net](https://app.diagrams.net) or with the draw.io
+VS Code extension.
+
+
 Three loops share one Chrome. Video flows right-to-left, control flows
 left-to-right, and they meet only inside `VirtualCursor`. The IR forks: the
 same data structure the executor walks is what gets drawn.
