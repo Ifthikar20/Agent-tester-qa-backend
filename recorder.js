@@ -141,12 +141,37 @@ const LISTENERS = `
   var lastY = window.scrollY;
   var clickAt = 0;                      // when the last click happened
 
+  /**
+   * Is this element pinned to the viewport rather than to the page?
+   *
+   * A sticky header never leaves the top of the screen, so it is ALWAYS the
+   * topmost interactive thing in view. Anchoring a scroll to it produced
+   * "scroll to Features" three times in a row, and replaying those moved
+   * nothing at all — the element was already exactly where it always is.
+   */
+  function pinned(el) {
+    for (var n = el; n && n !== document.body; n = n.parentElement) {
+      var pos = getComputedStyle(n).position;
+      if (pos === 'fixed' || pos === 'sticky') return true;
+    }
+    return false;
+  }
+
+  /**
+   * The topmost thing in view that actually moved with the page.
+   *
+   * Skipping the first band of the viewport as well: even without sticky
+   * positioning, whatever is grazing the top edge is a poor description of
+   * where you came to rest.
+   */
   function anchor() {
     var all = document.querySelectorAll(SCOPE);
     var best = null, bestTop = Infinity;
+    var floor = Math.min(120, window.innerHeight * 0.2);
     for (var i = 0; i < all.length && i < 400; i++) {
       var r = all[i].getBoundingClientRect();
-      if (!r.height || r.top < 0 || r.top > window.innerHeight - 40) continue;
+      if (!r.height || r.top < floor || r.top > window.innerHeight - 40) continue;
+      if (pinned(all[i])) continue;
       if (r.top < bestTop) { bestTop = r.top; best = all[i]; }
     }
     return best;
@@ -280,6 +305,13 @@ export class Recorder {
   }
 
   #push(step) {
+    // Scrolling to where you already are is not a step. Two identical scrolls
+    // in a row can only mean the second one had nothing to do, and a script
+    // full of them is a script nobody trusts.
+    const last = this.steps.at(-1);
+    if (step.op === 'scroll' && last?.op === 'scroll'
+        && last.to === step.to && last.target === step.target) return;
+
     this.steps.push(step);
     this.onStep(step, this.steps);
   }
@@ -330,16 +362,32 @@ export class Recorder {
 
       if (found === 1) {
         if (await loc.and(tagged).count() === 1) return { target, via: 'live' };
+        // Or a unique element INSIDE the one you interacted with.
+        //
+        // A card link wraps a heading; naming the heading is both more readable
+        // and more stable than naming the whole card, and clicking it clicks
+        // the link. Requiring the exact same node rejected the better target.
+        if (await tagged.locator('*').and(loc).count() === 1) return { target, via: 'inside' };
         tried.push(`${target} (names a different element)`);
         continue;
       }
       if (found === 0) {
-        // The interaction changed the page out from under us: a submit hides
-        // its own form, and a button behind display:none leaves the DOM tree
-        // but not the accessibility tree, so the role query finds nothing.
-        // What the page counted at click time is the honest evidence here.
-        if (n === 1) return { target, via: 'click-time' };
-        tried.push(`${target} (${n < 0 ? 'ambiguous by nature' : n + ' at click time'})`);
+        // Nothing matched. Two very different reasons for that:
+        //
+        //  - The interaction destroyed the element. A submit hides its own
+        //    form; a button behind display:none leaves the DOM but not the
+        //    accessibility tree. The page's click-time count is the honest
+        //    evidence, and this is what it is for.
+        //
+        //  - Our name is simply wrong. If the element is still sitting there,
+        //    that is the case — and accepting it anyway used to hand back a
+        //    target that could not possibly resolve, which then failed at
+        //    replay, minutes into a run, having looked fine in the script.
+        const survived = await tagged.count();
+        if (!survived && n === 1) return { target, via: 'click-time' };
+        tried.push(`${target} (${survived
+          ? 'the element is still on the page, so this name does not describe it'
+          : n < 0 ? 'ambiguous by nature' : `${n} at click time`})`);
         continue;
       }
       tried.push(`${target} (${found} matches)`);

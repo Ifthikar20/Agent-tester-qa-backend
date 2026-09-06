@@ -17,6 +17,7 @@ npm run check:freshness           # the UI rebuilds, and nothing serves a stale 
 npm run check:runner              # a command is never dropped, the lock always clears
 npm run check:suites              # onboarding, the origin gate, suite runs
 npm run check:recording           # repeated links, scrolling, jump-to-top, timeouts
+npm run check:longnames           # paragraph-long names, casing, sticky anchors
 npm run check:console             # the canvas paints, and the wheel reaches the page
 npm run check:teach               # demonstrate by hand, then replay what it wrote
 npm run check:fidelity            # does the replay reproduce it? would coordinates have?
@@ -556,6 +557,43 @@ three files.
 
 ---
 
+## When a link is named by a whole paragraph
+
+A search-result card is one link wrapping a kicker, a heading and a summary, so
+its accessible name is all of that text at once — 178 characters is ordinary.
+Three things went wrong with that, and each one produced a target that looked
+fine in the script and failed at replay.
+
+**A truncated name can never match.** Names were cut to 80 characters to keep
+scripts readable, and the runner then looked them up with `exact: true`. Exact
+strategies now only ever get a name that survived intact.
+
+**A long name still needs a handle.** The heading inside the card is what a
+person would call it, so that is offered as a `text:` target — which matches on
+a substring, so the match is honest rather than an exact one that is really a
+guess. `text:Joint vs. separate bank accounts: which is better?` instead of the
+whole paragraph.
+
+**Rendered text is not the accessible name.** `text-transform: uppercase` makes
+`innerText` SHOUT while the name the browser computes does not, so a kicker
+styled that way produced `link:COUPLES & MONEY …` against a real name of
+`Couples & money …`. Names come from the DOM text now — walked node by node, so
+casing is right and no stylesheet gets scraped into a name.
+
+Recording also stopped rescuing a target that resolves to nothing. That fallback
+exists for the element a submit destroys; it was also rescuing names that were
+simply wrong. It now only applies when the element has actually gone.
+
+## A sticky header is a terrible scroll anchor
+
+It never leaves the top of the screen, so it is always "the topmost interactive
+thing in view" — and a recording came back with `scroll to Features` three times
+in a row, none of which moved anything on replay. Anchors skip anything pinned
+(`position: fixed` or `sticky`, at any depth) and the top fifth of the viewport,
+and two identical scrolls in a row collapse to one.
+
+---
+
 ## When the page has two of everything
 
 Three things broke the first time this met a real marketing site, and the first
@@ -833,6 +871,8 @@ silently inside someone else's docs.
 | `scripts/check-runner.js` | dropped commands, the run lock, surviving a throw |
 | `scripts/check-suites.js` | onboarding, the one-origin rule, the gate, suite runs |
 | `scripts/check-recording.js` | ambiguous links, scrolling, jump-to-top, URL timeouts |
+| `scripts/check-longnames.js` | truncated names, rendered casing, sticky scroll anchors |
+| `public/results.html` | a sticky header over cards named by a whole paragraph |
 | `scripts/check-console.js` | the canvas paints on arrival, and the wheel reaches the page |
 | `public/site.html` | Harbour — the same links in header and footer, and a long page |
 

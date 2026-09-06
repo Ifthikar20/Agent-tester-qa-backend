@@ -1,0 +1,76 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Harbour — search results</title>
+<!--
+  The two shapes that broke a recording on a real site.
+
+    - A STICKY header. It is always the topmost interactive thing in view, so a
+      recorder that anchors a scroll to "whatever is at the top" anchors every
+      scroll to the same pinned link, and replaying them moves nothing.
+
+    - RESULT CARDS whose link wraps a kicker, a heading and a summary. The
+      accessible name of such a link is all of that text at once, and a
+      recorder that truncates the name to keep scripts readable emits a target
+      that can never match, because the runner asks for an exact name.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.6 system-ui,sans-serif;color:#16181d;background:#fbfbfc}
+  a{color:inherit;text-decoration:none}
+  header{position:sticky;top:0;background:#fff;border-bottom:1px solid #e4e6ea;z-index:9}
+  header div{display:flex;gap:22px;align-items:center;padding:14px 32px;max-width:900px;margin:0 auto}
+  header b{margin-right:auto}
+  header a{color:#1f5fd0}
+  main{max-width:900px;margin:0 auto;padding:28px 32px 120px}
+  input{width:100%;padding:11px 14px;border:1px solid #d6d9de;border-radius:10px;font:inherit}
+  .card{display:block;background:#fff;border:1px solid #e4e6ea;border-radius:12px;padding:20px 22px;margin:18px 0}
+  .card:hover{border-color:#1f5fd0}
+  .kicker{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:#6b7280}
+  .card h2{font-size:19px;margin:6px 0 6px}
+  .card p{margin:0;color:#4b5563}
+</style>
+
+<header>
+  <div>
+    <b>Harbour</b>
+    <a href="#features">Features</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#learn">Learn</a>
+  </div>
+</header>
+
+<main>
+  <label for="q" class="kicker">Search the library</label>
+  <input id="q" aria-label="Search Harbour Learn" placeholder="Search Harbour Learn">
+
+  <a class="card" href="#joint-vs-separate">
+    <span class="kicker">Couples &amp; money</span>
+    <h2>Joint vs. separate bank accounts: which is better?</h2>
+    <p>Joint, separate, or a bit of both — what each arrangement does to bills, savings and the awkward conversations.</p>
+  </a>
+
+  <a class="card" href="#emergency-fund">
+    <span class="kicker">Saving</span>
+    <h2>How big should an emergency fund actually be?</h2>
+    <p>Three months is the usual answer. Whether it is the right one depends on how your income arrives.</p>
+  </a>
+
+  <a class="card" href="#credit-utilisation">
+    <span class="kicker">Credit</span>
+    <h2>Credit utilisation, and why paying early helps</h2>
+    <p>The balance your card reports is not the one you carry, and the gap is worth a few points.</p>
+  </a>
+
+  <!-- A SHORT name that is styled uppercase. innerText shouts, the accessible
+       name does not, so a target built from rendered text misses it. -->
+  <button id="more" style="text-transform:uppercase;letter-spacing:.06em;background:#16181d;color:#fff;
+          border:0;border-radius:9px;padding:11px 18px;font:inherit;margin:8px 0 40px">Load more results</button>
+
+  <!-- Long enough to come to rest in the MIDDLE. A fixture you can only scroll
+       to an end of records `to: top`/`bottom` and never consults the anchor at
+       all, so the sticky-header bug hides behind it. -->
+  <section id="features" style="padding:260px 0"><a href="#features-more" style="color:#1f5fd0">Compare plans</a><h2>Features</h2><p>Filler, so the page is worth scrolling.</p></section>
+  <section id="pricing" style="padding:260px 0"><a href="#pricing-more" style="color:#1f5fd0">Talk to sales</a><h2>Pricing</h2><p>More filler.</p></section>
+  <section id="learn" style="padding:260px 0"><a href="#learn-more" style="color:#1f5fd0">Browse the library</a><h2>Learn</h2><p>Still more.</p></section>
+  <section id="tools" style="padding:260px 0"><a href="#tools-more" style="color:#1f5fd0">Open the calculator</a><h2>Tools</h2><p>And more again.</p></section>
+  <section id="about" style="padding:260px 0"><a href="#about-more" style="color:#1f5fd0">Read our story</a><h2>About</h2><p>Enough to stop halfway.</p></section>
+</main>
