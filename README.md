@@ -19,6 +19,7 @@ npm run check:suites              # onboarding, the origin gate, suite runs
 npm run check:recording           # repeated links, scrolling, jump-to-top, timeouts
 npm run check:longnames           # paragraph-long names, casing, sticky anchors
 npm run check:redirects           # redirect chains, statuses, the friendly 404
+npm run check:patience            # late vs never coming, and settling
 npm run check:console             # the canvas paints, and the wheel reaches the page
 npm run check:teach               # demonstrate by hand, then replay what it wrote
 npm run check:fidelity            # does the replay reproduce it? would coordinates have?
@@ -558,6 +559,53 @@ three files.
 
 ---
 
+## Late, or never coming?
+
+Those two failures look identical from the outside, and guessing between them
+is how an afternoon goes: you raise the timeout, wait longer for the same
+failure, and conclude the tool is broken — or you assume a name is wrong and
+re-record something that only needed another second.
+
+So a step that cannot find its target keeps watching past its deadline, and
+says which it was:
+
+```
+"link:Open the report" was not visible within 2000ms, but it appeared 2800ms later.
+  This is a timing problem, not a naming one — the element is correct.
+  Give it longer:   GC_TIMEOUT_MS=5000 npm start
+  Or let the page settle first, with a step before it:  wait 2800ms
+```
+
+and, for the other kind:
+
+```
+"link:Nothing like this" never became visible — and it did not turn up in the
+14s this waited, so waiting longer will not help.
+```
+
+### Settling, rather than sleeping
+
+A click on a real app starts a route change, a fetch and a re-render, and the
+next step used to begin 120ms later regardless. Now it waits for the page to go
+**quiet** — no DOM mutations for `GC_SETTLE_MS` (250ms by default) — capped, so
+an animation that never stops cannot stall a run. That is a real fix for a race,
+where a fixed delay is either too short for a slow route or wasted on a fast one.
+
+```bash
+GC_TIMEOUT_MS=20000 npm start     # a slow app
+GC_SETTLE_MS=600    npm start     # one that renders in stages
+```
+
+Both are printed at startup and available on `/api/state`. Per step, the flow
+language already has `wait 500ms`.
+
+**What patience cannot fix is a wrong name.** A target that names something the
+page does not have is wrong for as long as you care to wait — which is exactly
+why the message distinguishes the two instead of leaving you to find out by
+turning the numbers up.
+
+---
+
 ## A name with a colon in it was invisible
 
 The aria snapshot Playwright returns is YAML, and YAML single-quotes an entry
@@ -956,6 +1004,8 @@ silently inside someone else's docs.
 | `navlog.js` | every navigation as a chain of hops, each with its status |
 | `scripts/check-longnames.js` | truncated names, rendered casing, sticky scroll anchors |
 | `scripts/check-redirects.js` | chains, status assertions, and the 404 a URL check misses |
+| `scripts/check-patience.js` | late vs never-coming, settle without stalling |
+| `public/slow.html` | an element that arrives after a delay you choose |
 | `public/links.html` | four links that all work and are each wrong differently |
 | `public/results.html` | a sticky header over cards named by a whole paragraph |
 | `scripts/check-console.js` | the canvas paints on arrival, and the wheel reaches the page |

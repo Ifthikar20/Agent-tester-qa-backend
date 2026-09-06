@@ -16,12 +16,13 @@
     "check:recording": "node scripts/check-recording.js",
     "check:longnames": "node scripts/check-longnames.js",
     "check:redirects": "node scripts/check-redirects.js",
+    "check:patience": "node scripts/check-patience.js",
     "check:console": "node scripts/check-console.js",
     "check:diagram": "node scripts/check-diagram.js",
     "check:teach": "node scripts/check-teach.js",
     "check:extension": "node scripts/check-extension.js",
     "check:fidelity": "node scripts/check-fidelity.js",
-    "check:all": "npm run check && npm run check:freshness && npm run check:runner && npm run check:suites && npm run check:recording && npm run check:longnames && npm run check:redirects && npm run check:console && npm run check:teach && npm run check:extension && npm run check:diagram && npm run check:fidelity"
+    "check:all": "npm run check && npm run check:freshness && npm run check:runner && npm run check:suites && npm run check:recording && npm run check:longnames && npm run check:redirects && npm run check:patience && npm run check:console && npm run check:teach && npm run check:extension && npm run check:diagram && npm run check:fidelity"
   },
   "dependencies": {
     "express": "^4.19.2",

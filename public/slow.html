@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Harbour — slow render</title>
+<!-- The other kind of failure: the element is named correctly and simply is not
+     there yet. Waiting IS the fix here, and the runner should say so. -->
+<style>body{font:15px/1.7 system-ui,sans-serif;max-width:560px;margin:70px auto;padding:0 24px}
+button{background:#16181d;color:#fff;border:0;border-radius:9px;padding:11px 18px;font:inherit}</style>
+<h1>Results load after a moment</h1>
+<button id="go">Load results</button>
+<div id="out"></div>
+<script>
+  const delay = Number(new URLSearchParams(location.search).get('ms') || 2500);
+  document.getElementById('go').onclick = () => {
+    setTimeout(() => {
+      document.getElementById('out').innerHTML =
+        '<p><a href="#opened" id="late">Open the report</a></p>';
+    }, delay);
+  };
+</script>

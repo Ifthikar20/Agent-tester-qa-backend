@@ -134,6 +134,9 @@ app.get('/api/state', (_req, res) => res.json({
   origins: origins.list(),
   secrets: vault.names(),        // names only — a value never leaves the server
   headed: HEADED,
+  // How patient the runner is, so it is visible rather than folklore.
+  timeoutMs: Number(process.env.GC_TIMEOUT_MS) || 8000,
+  settleMs: Number(process.env.GC_SETTLE_MS) || 250,
 }));
 
 app.get('/api/origins', (_req, res) => res.json({ origins: origins.list() }));
@@ -437,6 +440,9 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  browser     ->  ${HEADED ? 'headed — a real window you can watch' : 'headless — streamed to the canvas (HEADED=1 for a window)'}` +
             `\n  allowed     ->  ${origins.list().join(', ')}` +
             `\n  secrets     ->  ${vault.names().join(', ') || '(none set)'}` +
+            `\n  patience    ->  waits ${Number(process.env.GC_TIMEOUT_MS) || 8000}ms for a target, ` +
+            `settles ${Number(process.env.GC_SETTLE_MS) || 250}ms after a click ` +
+            `(GC_TIMEOUT_MS, GC_SETTLE_MS)` +
             `\n  version     ->  ${version.commit ?? 'unknown'}` +
             `${version.built ? `, ui built ${version.built.replace('T', ' ').slice(0, 16)}` : ', ui NOT BUILT'}\n`);
 

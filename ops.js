@@ -6,6 +6,53 @@ import * as vault from './secrets.js';
 const DEFAULT_ORIGIN = `http://localhost:${process.env.PORT || 3000}`;
 
 /**
+ * How patient to be.
+ *
+ * TIMEOUT is how long a step waits for its target. SETTLE is how still the page
+ * has to be before the next step starts — not a fixed delay, which is either
+ * too short for a slow route or wasted on a fast one, but a quiet period the
+ * page must actually go quiet for.
+ *
+ *   GC_TIMEOUT_MS=20000 npm start     a slow app
+ *   GC_SETTLE_MS=600    npm start     an app that renders in stages
+ *
+ * Raising these fixes a race. It cannot fix a target that names something the
+ * page does not have — a wrong name is wrong for as long as you care to wait,
+ * which is why `pointAt` says which of the two it is instead of leaving you to
+ * guess by turning the numbers up.
+ */
+const TIMEOUT = Number(process.env.GC_TIMEOUT_MS) || 8000;
+const SETTLE = Number(process.env.GC_SETTLE_MS) || 250;
+const SETTLE_CAP = Math.max(SETTLE * 8, 3000);
+
+/**
+ * Wait for the page to stop changing.
+ *
+ * A click on a real app starts a route change, a fetch and a re-render, and
+ * the next step used to begin 120ms later regardless. This waits for a genuine
+ * quiet period — no DOM mutations for SETTLE ms — and gives up at SETTLE_CAP so
+ * an animation that never stops cannot stall a run.
+ *
+ * Every failure here is ignored on purpose: the page navigating out from under
+ * the evaluation is the normal case, not an error.
+ */
+async function settle(page, ms = SETTLE) {
+  if (ms <= 0) return;
+  await page.waitForLoadState('domcontentloaded', { timeout: SETTLE_CAP }).catch(() => {});
+  await page.evaluate(({ quiet, cap }) => new Promise((done) => {
+    let timer = setTimeout(done, quiet);
+    const stop = setTimeout(() => { obs.disconnect(); done(); }, cap);
+    const obs = new MutationObserver(() => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { clearTimeout(stop); obs.disconnect(); done(); }, quiet);
+    });
+    obs.observe(document.documentElement, {
+      childList: true, subtree: true, attributes: true, characterData: true,
+    });
+  }), { quiet: ms, cap: SETTLE_CAP }).catch(() => {});
+}
+
+/**
  * The gate in front of every navigation. The list is managed at runtime by a
  * person (see origins.js) — a plan can only ever be checked against it.
  *
@@ -183,11 +230,34 @@ function repaired(target, here) {
 async function pointAt(page, target, ctx, opts = {}) {
   const node = el(page, target, ctx);
   try {
-    await node.waitFor({ state: 'visible', timeout: 8000 });
+    await node.waitFor({ state: 'visible', timeout: opts.timeout ?? TIMEOUT });
   } catch {
     // "waiting for getByRole(…) to be visible" is true and useless. What the
     // page DOES offer is the thing that tells you why — most often a menu that
     // was open while you recorded and is shut now.
+    /**
+     * Was it late, or was it never coming?
+     *
+     * These are the two failures that look identical from the outside, and
+     * guessing between them is how an afternoon goes: you raise the timeout,
+     * wait longer for the same failure, and conclude the tool is broken. So
+     * keep watching a little past the deadline. If the element turns up, this
+     * IS a timing problem and the fix is a number. If it does not, no amount of
+     * waiting was ever going to help and the message should not imply otherwise.
+     */
+    const t0 = Date.now();
+    const late = await node.waitFor({ state: 'visible', timeout: 6000 })
+      .then(() => Date.now() - t0).catch(() => null);
+    if (late !== null) {
+      const waited = opts.timeout ?? TIMEOUT;
+      throw new Error(
+        `"${target}" was not visible within ${waited}ms, but it appeared ${late}ms later.\n` +
+        `  This is a timing problem, not a naming one — the element is correct.\n` +
+        `  Give it longer:   GC_TIMEOUT_MS=${Math.ceil((waited + late) / 1000) * 1000} npm start\n` +
+        `  Or let the page settle first, with a step before it:  wait ${Math.ceil(late / 100) * 100}ms`
+      );
+    }
+
     const here = (await discover(page).catch(() => [])).map((t) => t.target);
     const fix = repaired(target, here);
     if (fix) {
@@ -206,7 +276,8 @@ async function pointAt(page, target, ctx, opts = {}) {
 
     const near = nearby(target, here);
     throw new Error(
-      `"${target}" never became visible.` +
+      `"${target}" never became visible — and it did not turn up in the ` +
+      `${Math.round((opts.timeout ?? TIMEOUT) / 1000) + 6}s this waited, so waiting longer will not help.` +
       (near.length
         ? `\n  The page does have: ${near.join(', ')}.` +
           `\n  If yours lives in a menu, put a hover step before it:` +
@@ -336,9 +407,12 @@ export const OPS = {
   },
 
   async click(page, step, ctx) {
-    await pointAt(page, step.target, ctx, { at: step.at });
+    await pointAt(page, step.target, ctx, { at: step.at, timeout: step.timeout });
     markNav(ctx);                 // anything after this must be a NEW navigation
     await ctx.cursor.click();
+    // A click starts a route change, a fetch and a re-render. Begin the next
+    // step when the page has stopped moving, not a fixed moment later.
+    await settle(page, step.settle);
   },
 
   async fill(page, step, ctx) {
@@ -348,6 +422,7 @@ export const OPS = {
     if (value === undefined) throw new Error(`No value for ${step.target}`);
     await page.keyboard.press('ControlOrMeta+A');
     await page.keyboard.type(value, { delay: 42 });
+    await settle(page, step.settle);      // type-ahead, validation, a live filter
   },
 
   async expect(page, step, ctx) {
@@ -365,7 +440,7 @@ export const OPS = {
       //     correct the whole time.
       //
       // The assertion is "the URL contains this". Ask exactly that.
-      const deadline = Date.now() + (step.timeout ?? 8000);
+      const deadline = Date.now() + (step.timeout ?? TIMEOUT);
       let seen = page.url();
       while (!seen.includes(step.value)) {
         if (Date.now() > deadline) {
@@ -420,7 +495,7 @@ export const OPS = {
       // `.and(locator('*:visible'))` rather than `.filter({ visible: true })`:
       // same result, and it works back to the Playwright floor in package.json.
       await page.getByText(step.value, { exact: false }).and(page.locator('*:visible')).first()
-        .waitFor({ state: 'visible', timeout: 8000 });
+        .waitFor({ state: 'visible', timeout: step.timeout ?? TIMEOUT });
     } else if (step.assert === 'valueEquals') {
       const actual = await el(page, step.target, ctx).inputValue();
       if (actual !== step.value) {
@@ -455,7 +530,7 @@ export const OPS = {
         step.to,
       );
     } else {
-      await el(page, step.target, ctx).scrollIntoViewIfNeeded({ timeout: 8000 });
+      await el(page, step.target, ctx).scrollIntoViewIfNeeded({ timeout: step.timeout ?? TIMEOUT });
     }
     await sleep(180);          // let sticky headers settle and the eye catch up
     ctx.emit?.({ t: 'log', level: 'info', msg: `scrolled to ${step.to ?? step.target}` });
