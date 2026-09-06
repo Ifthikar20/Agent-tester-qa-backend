@@ -29,7 +29,13 @@ export function checkUrl(url) {
     }
     return u;
   }
-  throw new Error(`origin ${u.origin} is not allowed yet — allow it in the Page panel`);
+  // The origin travels ON the error, so a caller can offer the one button that
+  // unblocks this instead of printing a sentence and stopping. The old text
+  // pointed at a "Page panel" that no longer exists under that name.
+  const err = new Error(`origin ${u.origin} is not allowed yet`);
+  err.origin = u.origin;
+  err.url = u.href;
+  throw err;
 }
 
 function point(box, opts) {
@@ -161,6 +167,29 @@ export const OPS = {
     if (before !== null && after === before) {
       await page.reload({ waitUntil: 'domcontentloaded' });
     }
+
+    // Where did we actually land?
+    //
+    // You allow `strix.ai`; the site redirects to `https://www.strix.ai`. That
+    // is a different origin — different host, often a different scheme too — so
+    // the browser goes there quite legitimately and everything looks fine, right
+    // up until a recording made here refuses to replay because its entry URL
+    // names an origin nobody approved. Say it now, at the moment it happens,
+    // rather than three steps into a run tomorrow.
+    //
+    // It is not auto-allowed. Following a redirect is the browser's business;
+    // trusting where it ends up is a person's.
+    try {
+      const landed = new URL(page.url()).origin;
+      if (landed !== new URL(step.url).origin && !origins.has(landed)) {
+        ctx.emit?.({ t: 'needs.origin', origin: landed, url: page.url(), redirected: true });
+        ctx.emit?.({
+          t: 'log', level: 'error',
+          msg: `${step.url} redirected to ${landed}, which is not allowed. ` +
+               `Anything recorded here will not replay until you allow it.`,
+        });
+      }
+    } catch { /* not a parseable URL; nothing to compare */ }
 
     if (ctx.onNavigate) await ctx.onNavigate(page);
 
@@ -327,7 +356,13 @@ export function validate(plan, baseOrigin = DEFAULT_ORIGIN) {
 
     if (s.op === 'goto') {
       try { origin = checkUrl(s.url).origin; }
-      catch (e) { throw new Error(`Step ${i}: ${e.message}`); }
+      catch (e) {
+        // Re-wrap for context, but carry the origin through — the UI turns it
+        // into an Allow button, and a plain string cannot be pressed.
+        const err = new Error(`Step ${i}: ${e.message}`);
+        if (e.origin) { err.origin = e.origin; err.url = e.url; }
+        throw err;
+      }
     }
     if (s.op === 'scroll' && !s.target && s.to !== 'top' && s.to !== 'bottom') {
       throw new Error(`Step ${i}: scroll needs a target, or "top"/"bottom"`);

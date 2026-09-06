@@ -574,7 +574,12 @@ wss.on('connection', (ws) => {
         const isFlow = /\b(flowchart|graph)\s+(TD|TB|LR|RL|BT)\b/.test(m.text) || /-{2,3}>/.test(m.text);
         plan = validate(isFlow ? flatten(parseFlow(m.text)) : parse(m.text));
       } catch (err) {
-        return emit({ t: 'log', level: 'error', msg: err.message });
+        emit({ t: 'log', level: 'error', msg: err.message });
+        // An origin the script needs is a decision waiting for a person, not a
+        // dead end. Offer the button rather than a sentence about where to
+        // find one.
+        if (err.origin) emit({ t: 'needs.origin', origin: err.origin, url: err.url });
+        return;
       }
       // Draw the plan before running it, so a diagram exists even if step 0
       // fails. The run replaces it with the outcome version.

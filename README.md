@@ -435,6 +435,30 @@ turns out to be true:
 Each of those is a real gap, not a subtlety. If your flow needs one, say so and
 it becomes an op.
 
+## example.com is not www.example.com
+
+You allow `strix.ai`. The site redirects to `https://www.strix.ai`. Different
+host, often a different scheme too — so that is a **different origin**, and the
+browser follows the redirect quite legitimately while everything looks fine.
+Then every flow you record there refuses to replay, because its entry URL names
+an origin nobody approved:
+
+```
+Step 0: origin https://www.strix.ai is not allowed yet
+```
+
+`goto` now compares where it landed against where it was sent, and says so at
+the moment it happens rather than three steps into a run tomorrow. It does not
+auto-allow: following a redirect is the browser's business, trusting where it
+ends up is a person's — so you get the button, with the reason.
+
+The same button appears whenever a script is blocked on an origin. The failure
+used to be a sentence in the log telling you to visit a panel that no longer
+exists under that name; the origin travels on the error now, so the UI can
+offer the one action that unblocks it.
+
+---
+
 ## “Run script does nothing”
 
 Three separate faults produced that one symptom, and not one of them printed

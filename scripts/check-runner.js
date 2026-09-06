@@ -104,8 +104,47 @@ ws.close();
 if ('running' in ready && 'recording' in ready) ok('the greeting carries the run state', `running=${ready.running}`);
 else bad('the greeting carries the run state', JSON.stringify(Object.keys(ready)));
 
+// ---------------------------------------------------------------------------
+console.log('\n— 4 · an origin you have not allowed ——————————————');
+
+// A different host or scheme is a different origin. Allowing example.com does
+// not allow www.example.com — and a site that redirects to its canonical host
+// leaves you with recordings whose entry URL was never approved. That failure
+// used to be a sentence in the log pointing at a panel that no longer exists.
+async function ask(msg, wait = 2500) {
+  const ws = new WebSocket(WS);
+  const events = [];
+  await new Promise((r, j) => { ws.on('open', r); ws.on('error', j); });
+  ws.on('message', (d, isBinary) => { if (!isBinary) events.push(JSON.parse(d)); });
+  await sleep(400);
+  ws.send(JSON.stringify(msg));
+  await sleep(wait);
+  ws.close();
+  return events;
+}
+
+const NOPE = 'https://not-allowed.example.com';
+const blocked = await ask({ t: 'command', text: `goto "${NOPE}/"` });
+const prompt = blocked.find((e) => e.t === 'needs.origin');
+const logged = blocked.find((e) => e.t === 'log' && e.level === 'error');
+
+if (logged && /not allowed yet/.test(logged.msg)) ok('a blocked script says so', logged.msg);
+else bad('a blocked script says so', JSON.stringify(logged));
+
+if (prompt && prompt.origin === NOPE) ok('and offers the origin to allow', 'the UI turns this into a button');
+else bad('and offers the origin to allow', JSON.stringify(prompt) || 'no needs.origin event');
+
+if (!/Page panel/.test(logged?.msg ?? '')) ok('without naming a panel that does not exist');
+else bad('without naming a panel that does not exist', logged.msg);
+
+// The gate itself must not have moved.
+const stillOut = await fetch(`${BASE}/api/origins`).then((r) => r.json());
+if (!stillOut.origins.includes(NOPE)) ok('and asking does not allow it', 'only a person can');
+else bad('and asking does not allow it', 'the origin was added');
+
 console.log(failures
   ? `\n  ${failures} FAILED\n`
   : '\n  OK — a command is never dropped on connect, the lock is released on\n' +
-    '       every path including failure, and a throw cannot take the runner down.\n');
+    '       every path including failure, a throw cannot take the runner down,\n' +
+    '       and a blocked origin offers the button that unblocks it.\n');
 process.exit(failures ? 1 : 0);
