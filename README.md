@@ -10,9 +10,10 @@ own app, credentials, the extension, and a first recording.
 ```bash
 npm install
 npx playwright install chromium   # skip if your sandbox already ships one
-npm start                         # → http://localhost:3000
+npm start                         # builds the UI if it changed, then serves it
 
 npm run check                     # end-to-end, against a running server
+npm run check:freshness           # the UI rebuilds, and nothing serves a stale one
 npm run check:runner              # a command is never dropped, the lock always clears
 npm run check:suites              # onboarding, the origin gate, suite runs
 npm run check:recording           # repeated links, scrolling, jump-to-top, timeouts
@@ -23,15 +24,29 @@ npm run check:extension           # the picker, the shared proposer, the hand-of
 npm run check:diagram             # generated mermaid vs. the real parser
 ```
 
-The UI is a Vue 3 app in `web/`, built to `public/app/`. **That build is
-committed**, so `npm start` serves the whole thing with no bundler — a tool you
-need a build step to run is a tool people stop running. To work on the UI:
+The UI is a Vue 3 app in `web/`, built to `public/app/`. That build is
+committed, so the app runs with no bundler present — but `npm start` also
+**rebuilds it when a source file is newer than the build**, so one command
+always gives you the latest. A start with nothing to do says `up to date` and
+costs nothing.
 
 ```bash
-npm start                         # the runner, on :3000
+npm start                         # build if stale, then run      ← the one you want
+npm run serve                     # run only, never build
 npm run dev                       # Vite in front of it, on :5173
 npm run build                     # → public/app/, commit the result
+npm run check:all                 # every check, in one command
 ```
+
+It prints what it is running, and the sidebar shows the same thing:
+
+```
+  ui          ->  rebuilt (built in 880ms)
+  version     ->  0b8c46a, ui built 2026-09-06 16:43
+```
+
+If that commit is not the one you expect, you are looking at an old UI — which
+is worth knowing before spending an afternoon on a bug you already fixed.
 
 Two bundled apps to drive. **Meridian** silently truncates a username to 16
 characters while showing a success toast. **Nimbus** shows `Widget × 2` in the
@@ -783,6 +798,8 @@ silently inside someone else's docs.
 | `scripts/check-extension.js` | picker suppression, replay, hand-off, real Chrome load |
 | `extension/` | Chrome recorder for apps ghostclick cannot reach |
 | `scripts/check-diagram.js` | generated mermaid vs. the real parser |
+| `scripts/start.js` | build what changed, then run — this is `npm start` |
+| `scripts/check-freshness.js` | rebuild-when-stale, cache headers, the version stamp |
 | `scripts/check-runner.js` | dropped commands, the run lock, surviving a throw |
 | `scripts/check-suites.js` | onboarding, the one-origin rule, the gate, suite runs |
 | `scripts/check-recording.js` | ambiguous links, scrolling, jump-to-top, URL timeouts |

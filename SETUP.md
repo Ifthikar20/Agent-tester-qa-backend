@@ -22,9 +22,22 @@ It prints what it starts with:
 
 Open `http://localhost:3000`. It lands on **Test suites**.
 
-There is no build step to run first: the UI is a Vue app whose build is
-committed, so `npm start` serves it. (`npm run dev` puts Vite in front of it on
-:5173 if you want to work on the UI itself.)
+`npm start` builds the UI if anything changed and then serves it, so one
+command always runs the latest. It says which:
+
+```
+  ui          ->  up to date
+  version     ->  0b8c46a, ui built 2026-09-06 16:43
+```
+
+The same commit is at the bottom of the sidebar. If it is not the one you
+expect, you are looking at an old UI — worth checking before chasing a bug you
+have already fixed. (`npm run dev` puts Vite in front of it on :5173 for working
+on the UI itself; `npm run serve` runs without building.)
+
+**Scrolling the page you are driving:** point at the canvas and use your wheel
+or trackpad, or the ↑ Top / ↓ Bottom buttons. Clicks and keystrokes there go to
+the page being driven, never to the console.
 
 ## 2 · Point it at your app
 

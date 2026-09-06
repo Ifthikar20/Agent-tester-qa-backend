@@ -3,6 +3,7 @@ import { WebSocketServer } from 'ws';
 import { chromium } from 'playwright';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { readFileSync, statSync } from 'node:fs';
 import { VirtualCursor, sleep } from './cursor.js';
 import { OPS, validate } from './ops.js';
 import * as origins from './origins.js';
@@ -23,7 +24,21 @@ const HOME = process.env.HOME_URL || `http://localhost:${PORT}/demo.html`;
 const HEADED = /^(1|true|yes|on)$/i.test(process.env.HEADED ?? '');
 
 const app = express();
-app.use(express.static('public'));
+/**
+ * Static files, with the one header that matters.
+ *
+ * Vite fingerprints its assets, so those are safe to cache forever. index.html
+ * is not fingerprinted — it is the file that NAMES the current fingerprints —
+ * so a browser that caches it keeps loading yesterday's JavaScript no matter
+ * how many times you pull and rebuild. That is a long afternoon of "why don't I
+ * see the new button", and it is one header.
+ */
+app.use(express.static('public', {
+  setHeaders(res, path) {
+    if (path.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
+    else if (path.includes('/app/assets/')) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  },
+}));
 app.use(express.json({ limit: '512kb' }));
 
 /**
@@ -87,6 +102,29 @@ function gate(res, origin) {
     error: `${origin} is not allowed yet` });
   return true;
 }
+
+/**
+ * What exactly is running.
+ *
+ * "Am I on the latest?" should be answerable by looking, not by remembering
+ * whether you pulled. The commit is read straight out of .git rather than
+ * shelling out, so it works where git is not on PATH.
+ */
+const version = (() => {
+  const read = (p) => { try { return readFileSync(fileURLToPath(new URL(p, import.meta.url)), 'utf8').trim(); } catch { return null; } };
+  let commit = null;
+  const head = read('./.git/HEAD');
+  if (head?.startsWith('ref: ')) commit = read(`./.git/${head.slice(5)}`);
+  else if (head) commit = head;
+  let built = null;
+  try { built = statSync(APP).mtime.toISOString(); } catch { /* not built */ }
+  return {
+    commit: commit ? commit.slice(0, 7) : null,
+    built,
+    started: new Date().toISOString(),
+  };
+})();
+app.get('/api/version', (_req, res) => res.json(version));
 
 app.get('/api/state', (_req, res) => res.json({
   url: page?.url() ?? null,
@@ -380,7 +418,9 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  driving     ->  ${HOME}` +
             `\n  browser     ->  ${HEADED ? 'headed — a real window you can watch' : 'headless — streamed to the canvas (HEADED=1 for a window)'}` +
             `\n  allowed     ->  ${origins.list().join(', ')}` +
-            `\n  secrets     ->  ${vault.names().join(', ') || '(none set)'}\n`);
+            `\n  secrets     ->  ${vault.names().join(', ') || '(none set)'}` +
+            `\n  version     ->  ${version.commit ?? 'unknown'}` +
+            `${version.built ? `, ui built ${version.built.replace('T', ' ').slice(0, 16)}` : ', ui NOT BUILT'}\n`);
 
 // ---------------------------------------------------------------- browser
 /**
