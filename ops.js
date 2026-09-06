@@ -38,6 +38,51 @@ export function checkUrl(url) {
   throw err;
 }
 
+/**
+ * The navigation the page is actually showing.
+ *
+ * A click returns as soon as the event is dispatched; the response that carries
+ * the redirect chain arrives afterwards. Asserting immediately therefore read
+ * the PREVIOUS navigation and cheerfully reported "0 redirects" about a link
+ * that took two.
+ *
+ * So wait for the chain to catch up with the address bar. The hash is ignored
+ * when comparing: a same-document route change loads nothing, so the chain that
+ * belongs to it is the one from the document it happened in.
+ */
+async function landed(page, ctx, timeout = 8000) {
+  const deadline = Date.now() + timeout;
+  const since = ctx.navMark ?? -1;
+  const sameDocument = (a, b) => {
+    try {
+      const x = new URL(a), y = new URL(b);
+      return x.origin === y.origin && x.pathname === y.pathname && x.search === y.search;
+    } catch { return a === b; }
+  };
+
+  for (;;) {
+    const n = ctx.nav?.summary();
+    // Newer than the action this assertion follows. Comparing URLs alone was
+    // not enough: a click that has not committed yet leaves the address bar on
+    // the old page, so the old chain matched and answered about the wrong one.
+    if (n?.hops.length && n.seq > since) return n;
+    if (Date.now() > deadline) {
+      // Nothing new arrived. If we are still in the document the last chain
+      // describes, that IS the answer — a hash route change loads nothing, so
+      // no navigation was ever coming.
+      if (n?.hops.length && sameDocument(n.url, page.url())) return n;
+      throw new Error(
+        n?.hops.length
+          ? `nothing navigated after the previous step — still at ${page.url()}`
+          : 'nothing has navigated yet, so there is no redirect chain to check');
+    }
+    await sleep(100);
+  }
+}
+
+/** Remember where the navigation counter was, so `landed` can want a newer one. */
+const markNav = (ctx) => { ctx.navMark = ctx.nav?.seq ?? -1; };
+
 function point(box, opts) {
   const x = box.x + (opts.leftEdge ? Math.min(14, box.width / 2) : box.width / 2);
   return [x, box.y + box.height / 2];
@@ -154,6 +199,7 @@ async function pointAt(page, target, ctx, opts = {}) {
 export const OPS = {
   async goto(page, step, ctx) {
     checkUrl(step.url);                       // re-checked at run time, not just at validate
+    markNav(ctx);
 
     // A goto to the URL already on screen does NOT reload — Chrome treats it as
     // a same-document navigation. So without this a run inherits whatever the
@@ -229,6 +275,7 @@ export const OPS = {
 
   async click(page, step, ctx) {
     await pointAt(page, step.target, ctx, { at: step.at });
+    markNav(ctx);                 // anything after this must be a NEW navigation
     await ctx.cursor.click();
   },
 
@@ -271,6 +318,30 @@ export const OPS = {
         }
         await sleep(100);
         seen = page.url();
+      }
+    } else if (step.assert === 'status' || step.assert === 'redirects' || step.assert === 'via') {
+      // What the last navigation actually did.
+      //
+      // A URL assertion passes on a friendly 404 and on a link that 301'd
+      // through a path nobody maintains any more. These are the questions the
+      // final URL cannot answer, so they are asked separately.
+      const n = await landed(page, ctx);
+      const trail = () => `\n  ${n.hops.map((h) => `${h.status ?? '?'}  ${h.url}`).join('\n  ')}`;
+
+      if (step.assert === 'status') {
+        if (n.status !== Number(step.value)) {
+          throw new Error(`expected HTTP ${step.value}, got ${n.status} at ${n.url}${trail()}`);
+        }
+      } else if (step.assert === 'redirects') {
+        if (n.redirects !== Number(step.value)) {
+          throw new Error(
+            `expected ${step.value} redirect${Number(step.value) === 1 ? '' : 's'}, ` +
+            `got ${n.redirects}${trail()}`);
+        }
+      } else {
+        if (!n.hops.some((h) => h.url.includes(step.value))) {
+          throw new Error(`the redirect chain never passed through "${step.value}"${trail()}`);
+        }
       }
     } else if (step.assert === 'atTop') {
       const y = await page.evaluate(() => window.scrollY);

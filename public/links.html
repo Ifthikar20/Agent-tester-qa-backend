@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Harbour — where do these go?</title>
+<!--
+  Four links. All four "work". Each is a different kind of wrong, and none of
+  them is distinguishable from the final URL alone — which is all a recording
+  used to keep.
+-->
+<style>
+  body{font:15px/1.7 system-ui,sans-serif;max-width:620px;margin:60px auto;padding:0 24px;color:#16181d}
+  h1{font-size:26px;letter-spacing:-.01em}
+  li{margin:12px 0} a{color:#1f5fd0}
+  code{background:#f3f4f6;padding:1px 5px;border-radius:5px;font-size:12.5px}
+</style>
+<h1>Where do these go?</h1>
+<ul>
+  <li><a href="/pricing.html">Straight to pricing</a> — <code>200</code>, no hops</li>
+  <li><a href="/go/tracked">Pricing via the tracker</a> — <code>302 → 302 → 200</code></li>
+  <li><a href="/go/moved">Pricing, moved twice</a> — <code>301 → 302 → 200</code></li>
+  <li><a href="/go/gone">A link that rotted</a> — <code>404</code>, with a friendly page</li>
+</ul>

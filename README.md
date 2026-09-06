@@ -18,6 +18,7 @@ npm run check:runner              # a command is never dropped, the lock always 
 npm run check:suites              # onboarding, the origin gate, suite runs
 npm run check:recording           # repeated links, scrolling, jump-to-top, timeouts
 npm run check:longnames           # paragraph-long names, casing, sticky anchors
+npm run check:redirects           # redirect chains, statuses, the friendly 404
 npm run check:console             # the canvas paints, and the wheel reaches the page
 npm run check:teach               # demonstrate by hand, then replay what it wrote
 npm run check:fidelity            # does the replay reproduce it? would coordinates have?
@@ -557,6 +558,50 @@ three files.
 
 ---
 
+## Where a click actually took you
+
+A link that "works" can still be wrong, and none of it is visible from the final
+URL — which is all a recording used to keep. It 301s to a path nobody maintains.
+It detours through a tracker. It lands on a friendly 404 whose URL is perfectly
+correct, so `expect url contains` passes on it.
+
+So every top-level navigation is kept as a **chain**, each hop with its status,
+and shown in the console while you work:
+
+```
+200   2 redirects        http://localhost:3000/pricing.html
+      302  http://localhost:3000/go/tracked
+      302  http://localhost:3000/go/r?to=/pricing.html
+      200  http://localhost:3000/pricing.html
+```
+
+A recorded click carries the chain it caused, written into the script as
+evidence beside the coordinate marks:
+
+```
+%% via 1 302 http://…/go/tracked -> 302 http://…/go/r?to=/pricing.html -> 200 http://…/pricing.html
+```
+
+It is a comment, not an instruction. The recorder does not invent an assertion
+from it, because what a redirect *should* do is something only you know. When
+you do want to say so, there are three:
+
+```
+check status 200                  the landing document's HTTP status
+check no redirect                 or `check 2 redirects`
+check redirect via '/go/r'        the chain must pass through this
+```
+
+`check status 200` is the one that catches the rotted link. The URL assertion
+cannot: the URL is exactly what you asked for, and the page apologises politely.
+
+Assertions wait for a navigation **newer** than the step before them. Comparing
+the chain's URL against the address bar was not enough — a click that has not
+committed yet leaves the address bar on the old page, so the old chain matched
+and answered confidently about the wrong navigation.
+
+---
+
 ## When a link is named by a whole paragraph
 
 A search-result card is one link wrapping a kicker, a heading and a summary, so
@@ -871,7 +916,10 @@ silently inside someone else's docs.
 | `scripts/check-runner.js` | dropped commands, the run lock, surviving a throw |
 | `scripts/check-suites.js` | onboarding, the one-origin rule, the gate, suite runs |
 | `scripts/check-recording.js` | ambiguous links, scrolling, jump-to-top, URL timeouts |
+| `navlog.js` | every navigation as a chain of hops, each with its status |
 | `scripts/check-longnames.js` | truncated names, rendered casing, sticky scroll anchors |
+| `scripts/check-redirects.js` | chains, status assertions, and the 404 a URL check misses |
+| `public/links.html` | four links that all work and are each wrong differently |
 | `public/results.html` | a sticky header over cards named by a whole paragraph |
 | `scripts/check-console.js` | the canvas paints on arrival, and the wheel reaches the page |
 | `public/site.html` | Harbour — the same links in header and footer, and a long page |

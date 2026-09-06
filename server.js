@@ -15,6 +15,7 @@ import { parse } from './parse.js';
 import { parseFlow, flatten, toFlow } from './flow.js';
 import { toMermaid } from './diagram.js';
 import { Recorder } from './recorder.js';
+import { NavigationLog } from './navlog.js';
 
 const require = createRequire(import.meta.url);
 const PORT = Number(process.env.PORT) || 3000;
@@ -220,7 +221,7 @@ app.post('/api/suites/:id/pages/:pageId/scan', async (req, res) => {
 
   running = true;
   try {
-    await OPS.goto(page, { url: pg.url }, { cursor, emit, onNavigate: publishTargets });
+    await OPS.goto(page, { url: pg.url }, { cursor, emit, nav, onNavigate: publishTargets });
     const items = await discover(page);
     const linked = await links(page).catch(() => []);
     const saved = suites.updatePage(suite.id, pg.id, { targets: items, linked });
@@ -318,7 +319,7 @@ app.post('/api/suites/quickstart', async (req, res) => {
   try {
     // Open it first: the page's own title is a better suite name than anything
     // derived from a hostname, and it costs nothing since we must go there.
-    await OPS.goto(page, { url: u.href }, { cursor, emit, onNavigate: publishTargets });
+    await OPS.goto(page, { url: u.href }, { cursor, emit, nav, onNavigate: publishTargets });
     const title = (await page.title().catch(() => '')).trim().slice(0, 80);
     items = await discover(page);
     const linked = await links(page).catch(() => []);
@@ -374,6 +375,23 @@ app.post('/api/recording', (req, res) => {
   emit({ t: 'log', level: 'info', msg: `recording imported — ${plan.steps.length} steps, not run` });
   res.json({ ok: true, steps: plan.steps.length });
 });
+/**
+ * Redirect shapes worth testing, for the bundled demo.
+ *
+ * Every one of these is a link that "works" — you land on a page, the URL looks
+ * plausible — and every one is a different kind of wrong. They exist so the
+ * redirect assertions have something honest to assert against.
+ */
+app.get('/go/tracked', (_req, res) => res.redirect(302, '/go/r?to=/pricing.html'));
+app.get('/go/r', (req, res) => res.redirect(302, String(req.query.to || '/')));
+app.get('/go/moved', (_req, res) => res.redirect(301, '/go/moved-again'));
+app.get('/go/moved-again', (_req, res) => res.redirect(302, '/pricing.html'));
+app.get('/go/gone', (_req, res) => res.status(404).send(
+  '<!doctype html><title>Not found</title><h1>Page not found</h1>' +
+  '<p>The friendly 404 that makes a URL assertion pass anyway.</p>'));
+app.get('/pricing.html', (_req, res) => res.send(
+  '<!doctype html><title>Pricing</title><h1>Pricing</h1><p>Three plans.</p>'));
+
 // Vendored so the viewer works with no CDN and no network.
 app.get('/vendor/mermaid.min.js', (_req, res) =>
   res.sendFile(require.resolve('mermaid/dist/mermaid.min.js')));
@@ -479,10 +497,31 @@ await cdp.send('Page.startScreencast', {
 
 const cursor = new VirtualCursor(cdp, emit);
 
+/**
+ * Every top-level navigation, with the hops it went through.
+ *
+ * A link that lands on the right URL can still have 301'd through a path that
+ * no longer exists, detoured via a tracker, or arrived at a friendly 404. The
+ * final URL says none of that, so the chain is kept and shown.
+ */
+const nav = new NavigationLog(page, {
+  onNavigation: (n) => {
+    emit({ t: 'nav', ...n });
+    if (n.redirects) {
+      emit({ t: 'log', level: n.status >= 400 ? 'error' : 'info',
+             msg: `${n.redirects} redirect${n.redirects === 1 ? '' : 's'} → ${n.status} ${n.url}` });
+    } else if (n.status >= 400) {
+      emit({ t: 'log', level: 'error', msg: `${n.status} at ${n.url}` });
+    }
+  },
+});
+nav.attach();
+
 // Teach mode. Canvas clicks reach the page as real DOM events, so the same
 // listener sees a human demonstrating and would see the executor replaying —
 // which is why recording is gated off during a run.
 const recorder = new Recorder(page, {
+  nav,
   onStep: (step, steps) => emit({
     t: 'recorded',
     step,
@@ -534,7 +573,7 @@ async function run(plan, meta = {}) {
   recorder.recording = false;
 
   const results = [];
-  const ctx = { cursor, emit, onNavigate: publishTargets };
+  const ctx = { cursor, emit, nav, onNavigate: publishTargets };
   emit({ t: 'run.start', total: plan.steps.length, suite: plan.suite, ...meta });
 
   // Everything from here to the finally must be able to throw without wedging
@@ -651,7 +690,7 @@ wss.on('connection', (ws) => {
         return emit({ t: 'needs.origin', origin: new URL(url).origin, url });
       }
       try {
-        await OPS.goto(page, { url }, { cursor, emit, onNavigate: publishTargets });
+        await OPS.goto(page, { url }, { cursor, emit, nav, onNavigate: publishTargets });
         emit({ t: 'log', level: 'info', msg: `opened ${url}` });
       } catch (err) {
         emit({ t: 'log', level: 'error', msg: err.message });

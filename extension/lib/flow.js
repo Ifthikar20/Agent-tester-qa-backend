@@ -107,6 +107,21 @@ function op(clause) {
   if (/^check\s+at\s+top$/i.test(s)) {
     return { op: 'expect', assert: 'atTop' };
   }
+  // What the last navigation did, which the final URL cannot tell you: a
+  // friendly 404 has a perfectly good URL, and so does a link that 301s
+  // through a path nobody maintains.
+  if ((m = s.match(/^check\s+status\s+(\d{3})$/i))) {
+    return { op: 'expect', assert: 'status', value: Number(m[1]) };
+  }
+  if (/^check\s+no\s+redirects?$/i.test(s)) {
+    return { op: 'expect', assert: 'redirects', value: 0 };
+  }
+  if ((m = s.match(/^check\s+(\d+)\s+redirects?$/i))) {
+    return { op: 'expect', assert: 'redirects', value: Number(m[1]) };
+  }
+  if ((m = s.match(/^check\s+redirect\s+via\s+(.+)$/i))) {
+    return { op: 'expect', assert: 'via', value: unq(m[1]) };
+  }
   if ((m = s.match(/^see\s+(.+)$/i))) {
     return { op: 'expect', assert: 'textVisible', value: unq(m[1]) };
   }
@@ -309,6 +324,11 @@ function showOp(step) {
         return `check ${showTarget(step.target)} is ${String(step.value).length} chars`;
       }
       if (step.assert === 'atTop') return 'check at top';
+      if (step.assert === 'status') return `check status ${step.value}`;
+      if (step.assert === 'redirects') {
+        return step.value === 0 ? 'check no redirect' : `check ${step.value} redirects`;
+      }
+      if (step.assert === 'via') return `check redirect via '${edgeText(step.value)}'`;
       return null;   // url/text assertions become node shapes, not edges
     default: return null;
   }
@@ -363,6 +383,14 @@ export function toFlow(plan) {
   const marks = plan.steps
     .map((s, i) => (s.at ? `%% at ${i} ${s.at.x},${s.at.y} ${s.at.w}x${s.at.h} in ${s.at.vw}x${s.at.vh}` : null))
     .filter(Boolean);
+
+  // Where each click actually went, hop by hop. A comment, like the coordinate
+  // marks: it is what happened, not an instruction — but it is the thing you
+  // need in front of you to decide whether `check 2 redirects` belongs here.
+  plan.steps.forEach((s, i) => {
+    if (!s.via?.length) return;
+    marks.push(`%% via ${i} ${s.via.map((h) => `${h.status ?? '?'} ${h.url}`).join(' -> ')}`);
+  });
 
   // What the entry page offered when this was recorded.
   const entry = plan.steps.find((s) => s.op === 'goto' && s.entry?.length);

@@ -252,8 +252,15 @@ const LISTENERS = `
 const INJECT = `${PROPOSE_SRC}\n${LISTENERS}`;
 
 export class Recorder {
-  constructor(page, { onStep, onError } = {}) {
+  /**
+   * @param nav a NavigationLog, when there is one. A click that navigates gets
+   *   the chain it went through recorded alongside it — the hops and their
+   *   statuses — because "it went to the right URL" is not the same as "it went
+   *   there directly", and neither is visible afterwards.
+   */
+  constructor(page, { onStep, onError, nav } = {}) {
     this.page = page;
+    this.nav = nav ?? null;
     this.onStep = onStep ?? (() => {});
     this.onError = onError ?? (() => {});
     this.recording = false;
@@ -314,6 +321,31 @@ export class Recorder {
 
     this.steps.push(step);
     this.onStep(step, this.steps);
+  }
+
+  /**
+   * Attach the last navigation's chain to the click that caused it.
+   *
+   * The click and the navigation arrive on different paths — one through the
+   * page's ordered channel, one from Playwright's response events — so this
+   * settles briefly rather than racing. A chain that has not changed since the
+   * previous step is one this click did not cause.
+   */
+  async #noteNavigation() {
+    if (!this.nav) return;
+    const before = this.lastChain;
+    for (let i = 0; i < 12; i++) {
+      const n = this.nav.summary();
+      const key = n.hops.map((h) => `${h.status}${h.url}`).join('|');
+      if (key && key !== before) {
+        this.lastChain = key;
+        const step = this.steps.at(-1);
+        if (step?.op === 'click') step.via = n.hops;
+        this.onStep(step, this.steps);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 120));
+    }
   }
 
   /** A route change is an assertion — it is what makes a recording self-checking. */
@@ -421,7 +453,13 @@ export class Recorder {
     const at = p.at;
     if (p.kind === 'scroll') return this.#push({ op: 'scroll', target, at });
     if (p.kind === 'hover') return this.#push({ op: 'hover', target, at });
-    if (p.kind === 'click') return this.#push({ op: 'click', target, at });
+    if (p.kind === 'click') {
+      this.#push({ op: 'click', target, at });
+      // A click that navigated: keep what it went through. This is evidence,
+      // not instruction — the assertions it suggests are a person's decision,
+      // and #noteUrl has already filed the URL change that goes with it.
+      return this.#noteNavigation();
+    }
     if (p.kind === 'fill') {
       return this.#push(p.secret
         ? { op: 'fill', target, valueRef: 'secrets.TODO', at }
