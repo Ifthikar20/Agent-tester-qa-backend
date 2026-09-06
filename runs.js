@@ -17,21 +17,27 @@ function load() {
   try { return JSON.parse(readFileSync(STORE, 'utf8')).runs ?? []; } catch { return []; }
 }
 
-let runs = load();
+let all = load();
 
 function persist() {
   try {
     mkdirSync(dirname(STORE), { recursive: true });
-    writeFileSync(STORE, JSON.stringify({ runs }, null, 2));
+    writeFileSync(STORE, JSON.stringify({ runs: all }, null, 2));
   } catch { /* read-only checkout: the session still has its history in memory */ }
 }
 
-/** @param {{suite:string, url:string, ms:number, results:Array}} run */
-export function record({ suite, url, ms, results }) {
+/** @param {{suite:string, suiteId?:string, caseId?:string, caseName?:string, url:string, ms:number, results:Array}} run */
+export function record({ suite, suiteId, caseId, caseName, url, ms, results }) {
   const failed = results.filter((r) => !r.ok);
   const entry = {
     at: Date.now(),
     suite: suite || 'Untitled',
+    // A run started from the console belongs to no suite. Recording that
+    // honestly is what lets the dashboard say "5 ad-hoc runs" instead of
+    // filing them under whichever suite happened to be open.
+    suiteId: suiteId ?? null,
+    caseId: caseId ?? null,
+    caseName: caseName ?? null,
     url: url || '',
     ms,
     total: results.length,
@@ -42,16 +48,23 @@ export function record({ suite, url, ms, results }) {
     error: failed[0]?.error?.split('\n')[0]?.slice(0, 240) ?? null,
     step: failed[0] ? failed[0].i : null,
   };
-  runs.push(entry);
-  if (runs.length > CAP) runs = runs.slice(-CAP);
+  all.push(entry);
+  if (all.length > CAP) all = all.slice(-CAP);
   persist();
   return entry;
 }
 
-export const list = () => runs.slice();
+export const list = () => all.slice();
 
-/** Everything the dashboard needs, computed once here rather than in the page. */
-export function summary(days = 14) {
+/**
+ * Everything the dashboard needs, computed once here rather than in the page.
+ *
+ * @param suiteId when given, only that suite's runs — so a suite page and the
+ *   overall dashboard are the same view over a different slice, not two
+ *   implementations that will disagree by next week.
+ */
+export function summary(days = 14, suiteId = null) {
+  const runs = suiteId ? all.filter((r) => r.suiteId === suiteId) : all;
   const now = Date.now();
   const dayMs = 86_400_000;
   const since = now - (days - 1) * dayMs;
@@ -71,7 +84,7 @@ export function summary(days = 14) {
   // One row per suite, newest first, so the table answers "what is red today".
   const bySuite = new Map();
   for (const r of runs) {
-    const s = bySuite.get(r.suite) ?? { suite: r.suite, runs: 0, passed: 0, last: null };
+    const s = bySuite.get(r.suite) ?? { suite: r.suite, suiteId: r.suiteId ?? null, runs: 0, passed: 0, last: null };
     s.runs++;
     if (r.ok) s.passed++;
     if (!s.last || r.at > s.last.at) s.last = r;

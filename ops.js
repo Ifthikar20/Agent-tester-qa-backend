@@ -216,7 +216,17 @@ export const OPS = {
     if (step.assert === 'urlContains') {
       await page.waitForURL((u) => u.href.includes(step.value), { timeout: 8000 });
     } else if (step.assert === 'textVisible') {
-      await page.getByText(step.value, { exact: false }).first()
+      // Intersect with the visible set BEFORE taking .first().
+      //
+      // getByText returns DOM order, and a hidden <label> or a screen-reader
+      // string routinely comes first. Waiting on that one times out while the
+      // words are plainly on screen somewhere else — the assertion reports the
+      // page is broken when it is the query that is. The question is "is this
+      // text visible anywhere", so ask that.
+      //
+      // `.and(locator('*:visible'))` rather than `.filter({ visible: true })`:
+      // same result, and it works back to the Playwright floor in package.json.
+      await page.getByText(step.value, { exact: false }).and(page.locator('*:visible')).first()
         .waitFor({ state: 'visible', timeout: 8000 });
     } else if (step.assert === 'valueEquals') {
       const actual = await el(page, step.target, ctx).inputValue();

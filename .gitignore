@@ -2,3 +2,6 @@ node_modules/
 *.log
 
 .ghostclick/
+
+# The Vue build IS committed (public/app) so `npm start` needs no bundler.
+web/node_modules/

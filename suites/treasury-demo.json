@@ -1,0 +1,119 @@
+{
+  "id": "treasury-demo",
+  "name": "Treasury demo",
+  "description": "Sign-in and shop flows on the bundled demo app",
+  "baseUrl": "http://localhost:3000/",
+  "pages": [
+    {
+      "id": "pg_phst8fxdl",
+      "name": "Sign in",
+      "path": "/demo.html",
+      "url": "http://localhost:3000/demo.html",
+      "expect": [
+        {
+          "kind": "url",
+          "value": "/demo.html"
+        },
+        {
+          "kind": "text",
+          "value": "Sign in"
+        }
+      ],
+      "targets": [
+        {
+          "target": "link:Settings",
+          "role": "link",
+          "name": "Settings"
+        },
+        {
+          "target": "textbox:Email",
+          "role": "textbox",
+          "name": "Email"
+        },
+        {
+          "target": "textbox:Password",
+          "role": "textbox",
+          "name": "Password"
+        },
+        {
+          "target": "button:Sign in",
+          "role": "button",
+          "name": "Sign in"
+        }
+      ],
+      "scannedAt": "2026-09-06T13:37:10.571Z"
+    },
+    {
+      "id": "pg_pbtmqyxgt",
+      "name": "Shop",
+      "path": "/shop.html",
+      "url": "http://localhost:3000/shop.html",
+      "expect": [
+        {
+          "kind": "url",
+          "value": "/shop.html"
+        },
+        {
+          "kind": "text",
+          "value": "Cart"
+        },
+        {
+          "kind": "text",
+          "value": "Search"
+        }
+      ],
+      "targets": [
+        {
+          "target": "link:Cart",
+          "role": "link",
+          "name": "Cart"
+        },
+        {
+          "target": "textbox:Search",
+          "role": "textbox",
+          "name": "Search"
+        },
+        {
+          "target": "button:Search",
+          "role": "button",
+          "name": "Search"
+        }
+      ],
+      "scannedAt": "2026-09-06T13:37:10.672Z"
+    }
+  ],
+  "cases": [
+    {
+      "id": "cs_5sp4owyfy",
+      "name": "Sign in loads",
+      "pageId": "pg_phst8fxdl",
+      "source": "written",
+      "flow": "%% suite \"Treasury demo · Sign in\"\nflowchart TD\n  n0((\"http://localhost:3000/demo.html\"))\n  n1[\"/demo.html\"]\n  n2{{\"Sign in\"}}\n\n  n0 --> n1\n  n1 --> n2",
+      "steps": 3,
+      "createdAt": "2026-09-06T13:37:11.710Z",
+      "updatedAt": "2026-09-06T13:37:11.710Z"
+    },
+    {
+      "id": "cs_7gcpshygd",
+      "name": "Shop loads",
+      "pageId": "pg_pbtmqyxgt",
+      "source": "written",
+      "flow": "%% suite \"Treasury demo · Shop\"\nflowchart TD\n  n0((\"http://localhost:3000/shop.html\"))\n  n1[\"/shop.html\"]\n  n2{{\"Cart\"}}\n  n3{{\"Search\"}}\n\n  n0 --> n1\n  n1 --> n2\n  n2 --> n3",
+      "steps": 4,
+      "createdAt": "2026-09-06T13:37:11.725Z",
+      "updatedAt": "2026-09-06T13:37:11.725Z"
+    },
+    {
+      "id": "cs_iywl55edn",
+      "name": "Sign in and open Settings",
+      "pageId": null,
+      "source": "recorded",
+      "flow": "%% suite \"Recorded flow\"\nflowchart TD\n  n0((\"http://localhost:3000/demo.html\"))\n  n1[\"/demo.html#/dashboard\"]\n  n2[\"/demo.html#/settings\"]\n\n  n0 -->|fill 'Email' : label = 'qa@example.com'; fill 'Password' : label = $QA_PASS; click 'Sign in' : button| n1\n  n1 -->|click 'Settings' : link| n2\n\n%% entry [\"link:Settings\",\"textbox:Email\",\"textbox:Password\",\"button:Sign in\"]\n%% at 1 590,228 560x41 in 1180x760\n%% at 2 590,308 560x41 in 1180x760\n%% at 3 353,371 87x38 in 1180x760\n%% at 5 165,23 57x16 in 1180x760",
+      "steps": 7,
+      "createdAt": "2026-09-06T13:39:05.675Z",
+      "updatedAt": "2026-09-06T13:41:50.757Z"
+    }
+  ],
+  "createdAt": "2026-09-06T13:37:09.795Z",
+  "updatedAt": "2026-09-06T13:41:50.757Z"
+}

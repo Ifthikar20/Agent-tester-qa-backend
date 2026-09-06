@@ -6,12 +6,14 @@
   "description": "PoC: drive headless Chrome from a small DSL, stream it to a canvas, draw a synthetic cursor over it.",
   "scripts": {
     "start": "node server.js",
+    "dev": "vite --config web/vite.config.js",
+    "build": "vite build --config web/vite.config.js",
     "check": "node scripts/check.js",
+    "check:suites": "node scripts/check-suites.js",
     "check:diagram": "node scripts/check-diagram.js",
     "check:teach": "node scripts/check-teach.js",
     "check:extension": "node scripts/check-extension.js",
-    "check:fidelity": "node scripts/check-fidelity.js",
-    "build:css": "tailwindcss -i src/app.css -o public/assets/app.css --minify"
+    "check:fidelity": "node scripts/check-fidelity.js"
   },
   "dependencies": {
     "express": "^4.19.2",
@@ -21,6 +23,12 @@
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.3.3",
-    "tailwindcss": "^4.3.3"
+    "@tailwindcss/vite": "^4.3.3",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "pinia": "^4.0.3",
+    "tailwindcss": "^4.3.3",
+    "vite": "^8.2.2",
+    "vue": "^3.5.42",
+    "vue-router": "^5.3.1"
   }
 }

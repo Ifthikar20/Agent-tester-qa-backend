@@ -13,10 +13,21 @@ npx playwright install chromium   # skip if your sandbox already ships one
 npm start                         # → http://localhost:3000
 
 npm run check                     # end-to-end, against a running server
+npm run check:suites              # onboarding, the origin gate, suite runs
 npm run check:teach               # demonstrate by hand, then replay what it wrote
 npm run check:fidelity            # does the replay reproduce it? would coordinates have?
 npm run check:extension           # the picker, the shared proposer, the hand-off
 npm run check:diagram             # generated mermaid vs. the real parser
+```
+
+The UI is a Vue 3 app in `web/`, built to `public/app/`. **That build is
+committed**, so `npm start` serves the whole thing with no bundler — a tool you
+need a build step to run is a tool people stop running. To work on the UI:
+
+```bash
+npm start                         # the runner, on :3000
+npm run dev                       # Vite in front of it, on :5173
+npm run build                     # → public/app/, commit the result
 ```
 
 Two bundled apps to drive. **Meridian** silently truncates a username to 16
@@ -144,6 +155,48 @@ It will not take over your operating system's cursor. That is a different kind
 of tool — it would fight you for the machine, break the moment you moved the
 mouse, and could not run anywhere without a screen. Everything here works
 through the browser rather than around it.
+
+## Test suites — how a project gets in
+
+A suite is the onboarding unit. Not a folder of scripts: the answer to four
+questions, asked in the order that makes each one answerable.
+
+| Step | What you give it | What it buys you |
+|---|---|---|
+| **Project** | a name and one base URL | the origin is decided once, in front of a person |
+| **Pages** | the discrete URLs worth visiting | a **scan** opens each in the runner and reads its accessibility tree |
+| **Expectations** | ticks over what the scan found | assertions that survive a markup change, because they came from the same model `getByRole` queries |
+| **Cases** | recorded or written flows | the suite runs |
+
+A suite covers **one origin**, and every page is a path beneath it. That is not
+tidiness — it means adding a page later can never walk the runner to a host
+nobody approved. The origin decision happens once and the suite cannot widen it
+afterwards.
+
+Creating a suite does **not** allow its origin. Onboarding asks for that
+separately, with a button, because allowing an origin is a human act and always
+has been. A generated plan cannot reach it; neither can the wizard.
+
+Nothing unrunnable is ever stored. Every case is parsed and validated on the way
+in with the same function the executor uses, so a case that cannot run is
+refused at save rather than discovered at 2am:
+
+```
+POST /api/suites/x/cases  {"flow": "flowchart TD\n a((\"https://evil.example.com/\"))"}
+→ 400  Step 0: origin https://evil.example.com is not allowed yet
+```
+
+The payoff of onboarding is that the suite tests something before anyone records
+a click. Each page's expectations generate a case — reach it, assert what should
+be there — and that is the test that catches "the URL moved" instead of leaving
+it as a mystery three steps into a longer flow.
+
+Suites live in `suites/*.json`, **in the repository**, one readable file each.
+Run history is machine-local (`.ghostclick/`, gitignored) because it records what
+happened on your machine; a suite is the opposite — the shared description of a
+project, so it should diff, review and merge like any other source file.
+
+---
 
 ## Teach mode
 
@@ -556,7 +609,10 @@ silently inside someone else's docs.
 | `ops.js` | op vocabulary, origin allowlist, validation gate |
 | `parse.js` | DSL text → JSON IR |
 | `diagram.js` | JSON IR → mermaid `block-beta` |
-| `public/index.html` | canvas feed, cursor overlay, editor, targets, diagram |
+| `suites.js` | the suite model — one origin, pages, expectations, cases |
+| `runs.js` | run history, scoped by suite |
+| `web/` | the Vue 3 app: onboarding, suites, console, dashboard |
+| `public/app/` | its build — committed, so `npm start` needs no bundler |
 | `public/demo.html` | Meridian — truncates a username to 16 chars |
 | `public/shop.html` | Nimbus — cart total ignores quantity |
 | `public/menu.html` | Aperture — a dropdown that only exists on hover |
@@ -565,6 +621,7 @@ silently inside someone else's docs.
 | `scripts/check-extension.js` | picker suppression, replay, hand-off, real Chrome load |
 | `extension/` | Chrome recorder for apps ghostclick cannot reach |
 | `scripts/check-diagram.js` | generated mermaid vs. the real parser |
+| `scripts/check-suites.js` | onboarding, the one-origin rule, the gate, suite runs |
 
 ---
 

@@ -2,11 +2,13 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import { chromium } from 'playwright';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { VirtualCursor, sleep } from './cursor.js';
 import { OPS, validate } from './ops.js';
 import * as origins from './origins.js';
 import * as vault from './secrets.js';
 import * as history from './runs.js';
+import * as suites from './suites.js';
 import { discover } from './targets.js';
 import { parse } from './parse.js';
 import { parseFlow, flatten, toFlow } from './flow.js';
@@ -25,6 +27,26 @@ app.use(express.static('public'));
 app.use(express.json({ limit: '512kb' }));
 
 /**
+ * The Vue app.
+ *
+ * It is built to `public/app/` and that build is committed, so `npm start`
+ * serves the whole UI with no bundler in the picture — a tool you need a build
+ * step to run is a tool people stop running. `npm run dev` puts Vite in front
+ * for working on it.
+ *
+ * Static files win (this sits after express.static), so only client-side routes
+ * reach the fallback.
+ */
+const APP = fileURLToPath(new URL('./public/app/index.html', import.meta.url));
+app.get('/', (_req, res) => res.redirect('/app/'));
+app.use('/app', (req, res, next) => {
+  if (req.method !== 'GET' || req.path.startsWith('/assets/')) return next();
+  res.sendFile(APP, (err) => {
+    if (err) next(new Error('The UI is not built — run `npm run build`'));
+  });
+});
+
+/**
  * Where the browser extension drops a recording.
  *
  * It is validated here and put in the viewer's script box — never run. Any
@@ -39,7 +61,182 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-app.get('/api/runs', (_req, res) => res.json(history.summary()));
+app.get('/api/runs', (req, res) => res.json(history.summary(14, req.query.suite || null)));
+
+// ------------------------------------------------------------ suites (API)
+/**
+ * Onboarding a project happens over HTTP, not the socket, because it is
+ * ordinary CRUD that has to work on a page reload and be linkable. The socket
+ * carries what is live — frames, cursor, step outcomes.
+ *
+ * Two endpoints here touch the browser (scan and run) and both go through the
+ * same run lock and the same origin gate as everything else. Neither can add
+ * an origin: `POST /api/origins` exists for that, and it is only ever reached
+ * by someone pressing a button.
+ */
+const fail = (res, err, code = 400) => res.status(code).json({ ok: false, error: err.message ?? String(err) });
+const sendOk = (res, body) => res.json({ ok: true, ...body });
+
+/** Parse+validate a flow the way the executor will. Suites store nothing unrunnable. */
+const checkFlow = (flow) => validate(flatten(parseFlow(flow)));
+
+/** The gate, as an answer the UI can act on rather than an error it must read. */
+function gate(res, origin) {
+  if (origins.has(origin)) return false;
+  res.status(409).json({ ok: false, needsOrigin: origin,
+    error: `${origin} is not allowed yet` });
+  return true;
+}
+
+app.get('/api/state', (_req, res) => res.json({
+  url: page?.url() ?? null,
+  running,
+  recording: recorder?.recording ?? false,
+  origins: origins.list(),
+  secrets: vault.names(),        // names only — a value never leaves the server
+  headed: HEADED,
+}));
+
+app.get('/api/origins', (_req, res) => res.json({ origins: origins.list() }));
+app.post('/api/origins', (req, res) => {
+  try {
+    const r = origins.add(req.body?.origin);
+    emit({ t: 'origins', origins: origins.list() });
+    sendOk(res, { ...r, origins: origins.list() });
+  } catch (err) { fail(res, err); }
+});
+app.delete('/api/origins', (req, res) => {
+  try { origins.remove(req.body?.origin); sendOk(res, { origins: origins.list() }); }
+  catch (err) { fail(res, err); }
+});
+
+app.get('/api/suites', (_req, res) => res.json({ suites: suites.list() }));
+app.post('/api/suites', (req, res) => {
+  try { sendOk(res, { suite: suites.create(req.body ?? {}) }); } catch (err) { fail(res, err); }
+});
+app.get('/api/suites/:id', (req, res) => {
+  try {
+    const s = suites.get(req.params.id);
+    // The gate's state travels with the suite, so onboarding can show where it
+    // stands without a second round trip.
+    res.json({ suite: s, allowed: origins.has(suites.originOf(s)) });
+  } catch (err) { fail(res, err, 404); }
+});
+app.patch('/api/suites/:id', (req, res) => {
+  try { sendOk(res, { suite: suites.update(req.params.id, req.body ?? {}) }); } catch (err) { fail(res, err); }
+});
+app.delete('/api/suites/:id', (req, res) => {
+  try { sendOk(res, suites.remove(req.params.id)); } catch (err) { fail(res, err); }
+});
+
+app.post('/api/suites/:id/pages', (req, res) => {
+  try { sendOk(res, { page: suites.addPage(req.params.id, req.body ?? {}) }); } catch (err) { fail(res, err); }
+});
+app.patch('/api/suites/:id/pages/:pageId', (req, res) => {
+  try { sendOk(res, { page: suites.updatePage(req.params.id, req.params.pageId, req.body ?? {}) }); }
+  catch (err) { fail(res, err); }
+});
+app.delete('/api/suites/:id/pages/:pageId', (req, res) => {
+  try { sendOk(res, suites.removePage(req.params.id, req.params.pageId)); } catch (err) { fail(res, err); }
+});
+
+/**
+ * Open a page in the driven browser and report what it offers.
+ *
+ * This is the step that turns a URL somebody typed into something scriptable:
+ * everything it returns comes from the accessibility tree, so every target
+ * listed is one the executor can actually resolve. The result is cached on the
+ * page so the expectation picker has something to show later without driving
+ * the browser again.
+ */
+app.post('/api/suites/:id/pages/:pageId/scan', async (req, res) => {
+  let suite, pg;
+  try {
+    suite = suites.get(req.params.id);
+    pg = suite.pages.find((p) => p.id === req.params.pageId);
+    if (!pg) throw new Error('No such page');
+  } catch (err) { return fail(res, err, 404); }
+
+  if (gate(res, suites.originOf(suite))) return;
+  if (running) return fail(res, new Error('A run is in progress'), 409);
+
+  running = true;
+  try {
+    await OPS.goto(page, { url: pg.url }, { cursor, emit, onNavigate: publishTargets });
+    const items = await discover(page);
+    const saved = suites.updatePage(suite.id, pg.id, { targets: items });
+    emit({ t: 'log', level: 'info', msg: `scanned ${pg.url} — ${items.length} targets` });
+    sendOk(res, { page: saved, url: page.url() });
+  } catch (err) {
+    fail(res, err);
+  } finally {
+    running = false;
+    await publishTargets();
+  }
+});
+
+app.post('/api/suites/:id/cases', (req, res) => {
+  try { sendOk(res, { case: suites.addCase(req.params.id, req.body ?? {}, checkFlow) }); }
+  catch (err) { fail(res, err); }
+});
+app.patch('/api/suites/:id/cases/:caseId', (req, res) => {
+  try { sendOk(res, { case: suites.updateCase(req.params.id, req.params.caseId, req.body ?? {}, checkFlow) }); }
+  catch (err) { fail(res, err); }
+});
+app.delete('/api/suites/:id/cases/:caseId', (req, res) => {
+  try { sendOk(res, suites.removeCase(req.params.id, req.params.caseId)); } catch (err) { fail(res, err); }
+});
+
+/**
+ * Run a suite: every case, or one named by `?case=`.
+ *
+ * Cases run in order and a failure does not stop the suite — you want the whole
+ * board red-or-green, not the first thing that broke. Progress goes out on the
+ * socket as it happens; the aggregate comes back here so the caller gets a
+ * definitive answer rather than having to infer one from events.
+ */
+app.post('/api/suites/:id/run', async (req, res) => {
+  let suite;
+  try { suite = suites.get(req.params.id); } catch (err) { return fail(res, err, 404); }
+  if (gate(res, suites.originOf(suite))) return;
+  if (running) return fail(res, new Error('A run is in progress'), 409);
+
+  const wanted = req.query.case
+    ? suite.cases.filter((c) => c.id === req.query.case)
+    : suite.cases;
+  if (!wanted.length) return fail(res, new Error('This suite has no cases to run'));
+
+  emit({ t: 'suite.start', suite: suite.name, cases: wanted.length });
+  const outcomes = [];
+  for (const c of wanted) {
+    let plan;
+    try {
+      plan = checkFlow(c.flow);
+    } catch (err) {
+      // An unparseable case is a failed case, not a dead suite.
+      outcomes.push({ case: c.id, name: c.name, ok: false, error: err.message });
+      emit({ t: 'log', level: 'error', msg: `${c.name}: ${err.message}` });
+      continue;
+    }
+    plan.suite = `${suite.name} · ${c.name}`;
+    emit({ t: 'diagram', kind: 'plan', mermaid: toMermaid(plan) });
+    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name });
+    outcomes.push({ case: c.id, name: c.name, ...r });
+  }
+  const passed = outcomes.filter((o) => o.ok).length;
+  emit({ t: 'suite.end', suite: suite.name, passed, total: outcomes.length });
+  sendOk(res, { suite: suite.id, passed, total: outcomes.length, outcomes });
+});
+
+/** A page's expectations, as a flow you can read before you run it. */
+app.get('/api/suites/:id/pages/:pageId/check', (req, res) => {
+  try {
+    const s = suites.get(req.params.id);
+    const p = s.pages.find((x) => x.id === req.params.pageId);
+    if (!p) throw new Error('No such page');
+    res.json({ flow: suites.pageCheckFlow(s, p) });
+  } catch (err) { fail(res, err, 404); }
+});
 
 app.post('/api/recording', (req, res) => {
   const flow = String(req.body?.flow ?? '');
@@ -193,15 +390,24 @@ async function publishTargets() {
 // ---------------------------------------------------------------- executor
 let running = false;
 
-async function run(plan) {
-  if (running) return emit({ t: 'log', level: 'warn', msg: 'A run is already in progress' });
+/**
+ * @param meta which suite and case this plan came from, when it came from one.
+ *   A plan typed into the console has no suite; that is a legitimate state and
+ *   the history records it as such rather than inventing a home for it.
+ * @returns {{ok:boolean, passed:number, total:number, error:string|null}}
+ */
+async function run(plan, meta = {}) {
+  if (running) {
+    emit({ t: 'log', level: 'warn', msg: 'A run is already in progress' });
+    return { ok: false, passed: 0, total: 0, error: 'A run is already in progress' };
+  }
   running = true;
   const wasRecording = recorder.recording;
   recorder.recording = false;
 
   const results = [];
   const ctx = { cursor, emit, onNavigate: publishTargets };
-  emit({ t: 'run.start', total: plan.steps.length, suite: plan.suite });
+  emit({ t: 'run.start', total: plan.steps.length, suite: plan.suite, ...meta });
 
   for (const [i, step] of plan.steps.entries()) {
     emit({ t: 'step.start', i, step });
@@ -218,9 +424,13 @@ async function run(plan) {
     await sleep(120);
   }
 
+  const passed = results.filter((r) => r.ok).length;
   const ok = results.every((r) => r.ok);
-  history.record({
+  const entry = history.record({
     suite: plan.suite,
+    suiteId: meta.suiteId ?? null,
+    caseId: meta.caseId ?? null,
+    caseName: meta.caseName ?? null,
     url: plan.steps.find((s) => s.op === 'goto')?.url ?? '',
     ms: results.reduce((a, r) => a + (r.ms ?? 0), 0),
     results,
@@ -235,7 +445,8 @@ async function run(plan) {
   // back-to-back scripts hang on a silently refused second run.
   running = false;
   recorder.recording = wasRecording;
-  emit({ t: 'run.end', ok });
+  emit({ t: 'run.end', ok, ...meta });
+  return { ok, passed, total: results.length, error: entry.error };
 }
 
 // ---------------------------------------------------------------- sockets
