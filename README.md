@@ -158,6 +158,26 @@ through the browser rather than around it.
 
 ## Test suites — how a project gets in
 
+### The fast way: one URL
+
+Paste your app's URL on the Test suites screen and press **Add and test**. It
+opens the page, names the suite from its title, reads what is on it, asserts you
+reached it, and runs that — so you find out whether the runner can drive your app
+at all before deciding how much to invest.
+
+It asserts only the URL. Guessing which of a page's words are stable enough to
+assert would produce a suite that fails for reasons nobody chose, so the text
+expectations stay a human decision, one screen away.
+
+The gate is not skipped: a URL nobody has approved comes back naming the origin
+it needs, and the same panel becomes the button that approves it.
+
+Scanning also reads the same-origin links on the page, so the app's own nav
+becomes a row of one-click **+ Billing `/#/billing`** buttons. Onboarding a real
+multi-page app is clicking its navigation, not typing its routes.
+
+### The thorough way: four questions
+
 A suite is the onboarding unit. Not a folder of scripts: the answer to four
 questions, asked in the order that makes each one answerable.
 

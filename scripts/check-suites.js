@@ -130,6 +130,32 @@ if (all.totals.runs >= hist.totals.runs) ok('the unscoped view is a superset', `
 else bad('the unscoped view is a superset', `${all.totals.runs} < ${hist.totals.runs}`);
 
 // --------------------------------------------------------------------------
+console.log('\n— one URL in, a running test out ——————————————————');
+
+const qs = await call('/api/suites/quickstart', { method: 'POST', body: { url: `${BASE}/shop.html` } });
+if (!qs.body.ok) bad('quickstart builds and runs a suite', qs.body.error);
+else if (!qs.body.run.ok) bad('quickstart builds and runs a suite', qs.body.run.error);
+else ok('quickstart builds and runs a suite',
+        `"${qs.body.suite.name}" — ${qs.body.targets} targets, ${qs.body.run.passed}/${qs.body.run.total} steps`);
+
+const qid = qs.body.suite?.id;
+const qpage = qs.body.suite?.pages?.[0];
+if (qpage?.expect.length === 1 && qpage.expect[0].kind === 'url') {
+  ok('it asserts only the URL', 'text expectations stay a human choice');
+} else bad('it asserts only the URL', JSON.stringify(qpage?.expect));
+
+if (qpage?.linked?.length) ok('it offers the pages the app links to', qpage.linked.map((l) => l.path).join(' · '));
+else bad('it offers the pages the app links to', 'no links found');
+
+if ((qpage?.linked ?? []).every((l) => l.path.startsWith('/'))) ok('link suggestions stay on the origin');
+else bad('link suggestions stay on the origin', JSON.stringify(qpage.linked));
+
+await refuses('quickstart refuses an unallowed origin', '/api/suites/quickstart',
+  { method: 'POST', body: { url: 'https://not-allowed.example.com/' } }, /not allow/i);
+
+if (qid) await call(`/api/suites/${qid}`, { method: 'DELETE' });
+
+// --------------------------------------------------------------------------
 console.log('\n— the gate ————————————————————————————————————————');
 
 const walled = await call('/api/suites', { method: 'POST', body: { name: 'Check suites walled', baseUrl: 'https://not-allowed.example.com' } });

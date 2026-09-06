@@ -9,7 +9,7 @@ import * as origins from './origins.js';
 import * as vault from './secrets.js';
 import * as history from './runs.js';
 import * as suites from './suites.js';
-import { discover } from './targets.js';
+import { discover, links } from './targets.js';
 import { parse } from './parse.js';
 import { parseFlow, flatten, toFlow } from './flow.js';
 import { toMermaid } from './diagram.js';
@@ -164,8 +164,10 @@ app.post('/api/suites/:id/pages/:pageId/scan', async (req, res) => {
   try {
     await OPS.goto(page, { url: pg.url }, { cursor, emit, onNavigate: publishTargets });
     const items = await discover(page);
-    const saved = suites.updatePage(suite.id, pg.id, { targets: items });
-    emit({ t: 'log', level: 'info', msg: `scanned ${pg.url} — ${items.length} targets` });
+    const linked = await links(page).catch(() => []);
+    const saved = suites.updatePage(suite.id, pg.id, { targets: items, linked });
+    emit({ t: 'log', level: 'info',
+           msg: `scanned ${pg.url} — ${items.length} targets, ${linked.length} links` });
     sendOk(res, { page: saved, url: page.url() });
   } catch (err) {
     fail(res, err);
@@ -226,6 +228,66 @@ app.post('/api/suites/:id/run', async (req, res) => {
   const passed = outcomes.filter((o) => o.ok).length;
   emit({ t: 'suite.end', suite: suite.name, passed, total: outcomes.length });
   sendOk(res, { suite: suite.id, passed, total: outcomes.length, outcomes });
+});
+
+/**
+ * One URL in, a running test out.
+ *
+ * The four-step wizard is for a project you are setting up properly. This is for
+ * the first minute with your own app: paste the URL, and it opens it, reads what
+ * is there, asserts you reached it, and runs that — so you find out whether the
+ * runner can drive your app at all before deciding how much to invest.
+ *
+ * It only ever asserts the URL. Guessing which of a page's words are stable
+ * enough to assert would produce a suite that fails for reasons nobody chose;
+ * the text expectations stay a human decision, one screen away.
+ *
+ * The gate is not skipped. A URL nobody has approved comes back as a 409 saying
+ * which origin it needs, exactly like every other path to the browser.
+ */
+app.post('/api/suites/quickstart', async (req, res) => {
+  let u;
+  try { u = origins.normalizeUrl(req.body?.url); } catch (err) { return fail(res, err); }
+  if (gate(res, u.origin)) return;
+  if (running) return fail(res, new Error('A run is in progress'), 409);
+
+  let suite, pg, items;
+  running = true;
+  try {
+    // Open it first: the page's own title is a better suite name than anything
+    // derived from a hostname, and it costs nothing since we must go there.
+    await OPS.goto(page, { url: u.href }, { cursor, emit, onNavigate: publishTargets });
+    const title = (await page.title().catch(() => '')).trim().slice(0, 80);
+    items = await discover(page);
+    const linked = await links(page).catch(() => []);
+    const path = `${u.pathname}${u.search}${u.hash}`;
+
+    suite = suites.create({
+      name: String(req.body?.name ?? '').trim() || title || u.host,
+      baseUrl: u.href,
+      description: `Added from ${u.href}`,
+    });
+    pg = suites.addPage(suite.id, {
+      name: title || 'Entry',
+      path,
+      expect: [{ kind: 'url', value: path }],
+    });
+    suites.updatePage(suite.id, pg.id, { targets: items, linked });
+  } catch (err) {
+    running = false;
+    return fail(res, err);
+  }
+  running = false;
+
+  const flow = suites.pageCheckFlow(suites.get(suite.id), suites.get(suite.id).pages[0]);
+  const c = suites.addCase(suite.id, { name: `${pg.name} loads`, pageId: pg.id, flow }, checkFlow);
+  const outcome = await run(checkFlow(flow), { suiteId: suite.id, caseId: c.id, caseName: c.name });
+
+  sendOk(res, {
+    suite: suites.get(suite.id),
+    targets: items.length,
+    run: outcome,
+  });
 });
 
 /** A page's expectations, as a flow you can read before you run it. */

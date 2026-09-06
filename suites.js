@@ -160,6 +160,7 @@ export function addPage(id, { name, path, expect }) {
     url: u.href,
     expect: (expect ?? []).map(expectation),
     targets: [],                              // filled by a scan
+    linked: [],                               // same-origin links found on it
     scannedAt: null,
   };
   s.pages.push(page);
@@ -189,6 +190,12 @@ export function updatePage(id, pageId, patch) {
       name: String(t.name ?? '').slice(0, 200),
     }));
     p.scannedAt = now();
+  }
+  if (patch.linked !== undefined) {
+    p.linked = patch.linked.slice(0, 40).map((l) => ({
+      path: String(l.path).slice(0, 300),
+      name: String(l.name ?? '').slice(0, 80),
+    }));
   }
   s.updatedAt = now();
   write(s);

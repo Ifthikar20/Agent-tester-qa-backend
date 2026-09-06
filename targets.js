@@ -116,3 +116,36 @@ export async function discover(page, limit = 80) {
   }
   return [...seen.values()];
 }
+
+/**
+ * The same-origin links on this page, as candidate pages.
+ *
+ * Onboarding a real app means naming its pages, and typing paths by hand is the
+ * friction that ends with one page onboarded and the rest never done. The app
+ * already lists its own routes — in its nav — so read them.
+ *
+ * Locators and getAttribute, not evaluate: this stays inside the same rule as
+ * everything else, that the runner never executes page-supplied script. Foreign
+ * origins are dropped here rather than offered and refused later, because a
+ * suite covers one origin.
+ */
+export async function links(page, limit = 30) {
+  const base = new URL(page.url());
+  const anchors = (await page.locator('a[href]').all()).slice(0, 80);
+  const found = new Map();
+
+  for (const a of anchors) {
+    const href = await a.getAttribute('href').catch(() => null);
+    if (!href) continue;
+    let u;
+    try { u = new URL(href, base); } catch { continue; }
+    if (u.origin !== base.origin) continue;
+
+    const path = `${u.pathname}${u.search}${u.hash}`;
+    if (found.has(path)) continue;
+    const name = (await a.innerText().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 60);
+    found.set(path, { path, name: name || path });
+    if (found.size >= limit) break;
+  }
+  return [...found.values()];
+}
