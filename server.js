@@ -110,6 +110,26 @@ app.delete('/api/origins', (req, res) => {
   catch (err) { fail(res, err); }
 });
 
+/**
+ * Every case, across every suite, flat.
+ *
+ * The console is not inside a suite — you can arrive at it from anywhere — so
+ * "run the thing I saved yesterday" needs one list rather than a hunt through
+ * the sidebar. The flow rides along because loading a case IS its flow, and a
+ * second round trip to fetch it would only make selecting one feel slow.
+ */
+app.get('/api/cases', (_req, res) => {
+  const out = [];
+  for (const row of suites.list()) {
+    for (const c of suites.get(row.id).cases) {
+      out.push({ suiteId: row.id, suite: row.name, ...c });
+      if (out.length >= 200) break;              // a picker, not an archive
+    }
+    if (out.length >= 200) break;
+  }
+  res.json({ cases: out });
+});
+
 app.get('/api/suites', (_req, res) => res.json({ suites: suites.list() }));
 app.post('/api/suites', (req, res) => {
   try { sendOk(res, { suite: suites.create(req.body ?? {}) }); } catch (err) { fail(res, err); }

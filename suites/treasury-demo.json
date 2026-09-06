@@ -112,8 +112,18 @@
       "steps": 7,
       "createdAt": "2026-09-06T13:39:05.675Z",
       "updatedAt": "2026-09-06T13:41:50.757Z"
+    },
+    {
+      "id": "cs_9dr39vcy4",
+      "name": "Nav to docs",
+      "pageId": null,
+      "source": "recorded",
+      "flow": "%% suite \"Recorded flow\"\nflowchart TD\n  n0((\"http://localhost:3000/site.html\"))\n  n1[\"/site.html#pricing\"]\n  n2[\"/site.html#docs\"]\n\n  n0 -->|click 'Pricing' : navigation/link| n1\n  n1 -->|click 'Docs' : navigation/link| n2\n\n%% entry [\"link:Features\",\"link:Pricing\",\"link:Docs\",\"link:Contact\",\"link:See how Harbour prices\",\"link:Read the documentation\",\"button:Back to top\",\"link:Careers\"]\n%% at 1 894,26 51x24 in 1180x760\n%% at 3 958,26 37x24 in 1180x760",
+      "steps": 5,
+      "createdAt": "2026-09-06T14:46:42.892Z",
+      "updatedAt": "2026-09-06T14:46:42.892Z"
     }
   ],
   "createdAt": "2026-09-06T13:37:09.795Z",
-  "updatedAt": "2026-09-06T13:41:50.757Z"
+  "updatedAt": "2026-09-06T14:46:42.892Z"
 }

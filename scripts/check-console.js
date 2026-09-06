@@ -121,9 +121,100 @@ const top = await frame();
 if (top !== after) ok('and the Top button brings it back');
 else bad('and the Top button brings it back', 'no change');
 
+// ---------------------------------------------------------------------------
+console.log('\n— 4 · loading a saved case ————————————————————————');
+
+// Self-contained: its own suite, removed at the end, so this does not depend on
+// whatever happens to be checked in.
+const API = process.env.BASE_URL || 'http://localhost:3000';
+const post = (path, body) => fetch(`${API}${path}`, {
+  method: 'POST', headers: { 'content-type': 'application/json' },
+  body: body === undefined ? undefined : JSON.stringify(body),
+}).then((r) => r.json());
+
+await fetch(`${API}/api/suites/check-console-tmp`, { method: 'DELETE' }).catch(() => {});
+const made = await post('/api/suites', { name: 'Check console tmp', baseUrl: API });
+const sid = made.suite?.id;
+const flow = `%% suite "A saved case"
+flowchart TD
+  a(("${SITE}"))
+  b["#docs"]
+
+  a -->|scroll to bottom; click 'Docs' : contentinfo/link| b`;
+await post(`/api/suites/${sid}/cases`, { name: 'Footer takes you to Docs', flow });
+
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForTimeout(1500);
+
+const picker = page.locator('select');
+if (await picker.count()) ok('the picker is there once a case exists');
+else bad('the picker is there once a case exists', 'no select rendered');
+
+const labels = (await page.locator('select option').allTextContents()).map((t) => t.trim());
+const mine = labels.find((t) => t.startsWith('Footer takes you to Docs'));
+if (mine) ok('and lists the case that was just saved', mine);
+else bad('and lists the case that was just saved', labels.join(' / '));
+
+if (mine) {
+  await picker.selectOption({ label: mine });
+  await page.waitForTimeout(500);
+  const box = await page.locator('textarea').last().inputValue();
+  if (box.includes("click 'Docs' : contentinfo/link")) ok('selecting one loads its flow');
+  else bad('selecting one loads its flow', box.slice(0, 70));
+
+  // The banner names what is loaded, so a script you did not type is not a
+  // mystery when you come back to the tab.
+  const banner = await page.getByText(/Loaded/).first().textContent().catch(() => '');
+  if (/Footer takes you to Docs/.test(banner)) ok('and says which case it is');
+  else bad('and says which case it is', banner);
+
+  await page.getByRole('button', { name: 'Run script' }).click();
+  await page.waitForTimeout(9000);
+  // Ask the history, not the DOM: `.text-critical` also matches the Record
+  // button, so counting it here reported a failure that never happened.
+  const hist = await fetch(`${API}/api/runs`).then((r) => r.json());
+  const last = hist.latest?.[0];
+  if (last && last.suite === 'A saved case' && last.ok) ok('and it runs', `${last.total} steps, ${last.ms}ms`);
+  else bad('and it runs', last ? `${last.suite}: ${last.error ?? 'not ok'}` : 'nothing recorded');
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n— 5 · the script box keeps up with the recording ——');
+
+// Pressing Record produces a one-step flow immediately (the goto). The box used
+// to take that and then ignore everything you demonstrated afterwards, because
+// it only filled while empty — so a four-step recording showed one line.
+await page.getByRole('button', { name: 'clear' }).click().catch(() => {});
+await page.locator('textarea').last().fill('');
+await page.getByPlaceholder('localhost:3000/demo.html').fill(SITE);
+await page.getByRole('button', { name: 'Open' }).click();
+await page.waitForTimeout(2500);
+
+await page.getByRole('button', { name: '● Record' }).click();
+await page.getByRole('button', { name: '■ Stop' }).waitFor();
+await page.waitForTimeout(400);
+const atStart = (await page.locator('textarea').last().inputValue()).match(/-->/g)?.length ?? 0;
+
+const cb = await page.locator('canvas').boundingBox();
+const spot = (x, y) => ({ x: cb.x + x * cb.width / 1180, y: cb.y + y * cb.height / 760 });
+for (const [x, y] of [[894, 26], [959, 26]]) {
+  const q = spot(x, y);
+  await page.mouse.move(q.x, q.y); await page.mouse.click(q.x, q.y);
+  await page.waitForTimeout(900);
+}
+await page.getByRole('button', { name: '■ Stop' }).click();
+await page.waitForTimeout(900);
+const atEnd = (await page.locator('textarea').last().inputValue()).match(/-->/g)?.length ?? 0;
+
+if (atEnd > atStart) ok('it grows as you demonstrate', `${atStart} edges → ${atEnd}`);
+else bad('it grows as you demonstrate', `stuck at ${atEnd} edges`);
+
+await fetch(`${API}/api/suites/${sid}`, { method: 'DELETE' }).catch(() => {});
+
 await browser.close();
 console.log(failures
   ? `\n  ${failures} FAILED\n`
   : '\n  OK — the canvas paints when you arrive, says what it is waiting for\n' +
-    '       before it can, and the wheel reaches the page you are driving.\n');
+    '       before it can, the wheel reaches the page you are driving, and a\n' +
+    '       saved case can be picked up and run from here.\n');
 process.exit(failures ? 1 : 0);
