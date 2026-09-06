@@ -25,8 +25,19 @@ bundled demo app and go red on a planted bug. If that works, everything works.
 
 ## 2 · Point it at your app
 
+On startup it drives the bundled demo app, because it has to drive something.
+That is what the feed shows and what the target panel scans until you point it
+elsewhere.
+
 Type the host into **Page** — `treasury.acme.com` is enough, no scheme needed —
 and press **Open**.
+
+Or start on your own app directly, which allows that origin at the same time,
+since naming it on the command line is the same decision the Allow button is:
+
+```bash
+PORT=3100 HOME_URL=http://18.208.3.3/ npm start
+```
 
 The first time, it stops and says the origin is not allowed yet, with a button
 to allow it. That gate is what stops a generated plan from reaching an arbitrary

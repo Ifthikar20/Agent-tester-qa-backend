@@ -52,11 +52,46 @@ app.post('/api/recording', (req, res) => {
 app.get('/vendor/mermaid.min.js', (_req, res) =>
   res.sendFile(require.resolve('mermaid/dist/mermaid.min.js')));
 
-const http = app.listen(PORT, () =>
-  console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
-              `\n  allowed     ->  ${origins.list().join(', ')}` +
-              `\n  secrets     ->  ${vault.names().join(', ') || '(none set)'}\n`));
+// Take the port before anything else starts. A failure here used to surface as
+// an unhandled 'error' on the WebSocket server — a stack trace ending in
+// EADDRINUSE, several frames deep, for a problem with a one-line fix — and it
+// still launched a browser on the way down.
+const http = app.listen(PORT);
+await new Promise((resolve) => {
+  http.once('listening', resolve);
+  http.once('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(
+        `\n  Port ${PORT} is already taken — usually a ghostclick you left running.\n` +
+        `\n  Use another port:      PORT=${PORT + 100} npm start\n` +
+        `\n  Or stop the old one. It is still holding a browser, so this is worth doing:\n` +
+        `    macOS / Linux        lsof -ti tcp:${PORT} | xargs kill\n` +
+        `    Windows (Git Bash)   netstat -ano | findstr :${PORT}\n` +
+        `                         taskkill //PID <pid> //F\n` +
+        `    Windows (PowerShell) Stop-Process -Id (Get-NetTCPConnection -LocalPort ${PORT}).OwningProcess\n`
+      );
+    } else {
+      console.error(`\n  Could not listen on ${PORT}: ${err.message}\n`);
+    }
+    process.exit(1);
+  });
+});
+// wss shares the server, so it re-emits anything the server emits.
 const wss = new WebSocketServer({ server: http });
+wss.on('error', (err) => console.error(`  websocket server: ${err.message}`));
+
+// Starting with HOME_URL set is a person naming an origin on the command line,
+// which is the same decision the Allow button represents — so honour it rather
+// than opening on your own app and immediately refusing to drive it.
+if (process.env.HOME_URL) {
+  try { origins.add(process.env.HOME_URL); }
+  catch (err) { console.error(`  HOME_URL: ${err.message}`); }
+}
+
+console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
+            `\n  driving     ->  ${HOME}` +
+            `\n  allowed     ->  ${origins.list().join(', ')}` +
+            `\n  secrets     ->  ${vault.names().join(', ') || '(none set)'}\n`);
 
 // ---------------------------------------------------------------- browser
 const browser = await chromium.launch({
