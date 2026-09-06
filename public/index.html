@@ -225,9 +225,10 @@ const $ = (id) => document.getElementById(id);
 const canvas = $('view'), ctx = canvas.getContext('2d');
 const ptr = $('ptr'), ripple = $('ripple');
 
+const HERE = location.origin;   // not a hardcoded :3000 — PORT is a real option
 const EXAMPLES = {
   meridian: `suite "Username length boundary"
-goto   "http://localhost:3000/demo.html"
+goto   "${HERE}/demo.html"
 fill   auth.email    with $secrets.QA_USER
 fill   auth.password with $secrets.QA_PASS
 click  auth.submit
@@ -245,7 +246,7 @@ expect value profile.username is repeat("a", 20)`,
   // your suite; hand it to the runner and it drives the browser.
   flow: `%% suite "Username length boundary"
 flowchart TD
-  home(("http://localhost:3000/demo.html"))
+  home(("${HERE}/demo.html"))
   form("Sign-in form")
   dash["#/dashboard"]
   settings["#/settings"]
@@ -262,7 +263,7 @@ flowchart TD
   saved    -->|check 'Username' : textbox is 20 chars| saved`,
 
   shop: `suite "Cart total ignores quantity"
-goto   "http://localhost:3000/shop.html"
+goto   "${HERE}/shop.html"
 fill   textbox:Search with "Widget"
 click  button:Search
 expect text "2 results"
@@ -278,7 +279,7 @@ expect text "Total: $40.00"`,
  * not mean editing someone else's demo script.
  */
 function starterForThisPage() {
-  const url = $('url').value.trim() || 'http://localhost:3000/demo.html';
+  const url = $('url').value.trim() || `${HERE}/demo.html`;
   const names = knownTargets.map((t) => t.target);
   const host = (() => { try { return new URL(url).host; } catch { return 'this page'; } })();
 

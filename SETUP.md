@@ -113,6 +113,20 @@ below the feed turns green step by step, and red at whatever breaks.
 
 ## When something goes wrong
 
+**`EADDRINUSE: address already in use :::3000`** — something is already on that
+port, usually a previous `npm start` you thought you had closed. Either free it
+or use another port; both work, because the demo scripts and the allowlist
+follow `PORT` rather than assuming 3000.
+
+```bash
+PORT=3100 npm start                       # any shell
+
+# Windows, to find and stop the old one instead (Git Bash / PowerShell):
+netstat -ano | findstr :3000              # last column is the PID
+taskkill //PID <pid> //F                  # Git Bash needs the doubled slashes
+```
+
+
 **“origin … is not allowed yet”** — press the allow button in the Page panel.
 
 **“This step still says $TODO”** — the recorder deliberately never captured that

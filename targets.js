@@ -39,8 +39,12 @@ const STRATEGIES = {
  * above, never functions — so an alias table stays data and cannot smuggle
  * in a selector or a callback.
  */
+const OWN_ORIGIN = `http://localhost:${process.env.PORT || 3000}`;
+
 export const ALIASES = {
-  'http://localhost:3000': {
+  // Keyed by the origin the demo apps are actually served from, so running on
+  // another port does not quietly strand them.
+  [OWN_ORIGIN]: {
     'auth.email':          'label:Email',
     'auth.password':       'label:Password',
     'auth.submit':         'button:Sign in',
