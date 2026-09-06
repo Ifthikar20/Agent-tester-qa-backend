@@ -3,7 +3,9 @@ import { WebSocketServer } from 'ws';
 import { chromium } from 'playwright';
 import { createRequire } from 'node:module';
 import { VirtualCursor, sleep } from './cursor.js';
-import { OPS, validate, ALLOWED_ORIGINS } from './ops.js';
+import { OPS, validate } from './ops.js';
+import * as origins from './origins.js';
+import * as vault from './secrets.js';
 import { discover } from './targets.js';
 import { parse } from './parse.js';
 import { parseFlow, flatten, toFlow } from './flow.js';
@@ -52,7 +54,8 @@ app.get('/vendor/mermaid.min.js', (_req, res) =>
 
 const http = app.listen(PORT, () =>
   console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
-              `\n  origins     ->  ${ALLOWED_ORIGINS.join(', ')}\n`));
+              `\n  allowed     ->  ${origins.list().join(', ')}` +
+              `\n  secrets     ->  ${vault.names().join(', ') || '(none set)'}\n`));
 const wss = new WebSocketServer({ server: http });
 
 // ---------------------------------------------------------------- browser
@@ -183,7 +186,11 @@ wss.on('connection', async (ws) => {
   // connecting to an idle session would stare at a blank canvas. Prime them
   // with the last frame we held.
   if (lastFrame) ws.send(lastFrame, { binary: true });
-  ws.send(JSON.stringify({ t: 'ready', origins: ALLOWED_ORIGINS, url: page.url() }));
+  ws.send(JSON.stringify({
+    t: 'ready', url: page.url(),
+    origins: origins.list(),
+    secrets: vault.names(),        // names only — a value never leaves the server
+  }));
   await publishTargets();
 
   ws.on('message', async (raw) => {
@@ -210,12 +217,51 @@ wss.on('connection', async (ws) => {
     // Point the browser anywhere the allowlist permits, then ask the page
     // what it can be told to do. This is what makes an unseen URL scriptable.
     if (m.t === 'open' && !running) {
+      let url;
       try {
-        await OPS.goto(page, { url: m.url }, { cursor, emit, onNavigate: publishTargets });
-        emit({ t: 'log', level: 'info', msg: `opened ${m.url}` });
+        url = origins.normalizeUrl(m.url).href;   // "acme.com" is a host, not a path
+      } catch (err) {
+        return emit({ t: 'log', level: 'error', msg: err.message });
+      }
+      if (!origins.has(new URL(url).origin)) {
+        // Offer the one thing that unblocks it, rather than an error that
+        // ends in "restart with an env var".
+        return emit({ t: 'needs.origin', origin: new URL(url).origin, url });
+      }
+      try {
+        await OPS.goto(page, { url }, { cursor, emit, onNavigate: publishTargets });
+        emit({ t: 'log', level: 'info', msg: `opened ${url}` });
       } catch (err) {
         emit({ t: 'log', level: 'error', msg: err.message });
       }
+      return;
+    }
+
+    // Allowing an origin is a human act, through the UI. No plan can reach it.
+    if (m.t === 'origin.add') {
+      try {
+        const r = origins.add(m.origin);
+        emit({ t: 'origins', origins: origins.list() });
+        emit({ t: 'log', level: 'info',
+               msg: `${r.added ? 'allowed' : 'already allowed'} ${r.origin}` +
+                    (r.private ? ' — private address, allowed by name' : '') });
+        if (m.thenOpen) ws.send(JSON.stringify({ t: 'reopen', url: m.thenOpen }));
+      } catch (err) {
+        emit({ t: 'log', level: 'error', msg: err.message });
+      }
+      return;
+    }
+    if (m.t === 'origin.remove') {
+      try {
+        origins.remove(m.origin);
+        emit({ t: 'origins', origins: origins.list() });
+      } catch (err) {
+        emit({ t: 'log', level: 'error', msg: err.message });
+      }
+      return;
+    }
+    if (m.t === 'secrets.reload') {
+      emit({ t: 'secrets', secrets: vault.reload() });
       return;
     }
 

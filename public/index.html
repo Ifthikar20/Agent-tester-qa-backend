@@ -82,6 +82,18 @@
     background:#0d1f27; border:1px solid var(--edge); border-radius:4px;
     padding:11px; font:12px/1.6 ui-monospace,Menlo,monospace; color:var(--ink); }
   .empty { color:var(--ink-dim); font-size:13px; margin:0; }
+  .gate { border:1px solid var(--signal); border-radius:4px; padding:10px;
+    margin-top:10px; background:rgba(232,163,61,.08); font-size:13px; }
+  .gate p { margin:0 0 4px; }
+  .fine { color:var(--ink-dim); font-size:12px; line-height:1.45; margin:4px 0 0; }
+  .fold { margin-top:10px; font-size:12.5px; }
+  .fold summary { color:var(--ink-dim); cursor:pointer; }
+  .chips { display:flex; flex-wrap:wrap; gap:5px; margin:8px 0 0; }
+  .chips span { background:#0d1f27; border:1px solid var(--edge); border-radius:3px;
+    padding:3px 7px; font:11.5px ui-monospace,Menlo,monospace; display:flex; gap:6px; }
+  .chips span button { all:unset; cursor:pointer; color:var(--ink-dim); }
+  .chips span button:hover { color:var(--fail); }
+  .hide { display:none; }
   #flow { display:none; white-space:pre; overflow-x:auto; margin:10px 0 0; max-height:260px;
     overflow-y:auto; background:#0d1f27; border:1px solid var(--edge); border-radius:4px;
     padding:11px; font:12px/1.6 ui-monospace,Menlo,monospace; color:var(--ink); }
@@ -127,11 +139,35 @@
   <aside>
     <div class="card">
       <h2>Page</h2>
-      <input type="url" id="url" spellcheck="false" placeholder="https://…">
+      <input type="text" id="url" spellcheck="false"
+             placeholder="app.example.com  ·  or a full URL">
       <div class="row">
         <button id="open">Open</button>
         <button id="inspect">Re-scan targets</button>
       </div>
+
+      <div id="originPrompt" class="hide gate">
+        <p><b id="gateOrigin"></b> is not allowed yet.</p>
+        <p class="fine">The gate is what stops a generated plan reaching an
+           arbitrary host. Allowing one is a decision only you can make.</p>
+        <div class="row" style="margin-top:8px">
+          <button class="go" id="allowOrigin">Allow it and open</button>
+          <button id="cancelOrigin">Cancel</button>
+        </div>
+      </div>
+
+      <details class="fold">
+        <summary>Allowed origins <span id="ocount" class="empty"></span></summary>
+        <div id="origins" class="chips"></div>
+      </details>
+      <details class="fold">
+        <summary>Vault keys <span id="scount" class="empty"></span></summary>
+        <div id="secrets" class="chips"></div>
+        <p class="fine">Set one with <code>GC_SECRET_QA_PASS=…</code> before
+           starting, or put it in <code>.ghostclick/secrets.json</code>.
+           Values never leave the server.</p>
+        <button id="reloadSecrets" style="margin-top:6px">Re-read</button>
+      </details>
     </div>
 
     <div class="card">
@@ -271,7 +307,22 @@ function handle(ev) {
   switch (ev.t) {
     case 'ready':
       $('url').value = ev.url;
-      $('url').placeholder = `allowed: ${ev.origins.join(', ')}`;
+      showOrigins(ev.origins);
+      showSecrets(ev.secrets);
+      break;
+
+    case 'origins': showOrigins(ev.origins); break;
+    case 'secrets': showSecrets(ev.secrets); break;
+
+    case 'needs.origin':
+      pendingUrl = ev.url;
+      $('gateOrigin').textContent = ev.origin;
+      $('originPrompt').classList.remove('hide');
+      break;
+
+    case 'reopen':
+      $('originPrompt').classList.add('hide');
+      send({ t: 'open', url: ev.url });
       break;
 
     case 'cursor':
@@ -416,7 +467,34 @@ function mark(i, cls, glyph, ms, err) {
   if (err) line(`${i}e`, err, ' ', 'fail');
 }
 
-let recording = false, lastFlow = '';
+let recording = false, lastFlow = '', pendingUrl = null;
+
+function chips(box, items, onRemove) {
+  box.innerHTML = '';
+  if (!items.length) {
+    box.append(Object.assign(document.createElement('p'), { className: 'empty', textContent: 'None.' }));
+    return;
+  }
+  for (const it of items) {
+    const el = document.createElement('span');
+    el.append(document.createTextNode(it));
+    if (onRemove) {
+      const x = document.createElement('button');
+      x.type = 'button'; x.textContent = '×'; x.title = `Stop allowing ${it}`;
+      x.onclick = () => onRemove(it);
+      el.append(x);
+    }
+    box.append(el);
+  }
+}
+const showOrigins = (list) => {
+  $('ocount').textContent = `· ${list.length}`;
+  chips($('origins'), list, (o) => send({ t: 'origin.remove', origin: o }));
+};
+const showSecrets = (list) => {
+  $('scount').textContent = list.length ? `· ${list.length}` : '· none set';
+  chips($('secrets'), list);
+};
 const send = (o) => ws.send(JSON.stringify(o));
 
 $('rec').onclick     = () => send({ t: 'record.start' });
@@ -453,7 +531,14 @@ $('view').addEventListener('keydown', (e) => {
 });
 
 $('run').onclick     = () => send({ t: 'command', text: $('script').value });
-$('open').onclick    = () => send({ t: 'open', url: $('url').value.trim() });
+$('open').onclick    = () => {
+  $('originPrompt').classList.add('hide');
+  send({ t: 'open', url: $('url').value.trim() });
+};
+$('allowOrigin').onclick  = () =>
+  send({ t: 'origin.add', origin: $('gateOrigin').textContent, thenOpen: pendingUrl });
+$('cancelOrigin').onclick = () => $('originPrompt').classList.add('hide');
+$('reloadSecrets').onclick = () => send({ t: 'secrets.reload' });
 $('inspect').onclick = () => send({ t: 'inspect' });
 $('reset').onclick   = () => send({ t: 'open', url: $('url').value.trim() });
 $('url').onkeydown   = (e) => { if (e.key === 'Enter') $('open').click(); };

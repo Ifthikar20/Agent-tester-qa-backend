@@ -1,34 +1,18 @@
 import { sleep } from './cursor.js';
 import { parseTarget, locate, aliasesFor } from './targets.js';
-
-/** Never in the IR, never in a log, never in git. */
-const secrets = {
-  'secrets.QA_USER': 'qa@example.com',
-  'secrets.QA_PASS': 'hunter2-but-from-a-vault',
-};
+import * as origins from './origins.js';
+import * as vault from './secrets.js';
 
 const DEFAULT_ORIGIN = `http://localhost:${process.env.PORT || 3000}`;
 
 /**
- * Which origins a plan may navigate to. Comma-separated, or `*`.
- *   ALLOWED_ORIGINS="https://staging.acme.com,https://app.acme.com" npm start
- */
-export const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? DEFAULT_ORIGIN)
-  .split(',').map((s) => s.trim()).filter(Boolean);
-
-/**
- * Even under `*`, the private network stays off limits: a box that fetches
- * arbitrary internal URLs on instruction is an SSRF engine, and cloud metadata
- * endpoints live at 169.254.169.254. Naming an internal origin explicitly is
- * an opt-in; a wildcard is not.
+ * The gate in front of every navigation. The list is managed at runtime by a
+ * person (see origins.js) — a plan can only ever be checked against it.
  *
  * Known gap: this checks the hostname, not what it resolves to, so a public
  * name pointing at a private address still gets through. The real fix is
  * resolve-and-pin, or an egress firewall on the container.
  */
-const PRIVATE_HOST =
-  /^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|\[?::1\]?|.*\.local|.*\.internal)$/i;
-
 export function checkUrl(url) {
   let u;
   try { u = new URL(url ?? ''); }
@@ -37,14 +21,15 @@ export function checkUrl(url) {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') {
     throw new Error(`goto needs an http(s) url, got ${u.protocol}`);
   }
-  if (ALLOWED_ORIGINS.includes(u.origin)) return u;
-  if (ALLOWED_ORIGINS.includes('*')) {
-    if (PRIVATE_HOST.test(u.hostname)) {
-      throw new Error(`origin ${u.origin} is private — list it explicitly in ALLOWED_ORIGINS`);
+  if (origins.has(u.origin)) {
+    // A wildcard is a blunt instrument, so it still does not reach the private
+    // network — an internal origin has to be named on purpose.
+    if (!origins.list().includes(u.origin) && origins.PRIVATE_HOST.test(u.hostname)) {
+      throw new Error(`origin ${u.origin} is private — allow it by name, not by wildcard`);
     }
     return u;
   }
-  throw new Error(`origin ${u.origin} is not allowlisted (set ALLOWED_ORIGINS)`);
+  throw new Error(`origin ${u.origin} is not allowed yet — allow it in the Page panel`);
 }
 
 function point(box, opts) {
@@ -101,7 +86,7 @@ export const OPS = {
   async fill(page, step, ctx) {
     await pointAt(page, step.target, ctx, { leftEdge: true });
     await ctx.cursor.click(); // focus the way a user does, not via .fill()
-    const value = step.valueRef ? secrets[step.valueRef] : step.value;
+    const value = step.valueRef ? vault.get(step.valueRef) : step.value;
     if (value === undefined) throw new Error(`No value for ${step.target}`);
     await page.keyboard.press('ControlOrMeta+A');
     await page.keyboard.type(value, { delay: 42 });

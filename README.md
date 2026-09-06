@@ -4,6 +4,9 @@ A browser-automation PoC: a synthetic cursor visibly glides across a live
 headless-Chrome feed and clicks things, driven by a small DSL — against any
 allowlisted URL, with the script rendered as a mermaid diagram.
 
+**New here? [SETUP.md](SETUP.md) walks through it end to end** — server, your
+own app, credentials, the extension, and a first recording.
+
 ```bash
 npm install
 npx playwright install chromium   # skip if your sandbox already ships one
@@ -160,21 +163,31 @@ either the login recorded or a session you have chosen to export.
 
 ## Any URL
 
+Type a host into **Page** — `treasury.acme.com`, no scheme needed — and press
+**Open**. The first time, it stops and offers to allow that origin.
 
+The allowlist is still a hard gate in front of every navigation, and a plan can
+never add to it; only a person can, through the UI, one origin at a time. That
+is the distinction that matters — the list exists to stop generated text from
+reaching arbitrary hosts, not to stop you from choosing one. Choices persist in
+`.ghostclick/origins.json`.
 
-`goto` reaches any origin on the allowlist:
+`ALLOWED_ORIGINS="https://staging.acme.com"` still works as a starting set, and
+`*` still refuses the private network, so an internal origin has to be named on
+purpose. **Known gap:** the check is on the hostname, not what it resolves to, so
+a public name pointing at a private address still gets through. The real fix is
+resolve-and-pin, or an egress firewall on the container.
+
+### Credentials
+
+A recorded password becomes `$TODO`, never its value. Point it at a key before
+running:
 
 ```bash
-ALLOWED_ORIGINS="https://staging.acme.com,https://app.acme.com" npm start
-ALLOWED_ORIGINS="*" npm start        # public origins only; see below
+GC_SECRET_TREASURY_PASS='…' npm start        # or .ghostclick/secrets.json
 ```
 
-Under `*` the private network stays off limits — `localhost`, RFC1918,
-`169.254.0.0/16` (cloud metadata lives there), `.internal`, `.local`. Naming an
-internal origin explicitly is an opt-in; a wildcard is not. **Known gap:** this
-checks the hostname, not what it resolves to, so a public name pointing at a
-private address still gets through. The real fix is resolve-and-pin, or an
-egress firewall on the container.
+Names show under **Page → Vault keys**. Values never leave the server.
 
 ### Targets, without a hand-written registry
 

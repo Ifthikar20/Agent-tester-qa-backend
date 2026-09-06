@@ -67,8 +67,8 @@ const REJECTIONS = [
   ['click css:#usr_nm_2',                            /Unknown target strategy/i],
   ['click button',                                   /Bad target/i],
   ['goto "file:///etc/passwd"',                      /http\(s\)|absolute/i],
-  ['goto "http://169.254.169.254/latest/meta-data/"', /allowlist|private/i],
-  ['goto "https://evil.example.com/"',               /allowlist|private/i],
+  ['goto "http://169.254.169.254/latest/meta-data/"', /not allowed yet|private/i],
+  ['goto "https://evil.example.com/"',               /not allowed yet|private/i],
   ['evaluate "fetch(1)"',                            /unknown verb/i],
 ];
 
@@ -76,7 +76,7 @@ const ws = new WebSocket(URL_);
 ws.binaryType = 'arraybuffer';
 
 let frames = 0, cursorEvents = 0, presses = 0, savedFrame = false;
-let targets = null, diagrams = [];
+let targets = null, diagrams = [], gate = null, allowed = null, gateWaiter = null;
 const errors = [];
 let steps = [], waiter = null;
 
@@ -90,6 +90,9 @@ ws.on('message', (data, isBinary) => {
   if (ev.t === 'cursor') cursorEvents++;
   if (ev.t === 'press') presses++;
   if (ev.t === 'targets') targets = ev;
+  if (ev.t === 'needs.origin') gate = ev;
+  if (ev.t === 'origins') allowed = ev.origins;
+  if (ev.t === 'ready') allowed = ev.origins;
   if (ev.t === 'diagram') diagrams.push(ev);
   if (ev.t === 'step.start') steps.push({ i: ev.i, desc: `${ev.step.op} ${ev.step.target ?? ev.step.assert ?? ''}` });
   if (ev.t === 'step.pass') Object.assign(steps.find((s) => s.i === ev.i), { ok: true, ms: ev.ms });
@@ -117,6 +120,50 @@ for (const [text, want] of REJECTIONS) {
   console.log(`  ${ok ? 'rejected' : 'LEAKED  '}  ${shown.padEnd(52)} ${got}`);
   if (!ok) fail(`"${text}" was not rejected`);
 }
+
+// ------------------------------------------------------------ the URL gate
+console.log('\n— pointing it somewhere new ——————————————————————————————');
+// A different origin that is still reachable from here, and a private one, so
+// this exercises the "allow it by name" path too.
+const NEW = 'http://127.0.0.1:3000/shop.html';
+const NEW_ORIGIN = 'http://127.0.0.1:3000';
+
+// Allowing an origin persists, so a previous run — or someone clicking around
+// the UI — could leave this one already allowed. Start from a known state.
+send({ t: 'origin.remove', origin: NEW_ORIGIN });
+await wait(400);
+gate = null;
+
+send({ t: 'open', url: NEW });
+await wait(600);
+if (!gate) fail('an unknown origin opened without asking');
+console.log(`  blocked   ${gate.origin}  →  the UI offers to allow it`);
+
+send({ t: 'origin.add', origin: NEW_ORIGIN });
+await wait(700);
+if (!allowed?.includes(NEW_ORIGIN)) fail('allowing the origin did not take');
+console.log(`  allowed   ${NEW_ORIGIN}`);
+
+gate = null;
+send({ t: 'open', url: NEW });
+await wait(1600);
+if (gate) fail('still blocked after being allowed');
+if (!targets || !targets.url.startsWith(NEW_ORIGIN)) fail(`did not navigate: ${targets?.url}`);
+console.log(`  opened    ${targets.url}`);
+
+send({ t: 'origin.remove', origin: NEW_ORIGIN });
+await wait(400);
+if (allowed.includes(NEW_ORIGIN)) fail('removing the origin did not take');
+console.log(`  removed   ${NEW_ORIGIN}  ·  now ${allowed.length} allowed`);
+
+// Typing a bare host must not be read as a relative path.
+send({ t: 'open', url: 'not a url at all' });
+await wait(300);
+if (!/Cannot read/.test(errors.at(-1) ?? '')) fail('garbage input was not rejected clearly');
+console.log(`  rejected  "not a url at all"  →  ${errors.at(-1)}`);
+
+send({ t: 'open', url: `${BASE}/demo.html` });
+await wait(1200);
 
 // ---------------------------------------------------------------- discovery
 console.log('\n— discovery (what makes an unseen URL scriptable) ————————');

@@ -1,7 +1,8 @@
 import { toFlow } from './lib/flow.js';
 
 const $ = (id) => document.getElementById(id);
-const GHOSTCLICK = 'http://localhost:3000';
+const DEFAULT_HOST = 'http://localhost:3000';
+let host = DEFAULT_HOST;   // where the runner lives; remembered per install
 
 let state = { on: false, steps: [] };
 let pick = null;
@@ -89,7 +90,7 @@ $('copy').onclick = async () => {
 $('send').onclick = async () => {
   $('sendNote').textContent = 'Sending…';
   try {
-    const res = await fetch(`${GHOSTCLICK}/api/recording`, {
+    const res = await fetch(`${host}/api/recording`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ flow: $('flow').textContent }),
@@ -98,7 +99,8 @@ $('send').onclick = async () => {
     $('sendNote').textContent = 'Sent — it is in the ghostclick script box.';
   } catch (e) {
     $('sendNote').innerHTML =
-      `<span class="warn">Could not reach ${GHOSTCLICK} (${e.message}). Use Copy mermaid instead.</span>`;
+      `<span class="warn">Could not reach ${host} (${e.message}). ` +
+      `Check it is running, or use Copy mermaid instead.</span>`;
   }
 };
 
@@ -110,6 +112,18 @@ chrome.runtime.onMessage.addListener((m) => {
     $('opFill').disabled = !pick.isField;
     render();
   }
+});
+
+$('saveHost').onclick = async () => {
+  host = ($('host').value.trim() || DEFAULT_HOST).replace(/\/+$/, '');
+  await chrome.storage.local.set({ host });
+  $('host').value = host;
+  $('sendNote').textContent = `Will send to ${host}`;
+};
+
+chrome.storage.local.get('host').then(({ host: saved }) => {
+  host = saved || DEFAULT_HOST;
+  $('host').value = host;
 });
 
 send({ t: 'get' }).then((r) => { if (r?.state) state = r.state; render(); });
