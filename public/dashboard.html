@@ -107,7 +107,7 @@
                 <i class="size-2.5 rounded-[3px] bg-pass"></i> Passed
               </span>
               <span class="inline-flex items-center gap-2">
-                <i class="size-2.5 rounded-[3px] bg-fail"></i> Failed — labelled
+                <i class="size-2.5 rounded-[3px] bg-fail"></i> Failed
               </span>
             </div>
           </header>
@@ -392,8 +392,14 @@ function renderTables(q = '') {
   for (const s of DATA.suites.slice(0, 6)) {
     const a = node('a', 'flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-[13px] hover:bg-white/5 hover:text-white');
     a.href = '#';
-    a.append(node('i', `size-1.5 shrink-0 rounded-full ${s.last.ok ? 'bg-good' : 'bg-critical'}`));
+    // The glyph, not the hue, is what says pass or fail here: green and red are
+    // the one pair a deuteranope cannot separate, and a 6px dot gives them
+    // nothing else to go on.
+    const mark = node('i', `shrink-0 ${s.last.ok ? 'text-ink-3' : 'text-critical'}`);
+    mark.innerHTML = s.last.ok ? TICK : CROSS;
+    a.append(mark);
     a.append(node('span', 'truncate', s.suite));
+    a.title = `${s.suite} — last run ${s.last.ok ? 'passed' : 'failed'}`;
     a.onclick = (e) => { e.preventDefault(); $('filter').value = s.suite; renderTables(s.suite); };
     nav.append(a);
   }
