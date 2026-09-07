@@ -51,6 +51,10 @@ It prints what it is running, and the sidebar shows the same thing:
 If that commit is not the one you expect, you are looking at an old UI — which
 is worth knowing before spending an afternoon on a bug you already fixed.
 
+The console starts empty on a first run — the runner opens whatever you ran
+last, and a fresh clone has no history yet. Paste a URL, or run one of the
+suites below.
+
 Two bundled apps to drive. **Meridian** silently truncates a username to 16
 characters while showing a success toast. **Nimbus** shows `Widget × 2` in the
 cart and charges for one. Both bugs turn their run red.
@@ -452,6 +456,57 @@ turns out to be true:
 
 Each of those is a real gap, not a subtlety. If your flow needs one, say so and
 it becomes an op.
+
+## The runner starts where you left off
+
+It used to start on `demo.html`, the bundled demo app, every time. That is a
+reasonable thing to see once and a strange thing to be shown on the fortieth
+launch, when what you were actually working on was a staging URL.
+
+It starts on the last site you ran now, read out of run history — `HOME_URL`
+still wins if you set one, and if there is neither it opens nothing and the
+console says "Nothing open yet" instead of showing a black rectangle and the
+word "waiting", which reads as a hang.
+
+The remembered URL still has to pass the origin gate. It is a URL that ran here
+before, so it normally does — but an origin you have since removed should not be
+re-opened just because a file remembers it. Verified by running against a second
+origin, revoking it, and restarting: the boot skipped that newest entry and fell
+back to the one before it.
+
+The URL box no longer suggests `demo.html` either, and it has an accessible name
+now — the checks were finding it by its placeholder text, which is a fragile way
+to find a control and left it unlabelled for anyone using a screen reader.
+
+The rule lives in `home.js` and is pure — no fs, no network, no browser —
+because the version inside `server.js` could not be tested without starting a
+browser and binding a port, and the branch that mattered most was therefore
+never executed anywhere. Run history is gitignored, so **every machine that had
+ever run the suite took the first branch and no machine ever took the last
+one**: on a fresh clone or a CI runner the browser stays on `about:blank`, and
+three things broke there that the green suite could not see.
+
+`check:startup` covers the decision against fabricated input — including the
+empty-history case this machine cannot produce — and then starts a real server
+on its own port and reads its boot banner, which prints the choice before
+navigating. Both halves are needed: the first alone would pass while
+`server.js` ignored the function entirely, and the second alone can only test
+whatever state the machine happens to be in. It drives one case against a
+different page first, so the rule's answer can never coincide with the demo
+that a reverted server would open.
+
+What a null home broke, now fixed: `check-console`'s first two sections
+asserted on a painted canvas before opening anything, so they were testing
+yesterday's history rather than the product; `entryUrl()` returned the string
+`'about:blank'`, which is truthy, so pressing Record before opening anything
+produced a case whose step 0 was `goto "about:blank"` — refused by the origin
+gate forever, unsaveable and unrunnable; and the URL box pre-filled with it, so
+Open answered `Only http and https can be driven, not about:`.
+
+`about:blank` also *paints* — a blank white frame is still a frame — so the
+"Nothing open yet" state has to be checked before `painted`, or it never
+appears and you get an unexplained white rectangle instead of the black one it
+replaced.
 
 ## Defects, read out of run history
 
@@ -1307,6 +1362,7 @@ silently inside someone else's docs.
 | `parse.js` | DSL text → JSON IR |
 | `diagram.js` | JSON IR → mermaid `block-beta` |
 | `suites.js` | the suite model — one origin, pages, expectations, cases |
+| `home.js` | where the runner points at startup — pure, so it can be tested |
 | `runs.js` | run history, scoped by suite; defects grouped out of it |
 | `web/` | the Vue 3 app: onboarding, suites, console, dashboard |
 | `public/app/` | its build — committed, so `npm start` needs no bundler |
@@ -1321,6 +1377,7 @@ silently inside someone else's docs.
 | `extension/` | Chrome recorder for apps ghostclick cannot reach |
 | `scripts/check-diagram.js` | generated mermaid vs. the real parser |
 | `scripts/check-vocabulary.js` | every verb parses, writes back, draws and runs |
+| `scripts/check-startup.js` | where the runner points, including the empty case |
 | `scripts/start.js` | build what changed, then run — this is `npm start` |
 | `scripts/check-freshness.js` | rebuild-when-stale, cache headers, the version stamp |
 | `scripts/check-runner.js` | dropped commands, the run lock, surviving a throw |

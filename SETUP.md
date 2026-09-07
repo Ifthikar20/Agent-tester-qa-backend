@@ -18,7 +18,13 @@ It prints what it starts with:
   ghostclick  ->  http://localhost:3000
   allowed     ->  http://localhost:3000
   secrets     ->  QA_PASS, QA_USER
+  driving     ->  nothing yet — open a URL in the console
 ```
+
+`driving` is where the runner's browser is pointed. On a first run it is
+nothing — run history is machine-local, so a fresh clone has none — and the
+console says "Nothing open yet" until you open something. After that it starts
+on whatever you ran last, and `HOME_URL` overrides it.
 
 Open `http://localhost:3000`. It lands on **Test suites**.
 

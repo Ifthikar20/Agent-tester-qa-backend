@@ -50,6 +50,22 @@ const lit = () => page.evaluate(() => {
 // ---------------------------------------------------------------------------
 console.log('\n— 1 · arriving at the console ————————————————————');
 
+/**
+ * Put the runner on a known page FIRST.
+ *
+ * What sections 1 and 2 assert — that you never see a bare black rectangle,
+ * and that the canvas paints when you arrive from another screen — is about a
+ * runner that HAS a page. They used to lean on whatever the server happened to
+ * boot onto, which made the result depend on run history. History is gitignored
+ * (`.gitignore`: `.ghostclick/`), so it does not travel: green on a machine
+ * that has run something, red on a fresh clone, and neither answer had anything
+ * to do with the property being tested.
+ */
+await page.goto(`${APP}/console`, { waitUntil: 'networkidle' });
+await page.getByLabel('URL to open').fill(SITE);
+await page.getByRole('button', { name: 'Open' }).click();
+await page.waitForTimeout(3000);
+
 // Watch for the placeholder from the first paint: its whole job is to be there
 // in the window before a frame exists.
 let overlay = null;
@@ -97,7 +113,7 @@ else bad('painted after arriving from elsewhere', `${n} lit samples — black`);
 // ---------------------------------------------------------------------------
 console.log('\n— 3 · scrolling the page you are driving ——————————');
 
-await page.getByPlaceholder('localhost:3000/demo.html').fill(SITE);
+await page.getByLabel('URL to open').fill(SITE);
 await page.getByRole('button', { name: 'Open' }).click();
 await page.waitForTimeout(2500);
 
@@ -289,7 +305,7 @@ await page.goto(`${APP}/console`, { waitUntil: 'networkidle' });
 await page.locator('textarea').last().waitFor();
 await page.getByRole('button', { name: 'clear' }).click().catch(() => {});
 await page.locator('textarea').last().fill('');
-await page.getByPlaceholder('localhost:3000/demo.html').fill(SITE);
+await page.getByLabel('URL to open').fill(SITE);
 await page.getByRole('button', { name: 'Open' }).click();
 await page.waitForTimeout(2500);
 
@@ -331,7 +347,7 @@ const redirected = (await post('/api/suites', { name: 'Check console redirect', 
 
 await page.goto(`${APP}/console?suite=${redirected}`, { waitUntil: 'networkidle' });
 await page.locator('textarea').last().waitFor();
-await page.getByPlaceholder('localhost:3000/demo.html').fill(`${API}/go/offsite`);
+await page.getByLabel('URL to open').fill(`${API}/go/offsite`);
 await page.getByRole('button', { name: 'Open' }).click();
 await page.waitForTimeout(3000);
 
@@ -402,7 +418,7 @@ console.log('\n— 7 · the console of the page you are driving —————�
  */
 await page.goto(`${APP}/console`, { waitUntil: 'networkidle' });
 await page.locator('textarea').last().waitFor();
-await page.getByPlaceholder('localhost:3000/demo.html').fill(`${API}/noisy.html`);
+await page.getByLabel('URL to open').fill(`${API}/noisy.html`);
 await page.getByRole('button', { name: 'Open' }).click();
 await page.waitForTimeout(3000);
 

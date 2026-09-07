@@ -9,6 +9,7 @@ import { OPS, validate } from './ops.js';
 import * as origins from './origins.js';
 import * as vault from './secrets.js';
 import * as history from './runs.js';
+import { chooseHome } from './home.js';
 import * as suites from './suites.js';
 import { discover, links } from './targets.js';
 import { parse } from './parse.js';
@@ -20,7 +21,12 @@ import { NavigationLog } from './navlog.js';
 const require = createRequire(import.meta.url);
 const PORT = Number(process.env.PORT) || 3000;
 const VIEW = { width: 1180, height: 760 };
-const HOME = process.env.HOME_URL || `http://localhost:${PORT}/demo.html`;
+/** Where the runner points when it starts — the rule itself is in home.js. */
+const homeUrl = () => chooseHome({
+  envUrl: process.env.HOME_URL,
+  runs: history.list(),
+  isAllowed: (origin) => origins.has(origin),
+});
 
 const HEADED = /^(1|true|yes|on)$/i.test(process.env.HEADED ?? '');
 
@@ -468,7 +474,7 @@ if (process.env.HOME_URL) {
 }
 
 console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
-            `\n  driving     ->  ${HOME}` +
+            `\n  driving     ->  ${homeUrl() ?? 'nothing yet — open a URL in the console'}` +
             `\n  browser     ->  ${HEADED ? 'headed — a real window you can watch' : 'headless — streamed to the canvas (HEADED=1 for a window)'}` +
             `\n  allowed     ->  ${origins.list().join(', ')}` +
             `\n  secrets     ->  ${vault.names().join(', ') || '(none set)'}` +
@@ -608,7 +614,12 @@ nav.attach();
  * you are standing on.
  */
 function entryUrl(page) {
+  // `about:blank` is truthy, and the recorder only guards on falsiness — so a
+  // Record pressed before anything was opened used to produce a case whose
+  // step 0 was `goto "about:blank"`, which the origin gate then refuses
+  // forever. Unsaveable, unrunnable, and no way to tell from looking at it.
   const here = page.url();
+  if (!here || here === 'about:blank') return null;
   const n = nav.summary();
   const asked = n.hops[0]?.url;
   return n.redirects > 0 && n.url === here && asked ? asked : here;
@@ -638,7 +649,8 @@ page.on('framenavigated', (f) => {
   if (f === page.mainFrame()) publishTargets();
 });
 
-await page.goto(HOME);
+const home = homeUrl();
+if (home) await page.goto(home).catch((err) => console.error(`  could not open ${home}: ${err.message}`));
 
 /** What can the current page be told to do? Emitted whenever it changes. */
 async function publishTargets() {
