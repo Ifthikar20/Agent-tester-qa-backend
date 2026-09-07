@@ -365,7 +365,7 @@ export class Recorder {
    * element that was interacted with. When that element is already gone — the
    * usual case for a submit — fall back to what the page counted at click time.
    */
-  async #verify(candidates, id) {
+  async #verify(candidates, id, { enclosing = false } = {}) {
     const tagged = this.page.locator(`[data-gc-el="${id}"]`);
     const tried = [];
 
@@ -380,12 +380,23 @@ export class Recorder {
     // costs its place in the queue, not its chance.
     const ordered = [...candidates].sort((a, b) => rank(a.n) - rank(b.n));
 
-    for (const { target, n } of ordered) {
-      try { parseTarget(target); } catch { continue; }   // not in the grammar
+    for (const cand of ordered) {
+      const { target, n } = cand;
+      let parsed;
+      try { parsed = parseTarget(target); } catch { continue; }   // not in the grammar
+
+      // A proposal that names the box the interaction happened INSIDE is only
+      // as good as the interaction. Hovering a card's wrapper hovers the card;
+      // clicking a wrapper clicks whatever happens to sit at its centre, which
+      // is not the same promise at all.
+      if (cand.enclosing && !enclosing) {
+        tried.push(`${target} (names the surrounding box, not the element)`);
+        continue;
+      }
 
       let loc, found;
       try {
-        loc = locate(this.page, parseTarget(target));
+        loc = locate(this.page, parsed);
         found = await loc.count();
       } catch (e) {
         tried.push(`${target} (${e.message.split('\n')[0]})`);
@@ -394,12 +405,37 @@ export class Recorder {
 
       if (found === 1) {
         if (await loc.and(tagged).count() === 1) return { target, via: 'live' };
+        // Naming an element that CONTAINS what was interacted with — only ever
+        // reached when the proposer had nothing for the element itself, and
+        // only for kinds where that is the same gesture.
+        if (cand.enclosing && await loc.locator('*').and(tagged).count() === 1) {
+          return { target, via: 'enclosing' };
+        }
         // Or a unique element INSIDE the one you interacted with.
         //
         // A card link wraps a heading; naming the heading is both more readable
         // and more stable than naming the whole card, and clicking it clicks
         // the link. Requiring the exact same node rejected the better target.
         if (await tagged.locator('*').and(loc).count() === 1) return { target, via: 'inside' };
+
+        /**
+         * Or the element is not here any more, and this is a different page.
+         *
+         * Clicking a nav link navigates, and the page it lands on carries the
+         * same nav — so "Docs" still matches exactly one element, and it is a
+         * perfectly good link that we never touched. The old code read that as
+         * "our name is wrong" and threw the step away; the two clicks a person
+         * most wants recorded, the ones that move between pages, were the two
+         * most likely to be lost.
+         *
+         * The discriminator is whether the tagged element exists AT ALL. The
+         * attribute was set on the document we were on; nothing carries it to
+         * the next one. When it is gone, what the page counted at click time is
+         * the only honest evidence there is — the same reasoning the found === 0
+         * branch below already relies on.
+         */
+        if (n === 1 && await tagged.count() === 0) return { target, via: 'click-time' };
+
         tried.push(`${target} (names a different element)`);
         continue;
       }
@@ -429,6 +465,22 @@ export class Recorder {
           : n < 0 ? 'ambiguous by nature' : `${n} at click time`})`);
         continue;
       }
+      /**
+       * Ambiguous — so ask the browser which one it was.
+       *
+       * The proposer offers an ordinal, but it counts with querySelectorAll and
+       * this resolves with getByRole, and the two sets are not always equal.
+       * `.nth()` here indexes the exact query that will run at replay, so the
+       * answer cannot disagree with itself. It costs one round trip per
+       * candidate and only on the path that was previously a dead end.
+       */
+      if (!parsed.scope && found <= ORDINAL_MAX) {
+        let at = -1;
+        for (let i = 0; i < found && at < 0; i++) {
+          if (await loc.nth(i).and(tagged).count() === 1) at = i;
+        }
+        if (at >= 0) return { target: `nth${at + 1}/${target}`, via: 'ordinal' };
+      }
       tried.push(`${target} (${found} matches)`);
     }
     return { target: null, tried };
@@ -445,7 +497,11 @@ export class Recorder {
     if (p.kind === 'scroll' && p.to) return this.#push({ op: 'scroll', to: p.to });
     if (p.kind === 'jumped-to-top') return this.#push({ op: 'expect', assert: 'atTop' });
 
-    const { target, tried } = await this.#verify(p.candidates ?? [], p.id);
+    // Landing on the surrounding box is the same gesture for a hover or a
+    // scroll, and a different one for a click: Playwright clicks the centre of
+    // what it resolved, which for a wrapper is whatever happens to be there.
+    const enclosing = p.kind === 'hover' || p.kind === 'scroll';
+    const { target, tried } = await this.#verify(p.candidates ?? [], p.id, { enclosing });
     if (!target) {
       // This should now be rare: the proposer offers a positional target as a
       // last resort precisely so a step is never silently lost. If it still
@@ -476,6 +532,15 @@ export class Recorder {
 }
 
 /** 1 match first, then unknown, then everything the page already doubts. */
+/**
+ * How many matches are worth walking to find the one that was clicked.
+ *
+ * A nav name matches two or three things. A `text:` proposal on a content page
+ * can match forty, and forty round trips to name one step is the lag you feel
+ * rather than a feature.
+ */
+const ORDINAL_MAX = 12;
+
 function rank(n) {
   if (n === 1) return 0;
   if (n === -1) return 1;      // `text:` — the page cannot count it

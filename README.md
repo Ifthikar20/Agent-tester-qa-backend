@@ -18,6 +18,7 @@ npm run check:runner              # a command is never dropped, the lock always 
 npm run check:suites              # onboarding, the origin gate, suite runs
 npm run check:recording           # repeated links, scrolling, jump-to-top, timeouts
 npm run check:longnames           # paragraph-long names, casing, sticky anchors
+npm run check:naming              # when the page and the browser disagree about an element
 npm run check:redirects           # redirect chains, statuses, the friendly 404
 npm run check:patience            # late vs never coming, and settling
 npm run check:console             # the canvas paints, and the wheel reaches the page
@@ -1405,6 +1406,8 @@ silently inside someone else's docs.
 | `public/shop.html` | Nimbus — cart total ignores quantity |
 | `public/menu.html` | Aperture — a dropdown that only exists on hover |
 | `public/noisy.html` | Kestrel — logs at every level, repeats, then throws |
+| `public/nav.html` | Beacon — a hidden mobile menu, a repeated nav, an unnameable div |
+| `public/nav-docs.html` | where its "Docs" link goes — carrying the same nav |
 | `public/hero/` | your images, if you put any there |
 | `scripts/check.js` | end-to-end: rejections, discovery, all three runs |
 | `scripts/check-teach.js` | demonstrate by hand, replay what it wrote |
@@ -1424,6 +1427,7 @@ silently inside someone else's docs.
 | `scripts/check-recording.js` | ambiguous links, scrolling, jump-to-top, URL timeouts |
 | `navlog.js` | every navigation as a chain of hops, each with its status |
 | `scripts/check-longnames.js` | truncated names, rendered casing, sticky scroll anchors |
+| `scripts/check-naming.js` | counts follow the accessibility tree, and no step is dropped |
 | `scripts/check-redirects.js` | chains, status assertions, and the 404 a URL check misses |
 | `scripts/check-patience.js` | late vs never-coming, settle without stalling |
 | `public/slow.html` | an element that arrives after a delay you choose |

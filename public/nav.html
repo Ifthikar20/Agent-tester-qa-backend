@@ -1,0 +1,100 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Beacon — nav that repeats</title>
+<!--
+  Beacon: an ordinary marketing page, and three ways a recorder loses a step.
+
+  Every shape here was taken from a real site, not invented:
+
+   1 · A LINK THAT NAVIGATES SOMEWHERE WITH THE SAME NAV.  "Docs" goes to a page
+       whose header also says "Docs". By the time the recorder asks the browser
+       which element it clicked, the element is gone and the name it proposed
+       matches a perfectly good link on the NEW page. One match, wrong element.
+
+   2 · A MOBILE MENU HIDDEN WITH visibility:hidden.  It is in the DOM, it has
+       layout boxes, and the page's own text-walk counts it — but it is not in
+       the accessibility tree, so Playwright never sees it. The two disagree
+       about how many "Pricing" links exist and about which one is first, which
+       is exactly what makes an ordinal proposal name the wrong thing.
+
+   3 · A HOVER TARGET WITH NO NAME.  A bare div that reveals a menu. No role, no
+       label, no text of its own: nothing to call it.
+-->
+<style>
+  :root { color-scheme: light; }
+  body { margin: 0; font: 15px/1.6 system-ui, sans-serif; color: #14141b; }
+  header, footer { padding: 14px 28px; background: #f6f6f8; border-bottom: 1px solid #e6e6ec; }
+  footer { border: 0; border-top: 1px solid #e6e6ec; margin-top: 20px; }
+  nav a { margin-right: 18px; color: #1a4fd6; text-decoration: none; }
+  /* Deliberately short. The footer nav is the element under test, and a page
+     taller than the 1180x760 the runner streams would put it below the fold —
+     the click would land on empty space and prove nothing. */
+  main { padding: 20px 28px; }
+  .tier { border: 1px solid #e6e6ec; border-radius: 12px; padding: 12px 16px; width: 300px; }
+  .tier h3 { margin: 0 0 8px; font-size: 15px; }
+  .picks { display: flex; gap: 10px; }
+  .pick { padding: 6px 14px; border: 1px solid #c9c9d4; border-radius: 8px; cursor: pointer; }
+  .pick.on { border-color: #1a4fd6; background: #eef3ff; }
+  /* The mobile menu. visibility:hidden keeps its boxes — which is the whole
+     point: the DOM says it is there and the accessibility tree says it is not. */
+  .mobile { visibility: hidden; position: absolute; }
+  .card { height: 44px; background: #fafafc; border-radius: 8px; }
+  .card .menu { display: none; margin-top: 10px; }
+  .card:hover .menu { display: block; }
+  .cta { display: inline-block; margin-top: 18px; padding: 9px 16px; background: #1a4fd6; color: #fff;
+         border-radius: 8px; text-decoration: none; }
+</style>
+
+<header>
+  <!-- FIRST in DOM order, so the page's own index for anything in here is 1 —
+       while Playwright, which cannot see it, starts counting at the desktop
+       nav below. That off-by-one is the bug, not a typo. -->
+  <nav class="mobile" aria-label="Mobile">
+    <a href="/nav-docs.html">Docs</a>
+    <a href="#pricing">Pricing</a>
+  </nav>
+  <nav aria-label="Main">
+    <a href="/nav-docs.html">Docs</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#sales">Talk to sales</a>
+    <a href="/nav-docs.html"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="Support" width="16" height="16"></a>
+  </nav>
+</header>
+
+<main>
+  <h1>Beacon</h1>
+  <p>Observability for people who would rather be doing something else.</p>
+
+  <a class="cta" href="#sales">Talk to sales</a>
+
+  <h2 id="pricing" style="margin-top:18px;font-size:17px">Pricing</h2>
+
+  <!-- The card has no role, no label and no text of its own: the menu inside it
+       is display:none until you hover, so there is nothing to call it. Its
+       WRAPPER has a heading, which is what a person would point at. -->
+  <div class="tier">
+    <h3>Starter tier</h3>
+    <div class="card" id="hovercard">
+      <div class="menu"><a href="#starter">Starter</a> · <a href="#team">Team</a></div>
+    </div>
+  </div>
+
+  <!-- A custom control: divs with click handlers and no role. The grammar can
+       only reach these by their text, and their text is identical — which is
+       the one ambiguity the proposer cannot resolve on its own, because its
+       positional backstop is only ever offered for role targets. -->
+  <p style="margin:14px 0 6px">Pick a plan</p>
+  <div class="picks">
+    <div class="pick" tabindex="0" onclick="this.classList.add('on')">Choose</div>
+    <div class="pick" tabindex="0" onclick="this.classList.add('on')">Choose</div>
+  </div>
+</main>
+
+<footer>
+  <nav aria-label="Footer">
+    <a href="/nav-docs.html">Docs</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#sales">Talk to sales</a>
+    <a href="/nav-docs.html"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="Support" width="16" height="16"></a>
+  </nav>
+</footer>
