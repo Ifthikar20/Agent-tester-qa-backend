@@ -453,6 +453,27 @@ turns out to be true:
 Each of those is a real gap, not a subtlety. If your flow needs one, say so and
 it becomes an op.
 
+## Summarised, not tipped out
+
+The console's right rail had two cards that dumped rather than reported.
+
+**"On this page"** listed every target flat. On a real marketing page that is
+thirty-odd links, two buttons and a search box — and the three things you would
+actually drive are buried in the middle of the thirty. It groups by role now,
+the things you type into and press before the links, six per group with the
+rest a click away, and a chip is capped so a link whose accessible name is a
+178-character card title truncates instead of taking the whole row. The full
+target is still on the hover title, because that is what gets inserted.
+
+**The log** sat below all of that, which is precisely backwards: it is where
+anything that went wrong says so, and it should not be underneath a list of
+everything that did not. It is first in the rail now.
+
+Both it and **"Where it went"** fold consecutive identical entries into one line
+with a `×5`. A step that retried five times said the same sentence five times,
+which is five times harder to read than the one line it deserved — and pushed
+the thing that actually broke off the top of the box.
+
 ## A version stamp that was confidently wrong
 
 The sidebar shows the commit and when the UI was built, so "am I on the latest?"
