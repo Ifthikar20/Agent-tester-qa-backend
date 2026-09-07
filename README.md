@@ -23,23 +23,30 @@ npm run check:patience            # late vs never coming, and settling
 npm run check:console             # the canvas paints, and the wheel reaches the page
 npm run check:teach               # demonstrate by hand, then replay what it wrote
 npm run check:fidelity            # does the replay reproduce it? would coordinates have?
-npm run check:extension           # the picker, the shared proposer, the hand-off
+npm run check:shared              # the picker, the hand-off, every copy of the language
+npm run check:boundary            # frontend and backend can still be split apart
 npm run check:diagram             # generated mermaid vs. the real parser
 ```
 
-The UI is a Vue 3 app in `web/`, built to `public/app/`. That build is
-committed, so the app runs with no bundler present — but `npm start` also
-**rebuilds it when a source file is newer than the build**, so one command
-always gives you the latest. A start with nothing to do says `up to date` and
-costs nothing.
+The UI is a Vue 3 app in `web/`, built to `web/dist/`. That build is committed,
+so the app runs with no bundler present — but `npm start` also **rebuilds it
+when a source file is newer than the build**, so one command always gives you
+the latest. A start with nothing to do says `up to date` and costs nothing.
 
 ```bash
 npm start                         # build if stale, then run      ← the one you want
 npm run serve                     # run only, never build
 npm run dev                       # Vite in front of it, on :5173
-npm run build                     # → public/app/, commit the result
+npm run build                     # → web/dist/, commit the result
 npm run check:all                 # every check, in one command
 ```
+
+`web/` is a **separate project** that happens to live here — it reads no file
+outside itself and writes none, and the server is *pointed* at a built
+directory (`GC_WEB_DIR`) rather than owning the path. That is what makes
+splitting the two into their own repositories a `git mv`; `npm run
+check:boundary` is what stops it quietly ceasing to be true. See
+[docs/BOUNDARY.md](docs/BOUNDARY.md).
 
 It prints what it is running, and the sidebar shows the same thing:
 
@@ -308,7 +315,7 @@ extra steps.
 
 `extension/lib/propose.js` — how an element gets named — is read off disk and
 injected by the server's teach mode as well, so the extension and the runner
-cannot disagree about what a target means. `npm run check:extension` asserts
+cannot disagree about what a target means. `npm run check:shared` asserts
 that, drives the picker against a real page, and loads the extension in Chrome.
 
 See `extension/README.md` for the rest, including why replaying a login needs
@@ -603,8 +610,8 @@ the thing that actually broke off the top of the box.
 The sidebar shows the commit and when the UI was built, so "am I on the latest?"
 is answerable by looking. Both were read once, at boot.
 
-The commit is fine that way. The build time is not: express serves `public/app`
-straight off disk, so a `vite build` in another terminal changes what the
+The commit is fine that way. The build time is not: express serves the built UI
+directory straight off disk, so a `vite build` in another terminal changes what the
 browser gets without this process noticing. The stamp then reports a UI older
 than the one it is actually serving — and a version stamp that is confidently
 wrong is worse than no stamp at all, because its entire job is to be trusted at
@@ -1364,8 +1371,11 @@ silently inside someone else's docs.
 | `suites.js` | the suite model — one origin, pages, expectations, cases |
 | `home.js` | where the runner points at startup — pure, so it can be tested |
 | `runs.js` | run history, scoped by suite; defects grouped out of it |
-| `web/` | the Vue 3 app: onboarding, suites, console, dashboard |
-| `public/app/` | its build — committed, so `npm start` needs no bundler |
+| `web/` | the Vue 3 app: onboarding, suites, console, dashboard — its own project |
+| `web/dist/` | its build — committed, so `npm start` needs no bundler |
+| `web/src/config.js` | where the backend is: same origin, or `VITE_API_URL` |
+| `web/src/lang/` | the frontend's checked copy of the vocabulary |
+| `docs/BOUNDARY.md` | the four rules that keep frontend and backend separable |
 | `public/demo.html` | Meridian — truncates a username to 16 chars |
 | `public/shop.html` | Nimbus — cart total ignores quantity |
 | `public/menu.html` | Aperture — a dropdown that only exists on hover |
@@ -1373,7 +1383,10 @@ silently inside someone else's docs.
 | `public/hero/` | your images, if you put any there |
 | `scripts/check.js` | end-to-end: rejections, discovery, all three runs |
 | `scripts/check-teach.js` | demonstrate by hand, replay what it wrote |
-| `scripts/check-extension.js` | picker suppression, replay, hand-off, real Chrome load |
+| `scripts/check-shared.js` | every copy of the language, then picker, replay, hand-off |
+| `scripts/check-boundary.js` | web/ builds alone; the server serves a directory it is given |
+| `scripts/copies.js` | who holds a copy of the language, and why |
+| `scripts/sync-lang.js` | make every copy match — `npm run sync:lang` |
 | `extension/` | Chrome recorder for apps ghostclick cannot reach |
 | `scripts/check-diagram.js` | generated mermaid vs. the real parser |
 | `scripts/check-vocabulary.js` | every verb parses, writes back, draws and runs |

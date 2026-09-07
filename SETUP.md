@@ -16,10 +16,15 @@ It prints what it starts with:
 
 ```
   ghostclick  ->  http://localhost:3000
+  serving     ->  /path/to/poc-qa-stack/web/dist
   allowed     ->  http://localhost:3000
   secrets     ->  QA_PASS, QA_USER
   driving     ->  nothing yet — open a URL in the console
 ```
+
+`serving` is the built UI it is handing out. It is a directory the server is
+pointed at, not one it owns — `GC_WEB_DIR` moves it, which is how the same
+backend serves a UI deployed from its own repository.
 
 `driving` is where the runner's browser is pointed. On a first run it is
 nothing — run history is machine-local, so a fresh clone has none — and the

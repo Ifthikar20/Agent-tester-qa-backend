@@ -49,9 +49,12 @@ target on your machine and the runner has to resolve the same one on ours. A
 second copy would drift and you would find out in CI.
 
 `lib/flow.js` and `lib/vocabulary.js` are copies of the repository's `flow.js`
-and `vocabulary.js`. `npm run check:extension` asserts each is byte-identical to
+and `vocabulary.js`. `npm run check:shared` asserts each is byte-identical to
 its original, so a change to the language cannot silently leave the extension
-behind.
+behind, and `npm run sync:lang` is how you make them match again. The Vue app
+holds a copy of the vocabulary for the same reason — `scripts/copies.js` lists
+all three and `docs/BOUNDARY.md` explains why copying beats importing across a
+project boundary.
 
 ## Replaying needs a session
 

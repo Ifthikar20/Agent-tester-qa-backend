@@ -3,5 +3,6 @@ node_modules/
 
 .ghostclick/
 
-# The Vue build IS committed (public/app) so `npm start` needs no bundler.
+# The Vue build IS committed (web/dist) so `npm start` needs no bundler,
+# and it belongs to the frontend project rather than the backend's tree.
 web/node_modules/

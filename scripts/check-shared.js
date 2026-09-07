@@ -1,31 +1,44 @@
 /**
- * The browser extension's load-bearing parts, tested against a real page:
- * the shared proposer, the picker's click suppression, the replay, and the
- * hand-off endpoint.
+ * What more than one project depends on, and therefore what drift breaks.
  *
  *   npm start &
- *   node scripts/check-extension.js
+ *   node scripts/check-shared.js
+ *
+ * Two things, in one file because they are the same worry:
+ *
+ *   the copies    every vendored copy of the case language is byte-identical to
+ *                 the original (scripts/copies.js says who has one and why).
+ *                 Three projects parse this grammar; a copy that has drifted is
+ *                 a case the recorder writes and the executor cannot read.
+ *   the extension the picker's click suppression, the replay, and the hand-off
+ *                 endpoint, tested against a real page — the parts that only
+ *                 work because they share code with the server.
  */
 import { chromium } from 'playwright';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { toFlow } from '../flow.js';
+import { COPIES } from './copies.js';
 
 const BASE = process.env.BASE_URL || 'http://localhost:3000';
 const root = (p) => fileURLToPath(new URL(`../${p}`, import.meta.url));
 const fail = (m) => { console.log(`\n  FAIL  ${m}\n`); process.exit(1); };
 const ok = (label, detail = '') => console.log(`  ok    ${label.padEnd(46)} ${detail}`);
 
-// ---------------------------------------------------------------- one copy
+// ---------------------------------------------------------------- the copies
 console.log('\n— one source of truth ————————————————————————————————————');
-// flow.js and the vocabulary it reads are both copied in, because the panel
-// parses and writes cases without a server. They drift the moment either is
-// edited, which is the point of checking.
-for (const f of ['flow.js', 'vocabulary.js']) {
-  if (readFileSync(root(f), 'utf8') !== readFileSync(root(`extension/lib/${f}`), 'utf8')) {
-    fail(`extension/lib/${f} has drifted from ${f} — copy it again`);
+// The extension parses and writes cases with no server; the Vue app renders
+// steps with no server. Both hold a copy, and both drift the moment the
+// original is edited, which is the entire point of checking rather than
+// remembering. `npm run sync:lang` is the fix, and this is what tells you.
+for (const { from, to } of COPIES) {
+  let copy;
+  try { copy = readFileSync(root(to), 'utf8'); }
+  catch { fail(`${to} is missing — run \`npm run sync:lang\``); }
+  if (readFileSync(root(from), 'utf8') !== copy) {
+    fail(`${to} has drifted from ${from} — run \`npm run sync:lang\``);
   }
-  ok(`extension/lib/${f} matches ${f}`);
+  ok(`${to} matches ${from}`);
 }
 const proposeSrc = readFileSync(root('extension/lib/propose.js'), 'utf8');
 if (!readFileSync(root('recorder.js'), 'utf8').includes('extension/lib/propose.js')) {

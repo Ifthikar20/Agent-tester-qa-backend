@@ -4,6 +4,7 @@ import { chromium } from 'playwright';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { VirtualCursor, sleep } from './cursor.js';
 import { OPS, validate } from './ops.js';
 import * as origins from './origins.js';
@@ -31,8 +32,9 @@ const homeUrl = () => chooseHome({
 const HEADED = /^(1|true|yes|on)$/i.test(process.env.HEADED ?? '');
 
 const app = express();
+
 /**
- * Static files, with the one header that matters.
+ * Cache-Control, the one header that matters here.
  *
  * Vite fingerprints its assets, so those are safe to cache forever. index.html
  * is not fingerprinted — it is the file that NAMES the current fingerprints —
@@ -40,31 +42,53 @@ const app = express();
  * how many times you pull and rebuild. That is a long afternoon of "why don't I
  * see the new button", and it is one header.
  */
-app.use(express.static('public', {
-  setHeaders(res, path) {
-    if (path.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
-    else if (path.includes('/app/assets/')) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-  },
-}));
+const cacheHeaders = (res, path) => {
+  if (path.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
+  else if (/[\\/]assets[\\/]/.test(path)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+};
+
+/**
+ * The backend's own files: the pages you can drive, and the hero images.
+ *
+ * Resolved from this module rather than the working directory. `express.static('public')`
+ * reads process.cwd(), so the server only worked when started from the repo
+ * root — fine for `npm start`, wrong the moment it is started by a process
+ * manager, a container ENTRYPOINT, or from anywhere else.
+ */
+app.use(express.static(fileURLToPath(new URL('./public', import.meta.url)), { setHeaders: cacheHeaders }));
 app.use(express.json({ limit: '512kb' }));
 
 /**
- * The Vue app.
+ * The UI, which is a DIRECTORY this server is pointed at — not a path it owns.
  *
- * It is built to `public/app/` and that build is committed, so `npm start`
- * serves the whole UI with no bundler in the picture — a tool you need a build
- * step to run is a tool people stop running. `npm run dev` puts Vite in front
- * for working on it.
+ *   GC_WEB_DIR=/srv/ghostclick-web/dist npm start
  *
- * Static files win (this sits after express.static), so only client-side routes
- * reach the fallback.
+ * It used to be `public/app/`, written there by the frontend's own build
+ * config. That is the coupling that makes two repositories impossible: the
+ * frontend cannot build without the backend's tree to write into, and the
+ * backend cannot serve a UI that was deployed anywhere else. Now the frontend
+ * builds to its own `web/dist/` and this reads whatever directory it is given,
+ * so the same server serves a sibling checkout, a CI artefact, or nothing at
+ * all — see docs/BOUNDARY.md.
+ *
+ * The default is the sibling `web/dist/`, whose build is committed, so `npm
+ * start` still needs no bundler — a tool you need a build step to run is a tool
+ * people stop running.
+ *
+ * Static files win (this sits before the fallback), so only client-side routes
+ * reach it.
  */
-const APP = fileURLToPath(new URL('./public/app/index.html', import.meta.url));
+const WEB_DIR = process.env.GC_WEB_DIR
+  ? resolve(process.env.GC_WEB_DIR)
+  : fileURLToPath(new URL('./web/dist', import.meta.url));
+const APP = join(WEB_DIR, 'index.html');
+
 app.get('/', (_req, res) => res.redirect('/app/'));
+app.use('/app', express.static(WEB_DIR, { setHeaders: cacheHeaders }));
 app.use('/app', (req, res, next) => {
   if (req.method !== 'GET' || req.path.startsWith('/assets/')) return next();
   res.sendFile(APP, (err) => {
-    if (err) next(new Error('The UI is not built — run `npm run build`'));
+    if (err) next(new Error(`No UI at ${WEB_DIR} — run \`npm run build\`, or point GC_WEB_DIR at one`));
   });
 });
 
@@ -76,8 +100,30 @@ app.use('/app', (req, res, next) => {
  * it was handed would be a remote-code path with extra steps. A human presses
  * Run.
  */
+/**
+ * Who may call the API from a browser.
+ *
+ * `*` is the base case and it is deliberate: the extension POSTs a recording
+ * from whatever page you were recording on, so there is no single origin to
+ * name. It costs nothing here because every /api route is either a read or
+ * gated — /api/recording validates and never executes, and nothing can add an
+ * allowed origin except a person pressing a button.
+ *
+ * GC_WEB_ORIGIN names the frontend when it is deployed somewhere this server is
+ * not. It has to be echoed rather than starred: a browser rejects `*` on any
+ * credentialed request, so the day this grows a session cookie, `*` is the
+ * header that silently blocks the whole app. `Vary: Origin` is what stops a
+ * cache handing one origin's response to another.
+ */
+const WEB_ORIGIN = (process.env.GC_WEB_ORIGIN ?? '').replace(/\/+$/, '');
 app.use('/api', (req, res, next) => {
-  res.set('Access-Control-Allow-Origin', '*');
+  if (WEB_ORIGIN && req.headers.origin === WEB_ORIGIN) {
+    res.set('Access-Control-Allow-Origin', WEB_ORIGIN);
+    res.set('Access-Control-Allow-Credentials', 'true');
+    res.set('Vary', 'Origin');
+  } else {
+    res.set('Access-Control-Allow-Origin', '*');
+  }
   res.set('Access-Control-Allow-Headers', 'content-type');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -138,7 +184,7 @@ function gate(res, origin) {
  * shelling out, so it works where git is not on PATH.
  *
  * The commit and the start time are fixed for this process. The BUILD time is
- * not: express serves public/app off disk, so a `vite build` in another
+ * not: express serves the UI directory off disk, so a `vite build` in another
  * terminal changes what the browser gets without this process noticing. Read
  * at boot, the stamp then claims a UI older than the one being served — a
  * version stamp that is confidently wrong is worse than none, since its entire
@@ -474,6 +520,7 @@ if (process.env.HOME_URL) {
 }
 
 console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
+            `\n  serving     ->  ${WEB_DIR}${process.env.GC_WEB_DIR ? '  (GC_WEB_DIR)' : ''}` +
             `\n  driving     ->  ${homeUrl() ?? 'nothing yet — open a URL in the console'}` +
             `\n  browser     ->  ${HEADED ? 'headed — a real window you can watch' : 'headless — streamed to the canvas (HEADED=1 for a window)'}` +
             `\n  allowed     ->  ${origins.list().join(', ')}` +

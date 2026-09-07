@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "PoC: drive headless Chrome from a small DSL, stream it to a canvas, draw a synthetic cursor over it.",
+  "description": "PoC: drive headless Chrome from a small DSL, stream it to a canvas, draw a synthetic cursor over it. The backend; the UI is web/ (see docs/BOUNDARY.md).",
   "scripts": {
     "start": "node scripts/start.js",
     "serve": "node server.js",
@@ -22,9 +22,11 @@
     "check:startup": "node scripts/check-startup.js",
     "check:diagram": "node scripts/check-diagram.js",
     "check:teach": "node scripts/check-teach.js",
-    "check:extension": "node scripts/check-extension.js",
+    "check:shared": "node scripts/check-shared.js",
     "check:fidelity": "node scripts/check-fidelity.js",
-    "check:all": "npm run check && npm run check:freshness && npm run check:runner && npm run check:suites && npm run check:recording && npm run check:longnames && npm run check:redirects && npm run check:patience && npm run check:console && npm run check:vocabulary && npm run check:startup && npm run check:teach && npm run check:extension && npm run check:diagram && npm run check:fidelity"
+    "check:boundary": "node scripts/check-boundary.js",
+    "sync:lang": "node scripts/sync-lang.js",
+    "check:all": "npm run check && npm run check:freshness && npm run check:runner && npm run check:suites && npm run check:recording && npm run check:longnames && npm run check:redirects && npm run check:patience && npm run check:console && npm run check:vocabulary && npm run check:startup && npm run check:teach && npm run check:shared && npm run check:boundary && npm run check:diagram && npm run check:fidelity"
   },
   "dependencies": {
     "express": "^4.19.2",
