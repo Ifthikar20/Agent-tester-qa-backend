@@ -63,6 +63,61 @@ export const list = () => all.slice();
  *   overall dashboard are the same view over a different slice, not two
  *   implementations that will disagree by next week.
  */
+/**
+ * The same failure, however many runs hit it.
+ *
+ * A run records only its FIRST failure, because a run stops there — so a defect
+ * is that sentence, and the interesting questions are how often it has happened
+ * and whether it is still happening. Grouping by the message rather than by the
+ * case is deliberate: one broken selector usually breaks several cases, and
+ * seeing that as one defect with four cases attached is the whole point of the
+ * page.
+ *
+ * `open` means the affected case has not passed since it last failed. It is a
+ * cheap signal and an honest one — nobody has to remember to close anything.
+ */
+export function defects(days = 14) {
+  const since = Date.now() - days * 86_400_000;
+  const runs = all.filter((r) => r.at >= since);
+
+  // When each case last passed, so a defect can say whether it is still live.
+  const lastPass = new Map();
+  for (const r of runs) {
+    if (!r.ok) continue;
+    const k = r.caseId ?? `${r.suite}:${r.caseName ?? r.url}`;
+    if (!lastPass.has(k) || r.at > lastPass.get(k)) lastPass.set(k, r.at);
+  }
+
+  const by = new Map();
+  for (const r of runs) {
+    if (r.ok || !r.error) continue;
+    const d = by.get(r.error) ?? {
+      error: r.error, hits: 0, first: r.at, last: r.at, step: r.step, cases: [], suites: [],
+    };
+    d.hits++;
+    d.first = Math.min(d.first, r.at);
+    if (r.at >= d.last) { d.last = r.at; d.step = r.step; }
+    const name = r.caseName ?? '(ad-hoc script)';
+    if (!d.cases.some((c) => c.name === name)) {
+      d.cases.push({ name, id: r.caseId ?? null, key: r.caseId ?? `${r.suite}:${name}` });
+    }
+    if (!d.suites.includes(r.suite)) d.suites.push(r.suite);
+    by.set(r.error, d);
+  }
+
+  const list = [...by.values()].map((d) => ({
+    ...d,
+    // Still open if NO affected case has passed since this last failed.
+    open: !d.cases.some((c) => (lastPass.get(c.key) ?? 0) > d.last),
+  }));
+
+  list.sort((a, b) => Number(b.open) - Number(a.open) || b.last - a.last);
+  return {
+    defects: list,
+    totals: { all: list.length, open: list.filter((d) => d.open).length, days },
+  };
+}
+
 export function summary(days = 14, suiteId = null) {
   const runs = suiteId ? all.filter((r) => r.suiteId === suiteId) : all;
   const now = Date.now();

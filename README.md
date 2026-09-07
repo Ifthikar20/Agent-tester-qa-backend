@@ -453,6 +453,40 @@ turns out to be true:
 Each of those is a real gap, not a subtlety. If your flow needs one, say so and
 it becomes an op.
 
+## Defects, read out of run history
+
+Run history answers "what happened". Defects answers "what is broken", which is
+a different question and was not being asked anywhere.
+
+A run records only its first failure, because a run stops there — so a defect is
+that sentence, and the useful questions about it are how often it has happened,
+which cases it takes down, and whether it is still happening. Grouping by the
+message rather than by the case is the point: one broken selector usually breaks
+four cases, and four rows saying the same thing is a list, not a diagnosis.
+
+Nothing here is hand-managed and there is no state to keep in sync. A defect is
+**open** when no affected case has passed since it last failed, so it closes
+itself when the thing is fixed — a tracker nobody has to remember to update is
+the only kind that stays true.
+
+## Hero images
+
+Drop `.jpg`, `.png`, `.webp` or `.avif` files into `public/hero/` and the hero
+panels use them as a backdrop. An empty folder is the normal case and you get
+the gradient. The list is read per request, so adding files needs a reload and
+not a restart.
+
+Each page picks one deterministically from the sorted list, so a page keeps the
+same picture across reloads and two pages do not show the same one — a hero that
+reshuffles on every navigation reads as a page that has not finished loading.
+
+**The scrim is not decoration.** Putting arbitrary photographs behind near-black
+text is how a page becomes unreadable on the one image nobody checked, so the
+text sits on a band of solid panel colour that fades into the picture and even
+the far edge keeps 45% panel over it. Legibility does not depend on which image
+you chose, which matters when the folder is filled by whoever is using the tool
+rather than by a designer.
+
 ## The console of the page you are driving
 
 A step fails with `expected the URL to contain "/dashboard"`, and the reason is
@@ -1273,12 +1307,14 @@ silently inside someone else's docs.
 | `parse.js` | DSL text → JSON IR |
 | `diagram.js` | JSON IR → mermaid `block-beta` |
 | `suites.js` | the suite model — one origin, pages, expectations, cases |
-| `runs.js` | run history, scoped by suite |
+| `runs.js` | run history, scoped by suite; defects grouped out of it |
 | `web/` | the Vue 3 app: onboarding, suites, console, dashboard |
 | `public/app/` | its build — committed, so `npm start` needs no bundler |
 | `public/demo.html` | Meridian — truncates a username to 16 chars |
 | `public/shop.html` | Nimbus — cart total ignores quantity |
 | `public/menu.html` | Aperture — a dropdown that only exists on hover |
+| `public/noisy.html` | Kestrel — logs at every level, repeats, then throws |
+| `public/hero/` | your images, if you put any there |
 | `scripts/check.js` | end-to-end: rejections, discovery, all three runs |
 | `scripts/check-teach.js` | demonstrate by hand, replay what it wrote |
 | `scripts/check-extension.js` | picker suppression, replay, hand-off, real Chrome load |

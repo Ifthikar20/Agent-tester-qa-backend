@@ -3,7 +3,7 @@ import { WebSocketServer } from 'ws';
 import { chromium } from 'playwright';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { VirtualCursor, sleep } from './cursor.js';
 import { OPS, validate } from './ops.js';
 import * as origins from './origins.js';
@@ -78,6 +78,26 @@ app.use('/api', (req, res, next) => {
 });
 
 app.get('/api/runs', (req, res) => res.json(history.summary(14, req.query.suite || null)));
+app.get('/api/defects', (_req, res) => res.json(history.defects(14)));
+
+/**
+ * Pictures for the hero panels, if anyone has put any there.
+ *
+ * Read per request rather than at boot, so dropping a folder of images into
+ * public/hero and reloading is the whole procedure — a feature whose setup step
+ * is "now restart the server" is a feature people give up on.
+ */
+const HERO = fileURLToPath(new URL('./public/hero', import.meta.url));
+app.get('/api/hero', (_req, res) => {
+  let images = [];
+  try {
+    images = readdirSync(HERO)
+      .filter((f) => /\.(jpe?g|png|webp|avif)$/i.test(f))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+      .map((f) => `/hero/${encodeURIComponent(f)}`);
+  } catch { /* no folder is the normal case */ }
+  res.json({ images });
+});
 
 // ------------------------------------------------------------ suites (API)
 /**
