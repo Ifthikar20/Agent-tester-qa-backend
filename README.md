@@ -20,6 +20,7 @@ npm run check:recording           # repeated links, scrolling, jump-to-top, time
 npm run check:longnames           # paragraph-long names, casing, sticky anchors
 npm run check:naming              # when the page and the browser disagree about an element
 npm run check:redirects           # redirect chains, statuses, the friendly 404
+npm run check:app                 # one command starts it all, with one shared key
 npm run check:patience            # late vs never coming, and settling
 npm run check:pace                # a fast run reaches the same verdict as a watched one
 npm run check:console             # the canvas paints, and the wheel reaches the page
@@ -37,7 +38,10 @@ when a source file is newer than the build**, so one command always gives you
 the latest. A start with nothing to do says `up to date` and costs nothing.
 
 ```bash
-npm start                         # build if stale, then run      ← the one you want
+npm run app                       # everything, from a fresh clone ← the one you want
+npm run app -- --auth             # and the Django control plane, with sign-in
+npm run app -- --fast             # runs skip the performance
+npm start                         # just the runner, if setup is already done
 npm run serve                     # run only, never build
 npm run dev                       # Vite in front of it, on :5173
 npm run build                     # → web/dist/, commit the result
@@ -1423,7 +1427,9 @@ silently inside someone else's docs.
 | `scripts/check-diagram.js` | generated mermaid vs. the real parser |
 | `scripts/check-vocabulary.js` | every verb parses, writes back, draws and runs |
 | `scripts/check-startup.js` | where the runner points, including the empty case |
+| `scripts/app.js` | one command from a fresh clone to a running stack — `npm run app` |
 | `scripts/start.js` | build what changed, then run — this is `npm start` |
+| `scripts/check-app.js` | the flags, and that both halves get the same key |
 | `scripts/check-freshness.js` | rebuild-when-stale, cache headers, the version stamp |
 | `scripts/check-runner.js` | dropped commands, the run lock, surviving a throw |
 | `scripts/check-suites.js` | onboarding, the one-origin rule, the gate, suite runs |

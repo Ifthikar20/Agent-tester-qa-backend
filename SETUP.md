@@ -7,9 +7,28 @@ Fifteen minutes, most of it waiting for a browser to download.
 ```bash
 git clone -b claude/ghostclick-automation-poc-mb76oz https://github.com/Ifthikar20/poc-qa-stack
 cd poc-qa-stack
+npm run app                         # → http://localhost:3000
+```
+
+That is the whole thing. `npm run app` installs what is missing, downloads the
+browser if it has to, builds the UI and starts the runner — and says which of
+those it skipped, because a setup script that works silently is one you cannot
+debug when it does not.
+
+Add `--auth` and it also sets up and starts the Django control plane in
+`auth/`: pip, the migration, a shared key generated once into
+`.ghostclick/auth-secret`, and the UI rebuilt knowing where to sign in. One
+Ctrl-C stops everything. It will not create an account for you — it tells you
+to run `createsuperuser`, because a script that quietly makes an admin login
+with a password it chose has put a login on your machine that you do not know
+about.
+
+The longer way still works, and is what `npm run app` does for you:
+
+```bash
 npm install
-npx playwright install chromium     # skip if you already have one
-npm start                           # → http://localhost:3000
+npx playwright install chromium
+npm start
 ```
 
 It prints what it starts with:
