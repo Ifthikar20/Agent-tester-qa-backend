@@ -24,6 +24,72 @@ const DEFAULT_ORIGIN = `http://localhost:${process.env.PORT || 3000}`;
  */
 const TIMEOUT = Number(process.env.GC_TIMEOUT_MS) || 8000;
 const SETTLE = Number(process.env.GC_SETTLE_MS) || 250;
+
+/**
+ * How much of a replay is performance.
+ *
+ * TIMEOUT and SETTLE are about the page: how long to wait for it, how still it
+ * must be. This is about the VIEWER. A run is streamed to a canvas at roughly
+ * ten frames a second, so a pointer that teleports and a press with no duration
+ * are simply not visible — the glides, the pause before a click and the typing
+ * delay all exist so a person can follow what is happening.
+ *
+ * None of it is waiting for the page, and it adds up: about two thirds of a
+ * second on every click step, plus 42ms per character typed. Worth every bit of
+ * it when you are watching; pure cost when you are not.
+ *
+ *   GC_PACE_MS=0    npm start        as fast as the page allows
+ *   GC_PACE_MS=250  npm start        brisk, still followable
+ *
+ * A run can also carry its own `pace`, so the same server can do both without
+ * a restart.
+ *
+ * Parsed by hand rather than with `Number(...) || 420`, because that idiom
+ * reads 0 as absent — and 0 is the entire point of this one.
+ */
+export const PACE = paceOf(process.env.GC_PACE_MS, 420);
+
+export function paceOf(raw, fallback = 420) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.min(n, 5000) : fallback;
+}
+
+/**
+ * Each performance delay as a fraction of one pace unit.
+ *
+ * These were literals — 294, 140, 120, 140, 70, 42 — and every one of them is
+ * an exact fraction of the 420ms glide they were tuned against. Naming the
+ * relationship changes nothing at the default (the check asserts exactly that)
+ * and makes the whole performance move with a single number.
+ */
+const APPROACH = 0.7;        // 294ms  entering the target's box
+const AIM = 1 / 3;           // 140ms  settling to the aim point
+const CORRECT = 1 / 3.5;     // 120ms  re-aiming after a reflow
+const LINGER = 1 / 3;        // 140ms  letting hover settle, and the eye catch up
+const PRESS = 1 / 6;         //  70ms  holding the button down
+const KEYSTROKE = 1 / 10;    //  42ms  between characters
+const DWELL = 1 / 1.4;       // 300ms  a hover with no duration of its own
+
+/** One delay, at this run's pace. At pace 0 they are all zero. */
+const beat = (pace, fraction) => Math.round(pace * fraction);
+
+/**
+ * Every performance delay at a given pace.
+ *
+ * Exported, and used by the code below rather than sitting beside it, so that
+ * `check:pace` pins the numbers that actually run. A table a check agrees with
+ * and the executor ignores would be worse than no table.
+ */
+export const performanceAt = (pace) => ({
+  approach: beat(pace, APPROACH),
+  aim: beat(pace, AIM),
+  correct: beat(pace, CORRECT),
+  linger: beat(pace, LINGER),
+  press: beat(pace, PRESS),
+  keystroke: beat(pace, KEYSTROKE),
+  dwell: beat(pace, DWELL),
+});
 /**
  * How long to keep watching after a step gives up, purely to say WHY.
  *
@@ -317,19 +383,28 @@ async function pointAt(page, target, ctx, opts = {}) {
   const outside =
     ctx.cursor.x < box0.x || ctx.cursor.x > box0.x + box0.width ||
     ctx.cursor.y < box0.y || ctx.cursor.y > box0.y + box0.height;
+  const pace = paceOf(opts.ms, ctx.pace ?? PACE);
+  const perf = performanceAt(pace);
   if (outside) {
     const ex = Math.min(Math.max(ctx.cursor.x, box0.x + inset), box0.x + box0.width - inset);
     const ey = Math.min(Math.max(ctx.cursor.y, box0.y + inset), box0.y + box0.height - inset);
-    await ctx.cursor.glideTo(ex, ey, Math.round((opts.ms ?? 420) * 0.7));
+    await ctx.cursor.glideTo(ex, ey, perf.approach);
   }
-  await ctx.cursor.glideTo(x, y, outside ? 140 : opts.ms);
+  await ctx.cursor.glideTo(x, y, outside ? perf.aim : pace);
 
   // The page can reflow during the glide — async content landing, a smooth
   // scroll still settling. Re-read and correct, or we click stale pixels.
+  //
+  // This one runs at pace 0 too, as a plain move: it is not decoration, it is
+  // the difference between clicking the element and clicking where it used to
+  // be.
   const [x2, y2] = point(await boxOf(node, target), opts);
-  if (Math.hypot(x2 - ctx.cursor.x, y2 - ctx.cursor.y) > 2) await ctx.cursor.glideTo(x2, y2, 120);
+  if (Math.hypot(x2 - ctx.cursor.x, y2 - ctx.cursor.y) > 2) {
+    await ctx.cursor.glideTo(x2, y2, perf.correct);
+  }
 
-  await sleep(140); // let hover settle, and let the viewer's eye catch up
+  const linger = perf.linger;          // let hover settle, and the eye catch up
+  if (linger > 0) await sleep(linger);
   return node;
 }
 
@@ -418,13 +493,15 @@ export const OPS = {
    */
   async hover(page, step, ctx) {
     await pointAt(page, step.target, ctx, { at: step.at });
-    await sleep(Math.min(step.ms ?? 300, 5000));
+    // An authored `hover ... 500ms` is intent and is never scaled; only the
+    // default is part of the performance.
+    await sleep(Math.min(step.ms ?? performanceAt(ctx.pace ?? PACE).dwell, 5000));
   },
 
   async click(page, step, ctx) {
     await pointAt(page, step.target, ctx, { at: step.at, timeout: step.timeout });
     markNav(ctx);                 // anything after this must be a NEW navigation
-    await ctx.cursor.click();
+    await ctx.cursor.click(performanceAt(ctx.pace ?? PACE).press);
     // A click starts a route change, a fetch and a re-render. Begin the next
     // step when the page has stopped moving, not a fixed moment later.
     await settle(page, step.settle);
@@ -432,11 +509,14 @@ export const OPS = {
 
   async fill(page, step, ctx) {
     await pointAt(page, step.target, ctx, { leftEdge: true, at: step.at });
-    await ctx.cursor.click(); // focus the way a user does, not via .fill()
+    const perf = performanceAt(ctx.pace ?? PACE);
+    await ctx.cursor.click(perf.press); // focus the way a user does, not via .fill()
     const value = step.valueRef ? vault.get(step.valueRef) : step.value;
     if (value === undefined) throw new Error(`No value for ${step.target}`);
     await page.keyboard.press('ControlOrMeta+A');
-    await page.keyboard.type(value, { delay: 42 });
+    // Per character, so this is the largest single cost in a form-heavy case:
+    // twenty characters is another 840ms at the default.
+    await page.keyboard.type(value, { delay: perf.keystroke });
     await settle(page, step.settle);      // type-ahead, validation, a live filter
   },
 

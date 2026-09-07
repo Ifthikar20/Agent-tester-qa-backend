@@ -21,6 +21,7 @@ npm run check:longnames           # paragraph-long names, casing, sticky anchors
 npm run check:naming              # when the page and the browser disagree about an element
 npm run check:redirects           # redirect chains, statuses, the friendly 404
 npm run check:patience            # late vs never coming, and settling
+npm run check:pace                # a fast run reaches the same verdict as a watched one
 npm run check:console             # the canvas paints, and the wheel reaches the page
 npm run check:teach               # demonstrate by hand, then replay what it wrote
 npm run check:fidelity            # does the replay reproduce it? would coordinates have?
@@ -941,6 +942,8 @@ an animation that never stops cannot stall a run. That is a real fix for a race,
 where a fixed delay is either too short for a slow route or wasted on a fast one.
 
 ```bash
+GC_PACE_MS=0     npm start        # no performance — as fast as the page allows
+GC_PACE_MS=250   npm start        # brisk, still followable
 GC_TIMEOUT_MS=20000 npm start     # a slow app
 GC_SETTLE_MS=600    npm start     # one that renders in stages
 ```
@@ -1430,6 +1433,7 @@ silently inside someone else's docs.
 | `scripts/check-naming.js` | counts follow the accessibility tree, and no step is dropped |
 | `scripts/check-redirects.js` | chains, status assertions, and the 404 a URL check misses |
 | `scripts/check-patience.js` | late vs never-coming, settle without stalling |
+| `scripts/check-pace.js` | how much of a run is performance, and that skipping it is safe |
 | `public/slow.html` | an element that arrives after a delay you choose |
 | `public/links.html` | four links that all work and are each wrong differently |
 | `public/results.html` | a sticky header over cards named by a whole paragraph |

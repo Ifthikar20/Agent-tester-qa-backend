@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { VirtualCursor, sleep } from './cursor.js';
-import { OPS, validate } from './ops.js';
+import { OPS, validate, PACE, paceOf } from './ops.js';
 import * as origins from './origins.js';
 import * as vault from './secrets.js';
 import * as history from './runs.js';
@@ -54,6 +54,29 @@ if (AUTH_SECRET && AUTH_SECRET.length < MIN_SECRET) {
 }
 
 const HEADED = /^(1|true|yes|on)$/i.test(process.env.HEADED ?? '');
+
+/**
+ * The runner's live state, declared before anything can be asked about it.
+ *
+ * These are assigned further down, after a browser has been launched — which
+ * takes seconds. The port, though, opens the moment express is ready, roughly
+ * two hundred lines earlier. So there is a window in which the server accepts
+ * requests and `page`, `recorder` and `running` do not exist yet, and reading a
+ * `let` before its declaration is not `undefined`, it is a ReferenceError.
+ *
+ * /api/state reads all three, and it is the first thing the UI asks for. It
+ * answered that question with a 500 and an express stack trace, which reads as
+ * a broken server rather than one that is still starting.
+ *
+ * The handler was already written for this — `page?.url()`, `recorder?.recording`
+ * — the optional chaining just never got the chance to work, because the
+ * bindings were not merely unset but unreachable. Declaring them here is what
+ * makes that guard mean something: during boot the honest answer is "nothing
+ * open, not running", and now that is what comes back.
+ */
+let page = null;
+let recorder = null;
+let running = false;
 
 const app = express();
 
@@ -271,6 +294,9 @@ app.get('/api/state', (_req, res) => res.json({
   // How patient the runner is, so it is visible rather than folklore.
   timeoutMs: Number(process.env.GC_TIMEOUT_MS) || 8000,
   settleMs: Number(process.env.GC_SETTLE_MS) || 250,
+  // How much of a run is performed for a watcher. The UI offers a per-run
+  // override, and needs to know what it is overriding.
+  paceMs: PACE,
 }));
 
 app.get('/api/origins', (_req, res) => res.json({ origins: origins.list() }));
@@ -404,6 +430,10 @@ app.post('/api/suites/:id/run', async (req, res) => {
     : suite.cases;
   if (!wanted.length) return fail(res, new Error('This suite has no cases to run'));
 
+  // How much of this run to perform, for this run only. Absent means the
+  // server's default, so a caller that has never heard of pace is unaffected.
+  const pace = paceOf(req.query.pace, PACE);
+
   emit({ t: 'suite.start', suite: suite.name, cases: wanted.length });
   const outcomes = [];
   for (const c of wanted) {
@@ -421,7 +451,7 @@ app.post('/api/suites/:id/run', async (req, res) => {
     // Express 4 does not catch a rejection from an async handler, so an
     // unexpected throw here would take the process with it rather than failing
     // one case. A suite run survives a bad case.
-    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name })
+    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name, pace })
       .catch((err) => ({ ok: false, passed: 0, total: 0, error: err.message }));
     outcomes.push({ case: c.id, name: c.name, ...r });
   }
@@ -621,6 +651,8 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  patience    ->  waits ${Number(process.env.GC_TIMEOUT_MS) || 8000}ms for a target, ` +
             `settles ${Number(process.env.GC_SETTLE_MS) || 250}ms after a click ` +
             `(GC_TIMEOUT_MS, GC_SETTLE_MS)` +
+            `\n  pace        ->  ${PACE ? `${PACE}ms of performance per step, so a run can be watched` : '0 — no performance, as fast as the page allows'}` +
+            ` (GC_PACE_MS)` +
             `\n  version     ->  ${identity.commit ?? 'unknown'}` +
             `${buildTime() ? `, ui built ${buildTime().replace('T', ' ').slice(0, 16)}` : ', ui NOT BUILT'}\n`);
 
@@ -644,7 +676,7 @@ const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || undefined,
   args: ['--disable-dev-shm-usage', '--force-color-profile=srgb'],
 });
-const page = await browser.newPage({ viewport: VIEW });
+page = await browser.newPage({ viewport: VIEW });
 const cdp = await page.context().newCDPSession(page);
 
 let lastFrame = null;
@@ -768,7 +800,7 @@ function entryUrl(page) {
 // Teach mode. Canvas clicks reach the page as real DOM events, so the same
 // listener sees a human demonstrating and would see the executor replaying —
 // which is why recording is gated off during a run.
-const recorder = new Recorder(page, {
+recorder = new Recorder(page, {
   nav,
   onStep: (step, steps) => emit({
     t: 'recorded',
@@ -802,7 +834,7 @@ async function publishTargets() {
 }
 
 // ---------------------------------------------------------------- executor
-let running = false;
+// `running` is declared at the top, so /api/state can be answered during boot.
 
 /**
  * @param meta which suite and case this plan came from, when it came from one.
@@ -822,7 +854,9 @@ async function run(plan, meta = {}) {
   recorder.recording = false;
 
   const results = [];
-  const ctx = { cursor, emit, nav, onNavigate: publishTargets };
+  // A run can be told how much of itself to perform. Unset means this server's
+  // default, so nothing that does not ask is affected.
+  const ctx = { cursor, emit, nav, onNavigate: publishTargets, pace: paceOf(meta.pace, PACE) };
   emit({ t: 'run.start', total: plan.steps.length, suite: plan.suite, ...meta });
 
   // Everything from here to the finally must be able to throw without wedging
@@ -917,7 +951,7 @@ wss.on('connection', (ws) => {
       // rejection, and Node kills the process for those: one unexpected throw
       // inside a step and the whole runner disappeared, which from the browser
       // looks exactly like "Run script does nothing".
-      run(plan).catch((err) => {
+      run(plan, { pace: paceOf(m.pace, PACE) }).catch((err) => {
         emit({ t: 'log', level: 'error', msg: `run failed: ${err.message}` });
         emit({ t: 'run.end', ok: false });
       });

@@ -20,7 +20,7 @@
  * The first alone would pass while server.js ignored the function entirely.
  * The second alone can only ever test the state this machine happens to be in.
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import WebSocket from 'ws';
 import { fileURLToPath } from 'node:url';
 import { chooseHome } from '../home.js';
@@ -147,6 +147,52 @@ else bad('the server opens what the rule picks', `rule says "${want}", server sa
 // agreeing with it.
 if (announced.endsWith('/results.html')) ok('and not the bundled demo it used to be');
 else bad('and not the bundled demo it used to be', announced);
+
+// ---------------------------------------------------------------------------
+console.log('\n— and it can be asked about itself while it starts ——');
+
+/**
+ * The port opens the moment express is ready. The browser takes seconds after
+ * that, so there is a window where the server accepts requests and its runtime
+ * state does not exist yet — and reading a `let` before its declaration is a
+ * ReferenceError, not undefined.
+ *
+ * /api/state reads three of them and it is the first thing the UI asks for. It
+ * used to answer with a 500 and an express stack trace for the whole of that
+ * window, which reads as a broken server rather than one that is still coming
+ * up. Nothing caught it because every check waits for the server to settle
+ * before asking it anything.
+ *
+ * So this one deliberately does not wait: it hammers /api/state from the
+ * instant the port accepts a connection until the browser is up, and any 500
+ * in there is a failure.
+ */
+const BOOT_PORT = Number(process.env.GC_BOOT_PORT) || 3407;
+const booting = spawn(process.execPath, [ROOT + 'scripts/start.js'], {
+  cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
+  env: { ...process.env, PORT: String(BOOT_PORT), GC_SKIP_BUILD: '1', HOME_URL: '' },
+});
+try {
+  const codes = new Map();
+  let sawOk = false;
+  for (let i = 0; i < 200 && !sawOk; i++) {
+    const code = await fetch(`http://127.0.0.1:${BOOT_PORT}/api/state`)
+      .then((r) => r.status).catch(() => 0);        // 0 = not listening yet
+    if (code) codes.set(code, (codes.get(code) ?? 0) + 1);
+    // Two 200s in a row means the window is behind us and nothing broke in it.
+    if (code === 200 && codes.get(200) >= 2) sawOk = true;
+    await wait(50);
+  }
+  const seen = [...codes.entries()].map(([c, n]) => `${c}x${n}`).join(' ');
+  if (!sawOk) bad('/api/state answers while the browser starts', `never got a 200 — saw ${seen || 'nothing'}`);
+  else if ([...codes.keys()].some((c) => c >= 500)) {
+    bad('/api/state answers while the browser starts', `${seen} — a 5xx during boot`);
+  } else ok('/api/state answers while the browser starts', seen);
+} finally {
+  booting.kill('SIGTERM');
+  await wait(300);
+  booting.kill('SIGKILL');
+}
 
 console.log(failures
   ? `\n  ${failures} FAILED\n`

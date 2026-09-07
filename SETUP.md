@@ -26,6 +26,13 @@ It prints what it starts with:
 pointed at, not one it owns — `GC_WEB_DIR` moves it, which is how the same
 backend serves a UI deployed from its own repository.
 
+There is also a `pace` line. A replay glides the pointer, pauses before each
+click and types a character at a time, so that a feed running at roughly ten
+frames a second shows something you can follow — about two thirds of a second
+per click step, plus 42ms per character. Worth it when you are watching and
+nothing when you are not, so the console has a **Watch / Fast** toggle beside
+Run, and `GC_PACE_MS` sets what this server does by default.
+
 There is also an `auth` line, and on a first run it says `OFF`. That is correct
 for one person on one laptop, and it is printed every time rather than left to
 be assumed — believing this is protected when it is not is worse than knowing it
