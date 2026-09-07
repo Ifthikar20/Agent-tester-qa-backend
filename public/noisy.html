@@ -1,0 +1,49 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Kestrel — a page that talks</title>
+<!--
+  A page shaped like an app mid-incident: it logs at every level, repeats one
+  line the way a render loop does, prints a credential the way a fetch wrapper
+  written in a hurry does, and then throws.
+
+  It exists so the console panel can be tested against something that behaves
+  like a real application rather than against a single console.log.
+-->
+<style>
+  body { margin: 0; font: 15px/1.6 system-ui, sans-serif; color: #101014; background: #fbfbfc; }
+  main { max-width: 40rem; margin: 0 auto; padding: 3rem 1.5rem; }
+  h1 { font-size: 1.6rem; letter-spacing: -0.02em; }
+  p { color: #5a5a66; }
+  button { font: inherit; border: 1px solid #eaeaef; background: #fff; border-radius: 999px;
+           padding: 0.5rem 1rem; cursor: pointer; }
+</style>
+
+<main>
+  <h1>Kestrel</h1>
+  <p>Nothing to see here. Everything interesting is in the browser console.</p>
+  <button id="more">Log some more</button>
+</main>
+
+<script>
+  console.log('boot: hydrating Kestrel');
+  console.info('feature flags: rates-v2, split-billing');
+  console.warn('slow response from /api/rates (1842ms)');
+  console.error('GET /api/balances -> 500');
+
+  // A render loop that prints on every frame. Four hundred of these is why the
+  // panel folds consecutive duplicates rather than listing them.
+  for (let i = 0; i < 5; i++) console.log('render: AccountList (0 changed)');
+
+  // The reason vault values are redacted on the way out. This is the bundled
+  // demo credential, and a fetch wrapper logging what it just sent is not a
+  // rare mistake.
+  console.log('auth: sending token hunter2-but-from-a-vault to /api/session');
+
+  document.getElementById('more').addEventListener('click', () => {
+    console.log('clicked: Log some more');
+  });
+
+  // An uncaught exception. It never reaches console.*, and it is usually the
+  // reason the step after it cannot find anything.
+  setTimeout(() => { window.__kestrel.render(); }, 250);
+</script>

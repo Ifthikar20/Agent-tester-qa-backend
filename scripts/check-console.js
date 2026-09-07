@@ -120,63 +120,6 @@ const after = await frame();
 if (before !== after) ok('the wheel moves the driven page', 'the feed changed');
 else bad('the wheel moves the driven page', 'the feed is identical — the wheel is not reaching it');
 
-// The buttons must reach the actual end, not just move a bit.
-//
-// They used to send a wheel delta of ±100000 and hope; the server clamped it,
-// so they scrolled by exactly the clamp and stopped. "The feed changed" passed
-// happily on that, which is why this now asks the page where it is.
-/**
- * Top must be a POSITION, not a large nudge.
- *
- * The broken version sent a wheel delta of ±100000 and let the server clamp it,
- * so the buttons crept by the clamp and never reached either end. "The feed
- * changed" passes happily on that — so test idempotence instead: pressing Top
- * from two different places must land on the same view. A nudge cannot.
- */
-const press = async (name, settle = 1400) => {
-  await page.getByRole('button', { name }).click();
-  await page.waitForTimeout(settle);
-  return frame();
-};
-const roll = async (ticks, dy = 400) => {
-  await page.mouse.move(mid.x, mid.y);
-  for (let i = 0; i < Math.abs(ticks); i++) {
-    await page.mouse.wheel(0, ticks > 0 ? dy : -dy);
-    await page.waitForTimeout(55);
-  }
-  await page.waitForTimeout(800);
-};
-
-/**
- * Press Top from two GENUINELY different depths.
- *
- * The setup has to use the WHEEL, not the Top button, to get there — using the
- * thing under test to prepare its own test is how the first two versions of
- * this check passed against the broken button: a nudge left the page near the
- * bottom, the short scroll that followed hit the bottom again, and both
- * presses ended up starting from the same place, where a nudge is idempotent.
- */
-await roll(-12);                     // definitively at the top, by wheel
-await roll(2);                       // ~800px down
-const shallow = await frame();
-const fromShallow = await press('↑ Top');
-
-await roll(-12);
-await roll(6);                       // ~2400px down — a different place
-const deep = await frame();
-const fromDeep = await press('↑ Top');
-
-if (shallow !== deep) ok('two scroll depths look different', 'the setup is honest');
-else bad('two scroll depths look different', 'the page is too short to tell them apart');
-
-if (fromDeep === fromShallow) ok('and Top reaches the top from either', 'a position, not a nudge');
-else bad('and Top reaches the top from either', 'it moved by a fixed amount instead');
-
-await page.getByRole('button', { name: '↓ Bottom' }).click();
-await page.waitForTimeout(1400);
-if ((await frame()) !== fromShallow) ok('and Bottom leaves it');
-else bad('and Bottom leaves it', 'nothing moved');
-
 // ---------------------------------------------------------------------------
 console.log('\n— 4 · loading a saved case ————————————————————————');
 
@@ -446,6 +389,58 @@ const refused = await card().innerText();
 if (/no suite|not found|unknown/i.test(refused)) ok('and a refusal is shown there as well', refused.split('\n').at(-1)?.slice(0, 44));
 else bad('and a refusal is shown there as well', refused.replace(/\s+/g, ' ').slice(0, 70));
 
+// ---------------------------------------------------------------------------
+console.log('\n— 7 · the console of the page you are driving ————————');
+
+/**
+ * A failing step usually has a reason the page already printed, and until now
+ * that reason lived inside a browser nobody could open devtools on.
+ *
+ * public/noisy.html behaves like an app mid-incident: every level, one line
+ * repeated the way a render loop repeats it, a credential printed the way a
+ * hurried fetch wrapper prints it, and then an uncaught throw.
+ */
+await page.goto(`${APP}/console`, { waitUntil: 'networkidle' });
+await page.locator('textarea').last().waitFor();
+await page.getByPlaceholder('localhost:3000/demo.html').fill(`${API}/noisy.html`);
+await page.getByRole('button', { name: 'Open' }).click();
+await page.waitForTimeout(3000);
+
+const panel = () => page.locator('section').filter({ hasText: 'Browser console' }).first();
+
+// Folded away until asked for: a chatty app would otherwise be the whole page.
+const hiddenAtFirst = !(await panel().innerText()).includes('render: AccountList');
+await panel().getByRole('button', { name: /^Show/ }).click();
+await page.waitForTimeout(400);
+const printed = await panel().innerText();
+
+if (hiddenAtFirst && /render: AccountList/.test(printed)) ok('it is folded away until you ask', 'then it shows');
+else bad('it is folded away until you ask', hiddenAtFirst ? 'nothing appeared' : 'it was open already');
+
+if (/GET \/api\/balances -> 500/.test(printed)) ok('an error the page logged is here');
+else bad('an error the page logged is here', printed.replace(/\s+/g, ' ').slice(0, 70));
+
+// An uncaught throw never reaches console.*, and it is the one you most want.
+if (/__kestrel|TypeError|undefined/.test(printed)) ok('and an uncaught throw is too', 'pageerror is captured');
+else bad('and an uncaught throw is too', 'only console.* was captured');
+
+// Five identical lines are one fact printed five times.
+if (/×5/.test(printed)) ok('a line repeated five times is folded', '×5');
+else bad('a line repeated five times is folded', printed.replace(/\s+/g, ' ').slice(0, 70));
+
+/**
+ * The one that matters. A page logging the token it just sent is not unusual,
+ * and a vault value that never leaves the server must not leave it through
+ * here either. The demo credential is the fixture's own literal, so a leak
+ * would be visible verbatim.
+ */
+if (!printed.includes('hunter2-but-from-a-vault') && /\$QA_PASS/.test(printed)) {
+  ok('and a vault value is redacted, not printed', 'printed as $QA_PASS');
+} else {
+  bad('and a vault value is redacted, not printed',
+      printed.includes('hunter2-but-from-a-vault') ? 'THE SECRET IS ON SCREEN' : 'it was not named either');
+}
+
 await fetch(`${API}/api/suites/${sid}`, { method: 'DELETE' }).catch(() => {});
 await fetch(`${API}/api/suites/${other}`, { method: 'DELETE' }).catch(() => {});
 
@@ -455,5 +450,6 @@ console.log(failures
   : '\n  OK — the canvas paints when you arrive, says what it is waiting for\n' +
     '       before it can, the wheel reaches the page you are driving, and a\n' +
     '       saved case can be picked up and run from here — including one\n' +
-    '       recorded after a redirect that left the origin.\n');
+    '       recorded after a redirect that left the origin. What the driven\n' +
+    '       page printed is here too, with vault values redacted.\n');
 process.exit(failures ? 1 : 0);

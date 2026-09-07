@@ -453,6 +453,41 @@ turns out to be true:
 Each of those is a real gap, not a subtlety. If your flow needs one, say so and
 it becomes an op.
 
+## The console of the page you are driving
+
+A step fails with `expected the URL to contain "/dashboard"`, and the reason is
+usually something the page already printed — an uncaught TypeError, a 500 its
+fetch wrapper logged. That reason lived inside a browser nobody could open
+devtools on.
+
+Everything the driven page prints is forwarded now: every `console.*` level,
+plus `pageerror`, which never reaches `console.*` and is the one you most often
+want. It sits under the script, folded away behind a toggle with an error count
+on the header, because an app that logs on every render would otherwise be the
+whole screen. Consecutive duplicates fold to one line with a count, the same as
+the run log.
+
+**Vault values are redacted on the way out.** A fetch wrapper printing the token
+it just sent is not a rare mistake, and a secret that never leaves the server
+must not leave it through here either — so a match on any vault value is
+replaced with its name:
+
+```
+auth: sending token $QA_PASS to /api/session
+```
+
+`public/noisy.html` is a page shaped like an app mid-incident — every level, one
+line repeated five times the way a render loop repeats it, the bundled demo
+credential printed the way a hurried wrapper prints it, then a throw.
+`check:console` section 7 drives it. Removing the redaction turns that check red
+with `THE SECRET IS ON SCREEN`.
+
+The ↑ Top / ↓ Bottom buttons are gone. The wheel is the way you scroll a page,
+and the buttons were a workaround from before it worked. The `scroll to top` and
+`scroll to bottom` verbs in the language are untouched — a script still needs to
+say "go to the footer" — but the socket op the buttons used went with them
+rather than being left unreachable.
+
 ## Summarised, not tipped out
 
 The console's right rail had two cards that dumped rather than reported.

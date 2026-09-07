@@ -522,6 +522,42 @@ const cursor = new VirtualCursor(cdp, emit);
  * no longer exists, detoured via a tracker, or arrived at a friendly 404. The
  * final URL says none of that, so the chain is kept and shown.
  */
+/**
+ * The driven page's own console, forwarded.
+ *
+ * A failing step usually has a reason the page already printed — an uncaught
+ * TypeError, a 500 that the app's fetch wrapper logged — and until now that
+ * reason existed only inside a browser nobody could open devtools on. You saw
+ * "expected the URL to contain /dashboard" and had to guess why it did not.
+ *
+ * Vault values are redacted on the way out. An app logging the token it just
+ * received is not unusual, and a secret that never leaves the server must not
+ * leave it through here either. Long lines are cut: a page that dumps a 2MB
+ * JSON blob into console.log should not be able to do it down this socket.
+ */
+const LINE_MAX = 2000;
+function redact(text) {
+  let out = String(text ?? '');
+  for (const name of vault.names()) {
+    const v = vault.get(`secrets.${name}`);
+    // Two characters would match everywhere; a real secret is not that short.
+    if (typeof v === 'string' && v.length >= 4) out = out.split(v).join(`$${name}`);
+  }
+  return out;
+}
+const LEVELS = { warning: 'warn', error: 'error', assert: 'error', trace: 'debug' };
+const fromPage = (level, text) => emit({
+  t: 'console',
+  level: LEVELS[level] ?? (['log', 'info', 'debug'].includes(level) ? level : 'log'),
+  text: redact(text).slice(0, LINE_MAX),
+  at: Date.now(),
+});
+
+page.on('console', (msg) => fromPage(msg.type(), msg.text()));
+// An uncaught exception never reaches console.*, and it is the one you most
+// want: it is usually why the next step could not find anything.
+page.on('pageerror', (err) => fromPage('error', err?.stack || String(err)));
+
 const nav = new NavigationLog(page, {
   onNavigation: (n) => {
     emit({ t: 'nav', ...n });
@@ -811,18 +847,6 @@ wss.on('connection', (ws) => {
         return void cursor.wheel(clamp(m.deltaY), clamp(m.deltaX));
       }
 
-      // Top and bottom are a position, not a very large wheel gesture.
-      //
-      // They used to send a delta of ±100000 and hope, which the clamp above
-      // then truncated — so the buttons moved the page by exactly the clamp and
-      // never reached either end. Asking for the position says what is meant
-      // and cannot be quietly rescaled.
-      if (m.t === 'human.scrollTo' && (m.to === 'top' || m.to === 'bottom')) {
-        return void page.evaluate(
-          (where) => window.scrollTo({ top: where === 'top' ? 0 : document.body.scrollHeight, behavior: 'instant' }),
-          m.to,
-        ).catch(() => {});
-      }
       if (m.t === 'human.key') {
         if (typeof m.text === 'string' && m.text.length === 1) {
           return void page.keyboard.type(m.text).catch(() => {});
