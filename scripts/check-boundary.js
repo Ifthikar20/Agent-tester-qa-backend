@@ -27,7 +27,7 @@
  * docs/BOUNDARY.md is the prose. This is the part that fails.
  */
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -118,6 +118,79 @@ for (const file of backend) {
   }
 }
 if (!reaches) ok('no server module names web/ but the built dir', `${backend.length} modules`);
+
+// ---------------------------------------------------------------------------
+console.log('\n— and the control plane is a third project ————————————');
+
+/**
+ * auth/ is Django, and it is going the same way as web/: its own repository.
+ *
+ * The temptation it has to be protected from is different, though. The
+ * frontend's pull was to reach ACROSS for a file; the control plane's is to
+ * reach INTO the runner — to read suites/, to check the origin allowlist
+ * itself, to decide something the executor is supposed to decide. That is not
+ * a build problem, it is the security model: two services with an opinion about
+ * the same rule is how a hard gate becomes advisory.
+ *
+ * So the check runs both ways. Nothing in auth/ names the runner's files, and
+ * nothing the runner loads names auth/ — they are joined by a signed token and
+ * an HTTP call, and by nothing else.
+ */
+const AUTH = join(ROOT, 'auth');
+if (!existsSync(AUTH)) {
+  console.log('  ·  the control plane is not in this checkout      auth/ is absent');
+} else {
+  /**
+   * What counts as crossing, and what does not.
+   *
+   * `/auth/login` in the UI is a URL. It is the CORRECT way to reach this
+   * service and must not be flagged — an HTTP call between two services is the
+   * boundary working, not a breach of it. What matters is a FILE path: an
+   * import, or something handed to fs. The first version of this check matched
+   * the bare string and failed on five honest lines, which is worse than no
+   * check at all, because a check people learn to ignore is one that stops
+   * being read on the day it is right.
+   */
+  const py = walk(AUTH, ['.py']);
+  const DOCSTRINGS = /"""[\s\S]*?"""|'''[\s\S]*?'''/g;
+  let leaks = 0;
+  for (const file of py) {
+    // Docstrings explain the boundary — this file's own does — and prose about
+    // a path is not a path.
+    const src = readFileSync(file, 'utf8').replace(DOCSTRINGS, '').replace(/^\s*#.*$/gm, '');
+    for (const hit of src.matchAll(/parent\s*\.\s*parent\s*\.\s*parent|['"]\.\.\/[^'"]*['"]|['"][^'"]*\b(?:suites|\.ghostclick|public)\/[^'"]*['"]/g)) {
+      leaks++;
+      bad('the control plane reaches into another project', `${relative(ROOT, file)}: ${hit[0].slice(0, 48)}`);
+    }
+  }
+  if (!leaks) ok('auth/ reads nothing outside itself', `${py.length} files`);
+
+  /**
+   * And back the other way: the runner must not load the control plane's code.
+   *
+   * An import specifier, or a path carrying a Python-side extension. `./auth.js`
+   * is the runner's own verifier and is a file rather than this directory, so
+   * the slash is what decides; `auth/.env` inside an error message is prose
+   * telling a person where to put a value, and prose is not a dependency.
+   */
+  const CROSSINGS = [
+    /(?:from|require\s*\(|import\s*\()\s*['"][^'"]*\bauth\/[^'"]*['"]/g,
+    /['"][^'"]*\bauth\/[^'"]*\.(?:py|txt|cfg|toml|sqlite3)['"]/g,
+  ];
+  let named = 0;
+  for (const file of [...backend, ...walk(join(WEB, 'src'), ['.js', '.vue'])]) {
+    const src = readFileSync(file, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+    for (const re of CROSSINGS) {
+      for (const hit of src.matchAll(re)) {
+        named++;
+        bad('the runner or the UI loads control-plane code', `${relative(ROOT, file)}: ${hit[0]}`);
+      }
+    }
+  }
+  if (!named) ok('and neither loads a file from auth/', 'joined by a token and a URL');
+}
 
 // ---------------------------------------------------------------------------
 console.log('\n— the UI is a directory it is pointed at ——————————————');

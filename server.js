@@ -11,6 +11,7 @@ import * as origins from './origins.js';
 import * as vault from './secrets.js';
 import * as history from './runs.js';
 import { chooseHome } from './home.js';
+import { bearer, verify, MIN_SECRET } from './auth.js';
 import * as suites from './suites.js';
 import { discover, links } from './targets.js';
 import { parse } from './parse.js';
@@ -28,6 +29,29 @@ const homeUrl = () => chooseHome({
   runs: history.list(),
   isAllowed: (origin) => origins.has(origin),
 });
+
+/**
+ * Auth is OFF unless GC_AUTH_SECRET is set, and that is a deliberate default
+ * for a tool whose normal shape is one person, one laptop, one localhost port.
+ * What is not acceptable is being quiet about it — an operator who thinks this
+ * is protected and is wrong is worse off than one who knows it is open — so the
+ * boot banner says which mode it is in, every time.
+ *
+ * Set, it is enforced on every /api route and on the socket. Set to something
+ * short, the process refuses to start: a weak shared key still "works", which
+ * means nothing ever surfaces the mistake.
+ */
+const AUTH_SECRET = process.env.GC_AUTH_SECRET ?? '';
+if (AUTH_SECRET && AUTH_SECRET.length < MIN_SECRET) {
+  console.error(
+    `\n  GC_AUTH_SECRET is ${AUTH_SECRET.length} characters; it must be at least ${MIN_SECRET}.\n` +
+    '\n  It is the key this runner and the Django control plane share, so a short\n' +
+    '  one weakens both and nothing would tell you. Generate one:\n' +
+    '\n    node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'base64url\'))"\n' +
+    '\n  Then set the SAME value here and in auth/.env.\n'
+  );
+  process.exit(1);
+}
 
 const HEADED = /^(1|true|yes|on)$/i.test(process.env.HEADED ?? '');
 
@@ -124,8 +148,39 @@ app.use('/api', (req, res, next) => {
   } else {
     res.set('Access-Control-Allow-Origin', '*');
   }
-  res.set('Access-Control-Allow-Headers', 'content-type');
+  res.set('Access-Control-Allow-Headers', 'content-type, authorization');
+  // A preflight carries no Authorization header by definition, so it must be
+  // answered before the gate. Requiring auth here would make every
+  // cross-origin call fail at the preflight, which reads as a CORS bug.
   if (req.method === 'OPTIONS') return res.sendStatus(204);
+
+  if (!AUTH_SECRET) return next();
+
+  /**
+   * One exception, and it is the extension.
+   *
+   * POST /api/recording is called from whatever page you were recording on. It
+   * has no session with the control plane and no way to be handed a token, so
+   * requiring one here does not secure the endpoint, it deletes the feature.
+   *
+   * It is the safest route to leave open: it parses a flow, validates it
+   * through the same origin gate as everything else, and puts the text in the
+   * script box. It never executes anything — a human presses Run. Giving the
+   * extension a real token is worth doing and is not this change.
+   */
+  if (req.method === 'POST' && req.path === '/recording') return next();
+
+  const token = bearer(req.headers.authorization);
+  if (!token) return res.status(401).json({ ok: false, error: 'Not signed in' });
+  try {
+    req.user = verify(token, AUTH_SECRET);
+  } catch (err) {
+    // The reason is safe to say: the caller already holds the token, so
+    // "expired" versus "bad signature" tells them nothing they could not
+    // determine anyway, and it is the difference between the UI silently
+    // re-authenticating and a person staring at a spinner.
+    return res.status(401).json({ ok: false, error: err.message });
+  }
   next();
 });
 
@@ -507,9 +562,44 @@ await new Promise((resolve) => {
     process.exit(1);
   });
 });
-// wss shares the server, so it re-emits anything the server emits.
-const wss = new WebSocketServer({ server: http });
+/**
+ * The socket, upgraded by hand so the token can be checked first.
+ *
+ * `new WebSocketServer({ server })` would accept the upgrade and only then let
+ * us look, which means an unauthenticated client is already a connected client
+ * receiving screencast frames. noServer + an explicit handler is the difference
+ * between refusing and disconnecting.
+ *
+ * The token rides in the query string because a browser cannot set headers when
+ * opening a WebSocket — there is no `fetch`-style options object for
+ * `new WebSocket()`. That puts a credential somewhere URLs get logged, which is
+ * exactly why the control plane mints them ten minutes long.
+ *
+ * The PATH is deliberately not restricted. The browser uses /ws, but this
+ * repository's own check scripts connect to the root, and the path was never
+ * the boundary — the token is. Narrowing it here would break six checks and
+ * secure nothing.
+ */
+const wss = new WebSocketServer({ noServer: true });
 wss.on('error', (err) => console.error(`  websocket server: ${err.message}`));
+
+http.on('upgrade', (req, socket, head) => {
+  if (AUTH_SECRET) {
+    let token = null;
+    try { token = new URL(req.url, 'http://localhost').searchParams.get('t'); } catch { /* unparseable */ }
+    try {
+      verify(token, AUTH_SECRET);
+    } catch (err) {
+      // A real HTTP response, not a bare destroy: a socket that closes with no
+      // status looks like a crashed server, and the UI would sit reconnecting
+      // on its timer forever without ever saying why.
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+});
 
 // Starting with HOME_URL set is a person naming an origin on the command line,
 // which is the same decision the Allow button represents — so honour it rather
@@ -522,6 +612,9 @@ if (process.env.HOME_URL) {
 console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  serving     ->  ${WEB_DIR}${process.env.GC_WEB_DIR ? '  (GC_WEB_DIR)' : ''}` +
             `\n  driving     ->  ${homeUrl() ?? 'nothing yet — open a URL in the console'}` +
+            `\n  auth        ->  ${AUTH_SECRET
+              ? 'on — a token from the control plane is required'
+              : 'OFF — GC_AUTH_SECRET unset, anyone who can reach this port can drive it'}` +
             `\n  browser     ->  ${HEADED ? 'headed — a real window you can watch' : 'headless — streamed to the canvas (HEADED=1 for a window)'}` +
             `\n  allowed     ->  ${origins.list().join(', ')}` +
             `\n  secrets     ->  ${vault.names().join(', ') || '(none set)'}` +

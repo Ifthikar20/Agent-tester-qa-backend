@@ -1,0 +1,8 @@
+# The control plane's whole dependency list.
+#
+# There is no JWT library here on purpose: minting an HS256 token is HMAC-SHA256
+# over two base64url segments (accounts/tokens.py), and the executor verifies it
+# with Node's stdlib for the same reason. Neither side gains a package for the
+# easy half of the problem.
+Django>=5.0,<6.0
+django-cors-headers>=4.0

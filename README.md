@@ -24,7 +24,8 @@ npm run check:console             # the canvas paints, and the wheel reaches the
 npm run check:teach               # demonstrate by hand, then replay what it wrote
 npm run check:fidelity            # does the replay reproduce it? would coordinates have?
 npm run check:shared              # the picker, the hand-off, every copy of the language
-npm run check:boundary            # frontend and backend can still be split apart
+npm run check:auth                # forgeries refused, Python signs it, Node checks it
+npm run check:boundary            # the three projects can still be split apart
 npm run check:diagram             # generated mermaid vs. the real parser
 ```
 
@@ -41,12 +42,33 @@ npm run build                     # → web/dist/, commit the result
 npm run check:all                 # every check, in one command
 ```
 
-`web/` is a **separate project** that happens to live here — it reads no file
-outside itself and writes none, and the server is *pointed* at a built
-directory (`GC_WEB_DIR`) rather than owning the path. That is what makes
-splitting the two into their own repositories a `git mv`; `npm run
-check:boundary` is what stops it quietly ceasing to be true. See
-[docs/BOUNDARY.md](docs/BOUNDARY.md).
+## Three projects, one repository
+
+`web/` (the UI) and `auth/` (the control plane) are **separate projects** that
+happen to live here. Neither reads a file outside itself, the server is
+*pointed* at a built UI directory (`GC_WEB_DIR`) rather than owning the path,
+and the control plane is reached over HTTP and joined to the runner by one
+signed token. That is what makes splitting them into their own repositories a
+`git mv`; `npm run check:boundary` is what stops it quietly ceasing to be true.
+See [docs/BOUNDARY.md](docs/BOUNDARY.md).
+
+## Signing in, when you want to
+
+There is no login by default, and that is the intended shape for one person on
+one laptop. Set `GC_AUTH_SECRET` and every `/api` route and the WebSocket
+require a short-lived token minted by the Django control plane in `auth/`; the
+boot banner says which mode it is in every time.
+
+```bash
+GC_AUTH_SECRET=$(node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))")
+
+# the control plane                          # the runner              # the UI
+cd auth && python manage.py runserver 8000   GC_AUTH_SECRET=… npm start   VITE_AUTH_URL=http://localhost:8000 npm run build
+```
+
+The origin allowlist and the vault stay entirely on the runner and are
+re-checked there, so the control plane can neither add an origin nor read a
+secret. See [auth/README.md](auth/README.md).
 
 It prints what it is running, and the sidebar shows the same thing:
 
@@ -1375,6 +1397,9 @@ silently inside someone else's docs.
 | `web/dist/` | its build — committed, so `npm start` needs no bundler |
 | `web/src/config.js` | where the backend is: same origin, or `VITE_API_URL` |
 | `web/src/lang/` | the frontend's checked copy of the vocabulary |
+| `auth/` | Django: users, sessions, SSO later — identity and nothing else |
+| `auth/accounts/tokens.py` | mints the HS256 token the runner accepts, stdlib only |
+| `auth.js` | verifies it — verify-only, so the runner cannot authorise itself |
 | `docs/BOUNDARY.md` | the four rules that keep frontend and backend separable |
 | `public/demo.html` | Meridian — truncates a username to 16 chars |
 | `public/shop.html` | Nimbus — cart total ignores quantity |
@@ -1384,7 +1409,8 @@ silently inside someone else's docs.
 | `scripts/check.js` | end-to-end: rejections, discovery, all three runs |
 | `scripts/check-teach.js` | demonstrate by hand, replay what it wrote |
 | `scripts/check-shared.js` | every copy of the language, then picker, replay, hand-off |
-| `scripts/check-boundary.js` | web/ builds alone; the server serves a directory it is given |
+| `scripts/check-boundary.js` | each project builds alone; the server serves a directory it is given |
+| `scripts/check-auth.js` | forgeries refused, Python signs it and Node checks it, the gate holds |
 | `scripts/copies.js` | who holds a copy of the language, and why |
 | `scripts/sync-lang.js` | make every copy match — `npm run sync:lang` |
 | `extension/` | Chrome recorder for apps ghostclick cannot reach |

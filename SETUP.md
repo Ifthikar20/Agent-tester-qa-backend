@@ -26,6 +26,11 @@ It prints what it starts with:
 pointed at, not one it owns — `GC_WEB_DIR` moves it, which is how the same
 backend serves a UI deployed from its own repository.
 
+There is also an `auth` line, and on a first run it says `OFF`. That is correct
+for one person on one laptop, and it is printed every time rather than left to
+be assumed — believing this is protected when it is not is worse than knowing it
+is open. `auth/README.md` covers turning it on.
+
 `driving` is where the runner's browser is pointed. On a first run it is
 nothing — run history is machine-local, so a fresh clone has none — and the
 console says "Nothing open yet" until you open something. After that it starts
