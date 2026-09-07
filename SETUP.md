@@ -23,6 +23,16 @@ to run `createsuperuser`, because a script that quietly makes an admin login
 with a password it chose has put a login on your machine that you do not know
 about.
 
+That is about *quietly*. Making one on purpose without being prompted, which is
+what a test that signs in on every run needs, is one command:
+
+```bash
+bash scripts/adduser.sh you@example.com
+```
+
+It prints the password it generated once, and it never takes one as an argument,
+where `ps` and your shell history would both outlive the run.
+
 The longer way still works, and is what `npm run app` does for you:
 
 ```bash

@@ -9,10 +9,15 @@ language boundary and neither project can assert it alone, so it lives in
 runner's. A green run here and a green run there still would not prove they
 agree — only the crossing does.
 """
+import io
 import json
+import re
+import sys
 import time
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import Client, TestCase, override_settings
 
 from .tokens import MIN_SECRET, NoSigningKey, mint
@@ -156,3 +161,105 @@ class PasswordTests(TestCase):
         # by the spec, so this asserts what actually happens rather than what
         # would be convenient.
         self.assertEqual(User.objects.get().email, 'A@example.com')
+
+
+class AddUserCommandTests(TestCase):
+    """
+    `manage.py adduser`, checked by the only claim that matters about it: that
+    the account it makes can sign in through the real endpoint. Asserting that
+    a row appeared in the table would pass just as happily for an account with
+    an unusable password, which is exactly the failure this would have.
+    """
+
+    def run_adduser(self, *args, stdin=None, **kwargs):
+        out, err = io.StringIO(), io.StringIO()
+        saved = sys.stdin
+        if stdin is not None:
+            sys.stdin = io.StringIO(stdin)
+        try:
+            call_command('adduser', *args, stdout=out, stderr=err, **kwargs)
+        finally:
+            sys.stdin = saved
+        return out.getvalue() + err.getvalue()
+
+    def password_from(self, output):
+        found = re.search(r'^\s+password\s+(\S+)$', output, re.MULTILINE)
+        self.assertIsNotNone(found, f'no password in:\n{output}')
+        return found.group(1)
+
+    def sign_in(self, email, password):
+        """The real login, CSRF and all — not authenticate()."""
+        c = Client(enforce_csrf_checks=True)
+        token = c.get('/auth/csrf').json()['csrfToken']
+        return c.post('/auth/login', data=json.dumps({'email': email, 'password': password}),
+                      content_type='application/json', HTTP_X_CSRFTOKEN=token)
+
+    def test_an_account_it_makes_can_sign_in(self):
+        password = self.password_from(self.run_adduser('qa@example.com'))
+        r = self.sign_in('qa@example.com', password)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['user']['email'], 'qa@example.com')
+
+    def test_a_piped_password_is_the_one_that_works(self):
+        # The case a test suite actually wants: it chooses the password, so it
+        # can sign in again tomorrow without having captured any output.
+        self.run_adduser('qa@example.com', stdin='a-long-chosen-password\n', password_stdin=True)
+        self.assertEqual(self.sign_in('qa@example.com', 'a-long-chosen-password').status_code, 200)
+
+    def test_the_trailing_newline_is_not_part_of_the_password(self):
+        # echo adds one. If it were kept, the password that works would be one
+        # nobody can type, and the failure would look like a wrong password.
+        self.run_adduser('qa@example.com', stdin='a-long-chosen-password\n', password_stdin=True)
+        self.assertEqual(self.sign_in('qa@example.com', 'a-long-chosen-password\n').status_code, 401)
+
+    def test_it_makes_an_ordinary_account_by_default(self):
+        # There is no RBAC, so signing in is already enough to drive every run.
+        # An account that ALSO reaches /admin/ should be something you typed.
+        self.run_adduser('qa@example.com')
+        user = User.objects.get(email='qa@example.com')
+        self.assertFalse(user.is_staff)
+        self.assertFalse(user.is_superuser)
+        self.assertTrue(user.is_active)
+
+    def test_superuser_is_staff_too(self):
+        self.run_adduser('boss@example.com', superuser=True)
+        user = User.objects.get(email='boss@example.com')
+        self.assertTrue(user.is_staff)
+        self.assertTrue(user.is_superuser)
+
+    def test_an_existing_account_is_left_alone(self):
+        first = self.password_from(self.run_adduser('qa@example.com'))
+        with self.assertRaises(CommandError):
+            self.run_adduser('qa@example.com')
+        # The point of refusing: the password someone else is using still works.
+        self.assertEqual(self.sign_in('qa@example.com', first).status_code, 200)
+
+    def test_reset_password_replaces_it(self):
+        first = self.password_from(self.run_adduser('qa@example.com'))
+        second = self.password_from(self.run_adduser('qa@example.com', reset_password=True))
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.sign_in('qa@example.com', first).status_code, 401)
+        self.assertEqual(self.sign_in('qa@example.com', second).status_code, 200)
+        self.assertEqual(User.objects.filter(email='qa@example.com').count(), 1)
+
+    def test_a_weak_password_is_refused_rather_than_stored(self):
+        with self.assertRaises(CommandError):
+            self.run_adduser('qa@example.com', stdin='password\n', password_stdin=True)
+        self.assertFalse(User.objects.filter(email='qa@example.com').exists())
+
+    def test_an_empty_stdin_is_refused_rather_than_becoming_the_password(self):
+        # The failure this stops: an empty password stored as usable, and an
+        # account anyone can sign into by leaving the field blank.
+        with self.assertRaises(CommandError):
+            self.run_adduser('qa@example.com', stdin='', password_stdin=True)
+        self.assertFalse(User.objects.filter(email='qa@example.com').exists())
+
+    def test_something_that_is_not_an_email_is_refused(self):
+        with self.assertRaises(CommandError):
+            self.run_adduser('qa')
+        self.assertFalse(User.objects.exists())
+
+    def test_a_generated_password_is_not_guessable(self):
+        seen = {self.password_from(self.run_adduser(f'qa{n}@example.com')) for n in range(5)}
+        self.assertEqual(len(seen), 5)
+        self.assertTrue(all(len(p) >= 20 for p in seen), seen)

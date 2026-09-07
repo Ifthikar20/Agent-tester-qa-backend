@@ -199,7 +199,8 @@ function accounts(py, env) {
   const n = Number((r.out.match(/\d+\s*$/) ?? ['0'])[0]);
   if (n > 0) return step('accounts', `${n} account${n === 1 ? '' : 's'}`);
   step('accounts', 'NONE — you will not be able to sign in until you make one:');
-  console.log(`\n      cd auth && ${py} manage.py createsuperuser\n`);
+  console.log(`\n      cd auth && ${py} manage.py createsuperuser      it asks for a password`);
+  console.log('      bash scripts/adduser.sh you@example.com        it generates one\n');
 }
 
 function buildUi(env) {

@@ -62,8 +62,17 @@ URL. Roughly ten minutes, almost all of it the first image build.
 Then make yourself an account and sign in:
 
 ```bash
-ssh -i ghostclick-deploy.pem ubuntu@<ip> \
+ssh -t -i ghostclick-deploy.pem ubuntu@<ip> \
   'cd /opt/ghostclick && ./scripts/gc exec control python manage.py createsuperuser'
+```
+
+`-t` because `createsuperuser` prompts: without a TTY `docker compose exec`
+refuses the input device and you never reach the questions. For a test
+account, or any account made by a script, there is a version that does not
+ask — it generates a password and prints it once:
+
+```bash
+EC2_HOST=<ip> bash scripts/adduser.sh qa@example.com
 ```
 
 `bash scripts/aws-down.sh` deletes all of it. About $35/month while it runs.
@@ -223,6 +232,17 @@ Then bring it up and make yourself an account:
 
 **No account is created for you.** A deploy script that invents an admin
 password has put a login on a public host that nobody chose.
+
+Making one *deliberately* without a prompt is a different thing, and it is
+what a test that signs in on every run needs. `adduser` never takes the
+password as an argument, because `ps` on this host shows every argument of
+every process to every account on it:
+
+```bash
+./scripts/gc exec -T control python manage.py adduser qa@example.com
+printf '%s' "$PASS" | ./scripts/gc exec -T control \
+  python manage.py adduser qa@example.com --password-stdin
+```
 
 ---
 
@@ -397,7 +417,9 @@ From `/opt/ghostclick` on the host.
 | Runner logs | `./scripts/gc logs -f runner` |
 | Control plane logs | `./scripts/gc logs -f control` |
 | Restart the runner | `./scripts/gc restart runner` |
-| Add an account | `... exec control python manage.py createsuperuser` |
+| Add an account, prompting | `... exec control python manage.py createsuperuser` |
+| Add one without a prompt | `... exec -T control python manage.py adduser <email>` |
+| Who has an account | `... exec -T control python manage.py adduser --list` |
 | Which origins are allowed | `cat .ghostclick/origins.json` |
 | Container status | `./scripts/gc ps` |
 | Memory, when it feels slow | `docker stats --no-stream` |

@@ -172,7 +172,9 @@ auth() {
     $(echo "$out" | tail -2)" ;;
   esac
 }
-auth 22 "$SSH_CIDR" "deploys from the operator's laptop"
+# The description is not free text: EC2 takes only a-zA-Z0-9. _-:/()#,@[]+=&;{}!$*
+# there, so the apostrophe in "operator's" failed the whole call.
+auth 22 "$SSH_CIDR" "deploys from one laptop"
 auth 80 "$HTTP_CIDR" "the app"
 ok "security group $SG"
 
@@ -320,7 +322,13 @@ REMOTE
 step "checking from outside the box"
 FAIL=0
 probe() {
-  local code; code=$(curl -s -o /dev/null -m 15 -w '%{http_code}' -X "${4:-GET}" "http://$IP$1" || echo 000)
+  # Deliberately no -o /dev/null. MSYS_NO_PATHCONV=1 above stops Git Bash
+  # rewriting /dev/null into NUL, native curl then cannot open it and exits 23
+  # having already printed the right code — so `|| echo 000` glued 000 onto
+  # every answer and a perfectly healthy box read as 200000. Putting the code
+  # on its own last line discards the body without naming a file at all.
+  local code; code=$(curl -s -m 15 -w '\n%{http_code}' -X "${4:-GET}" "http://$IP$1" 2>/dev/null | tail -1)
+  [ -n "$code" ] || code=000
   if [ "$code" = "$2" ]; then printf '    %-34s %s\n' "$3" "$code"
   else printf '    %-34s %s  WANT %s\n' "$3" "$code" "$2"; FAIL=1; fi
 }
@@ -334,7 +342,7 @@ probe /api/recording 403 "the extension hand-off is shut" POST
 step "up at  http://$IP/app/"
 echo
 ok "make yourself an account (interactive, so the password is never in a script):"
-echo "      ssh -i $KEY_FILE ubuntu@$IP 'cd $REMOTE_DIR && ./scripts/gc exec control python manage.py createsuperuser'"
+echo "      ssh -t -i $KEY_FILE ubuntu@$IP 'cd $REMOTE_DIR && ./scripts/gc exec control python manage.py createsuperuser'"
 echo
 ok "then sign in at http://$IP/app/ from any machine allowed by $HTTP_CIDR"
 echo

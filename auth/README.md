@@ -39,6 +39,35 @@ Leave `VITE_AUTH_URL` unset and the UI runs with no login at all, against a
 runner that is also unauthenticated. That is the laptop case and it stays
 supported — `npm start` on its own should not require a second service.
 
+## Making an account
+
+Two ways, and the difference is who chooses the password.
+
+```bash
+python manage.py createsuperuser              # it asks; use this for a person
+python manage.py adduser qa@example.com       # it generates one and prints it once
+```
+
+`createsuperuser` prompts, and a prompt needs a terminal — so it cannot run over
+`ssh host '<command>'`, which is where making a test account usually happens. It
+dies on "the input device is not a TTY" before asking anything. `adduser` is the
+non-interactive half: it never takes the password as an argument (`ps` and shell
+history both outlive the run), it makes an ordinary non-admin account unless you
+ask for `--staff`, and it refuses an email that already has one unless you say
+`--reset-password`. To choose the password yourself, pipe it in:
+
+```bash
+printf '%s' "$PASS" | python manage.py adduser qa@example.com --password-stdin
+```
+
+From your laptop, against either the local one or the deployed box,
+`scripts/adduser.sh` is the same thing without the ssh:
+
+```bash
+bash scripts/adduser.sh qa@example.com                 # local
+EC2_HOST=<ip> bash scripts/adduser.sh qa@example.com   # the box
+```
+
 ## The surface
 
 | | |
@@ -80,7 +109,7 @@ matters is a token crossing between them — that is in
 ## Tests
 
 ```bash
-python manage.py test          # 16 tests
+python manage.py test          # 27 tests
 ```
 
 They also run as part of `npm run check:all` from the repository root, so

@@ -218,6 +218,6 @@ probe /api/recording   403 "the extension hand-off is shut" POST
 REMOTE
 
 step "deployed — open http://$EC2_HOST/app/"
-ok "no account yet?  ssh -i $PEM $EC2_USER@$EC2_HOST 'cd $REMOTE_DIR && ./scripts/gc exec control python manage.py createsuperuser'"
+ok "no account yet?  ssh -t -i $PEM $EC2_USER@$EC2_HOST 'cd $REMOTE_DIR && ./scripts/gc exec control python manage.py createsuperuser'"
 ok "roll back:       EC2_HOST=$EC2_HOST bash scripts/deploy.sh rollback"
 echo
