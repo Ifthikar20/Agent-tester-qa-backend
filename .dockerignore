@@ -1,0 +1,49 @@
+# What must never enter the runner's build context.
+#
+# The build context is the repo root, which on the host is /opt/ghostclick —
+# the same directory the deploy script requires .env.prod to live in, the same
+# directory docs/DEPLOY.md tells you to put cansee-deploy.pem in, and the
+# parent of .ghostclick/. `COPY . .` in the Dockerfile would put all three into
+# an image layer, where `docker history` reads them back out. Today that is
+# contained only by the fact that the image never leaves the box; it stops
+# being contained the moment anything is pushed to a registry.
+#
+# This is a correctness file, not a size optimisation.
+
+# --- secrets ---------------------------------------------------------------
+.env
+.env.*
+!.env.prod.example
+*.pem
+*.key
+# The vault, the origin allowlist, the run history, the shared secret.
+.ghostclick/
+
+# --- the dev tree ----------------------------------------------------------
+# `COPY . .` runs AFTER `npm ci --omit=dev`, so a context carrying node_modules
+# overwrites the production install with the full development one — a bundler
+# and a second Chromium download shipped to production, silently.
+node_modules/
+web/node_modules/
+# Built in stage 1 and copied from there. The committed copy is for `npm start`
+# on a laptop and is not what the image should serve.
+web/dist/
+
+# --- history ---------------------------------------------------------------
+# Excluded on purpose. The commit reaches the image as the GC_GIT_SHA build
+# argument instead — see the identity block in server.js.
+.git/
+.github/
+.claude/
+
+# --- not needed at runtime -------------------------------------------------
+# auth/ is the control plane and builds from its own context (../auth), so it
+# is dead weight here and its db.sqlite3 is a real account database.
+auth/
+docs/
+*.log
+.DS_Store
+
+# Kept deliberately, despite being tempting to exclude: scripts/, suites/,
+# public/ and extension/ are what `npm run check:all` needs, and DEPLOY.md
+# documents running exactly that inside the container.

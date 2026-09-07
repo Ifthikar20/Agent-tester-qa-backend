@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Every compose command for this stack, with the two flags that are not optional.
+#
+#   ./scripts/gc logs -f runner
+#   ./scripts/gc ps
+#   ./scripts/gc exec control python manage.py createsuperuser
+#
+# Without --env-file, compose cannot interpolate GC_AUTH_SECRET and exits 1
+# before doing anything — including for `logs` and `ps`, which need no
+# variables at all. That error reads like a broken config file, and it is the
+# first thing you hit after a deploy. This wrapper is the fix, and it is why
+# docs/DEPLOY.md never spells a compose command out longhand.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+[ -f .env.prod ] || { echo "no .env.prod here ($PWD) — copy .env.prod.example and fill it in" >&2; exit 1; }
+exec docker compose -f docker/docker-compose.prod.yml --env-file .env.prod "$@"

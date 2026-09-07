@@ -77,6 +77,10 @@ const HEADED = /^(1|true|yes|on)$/i.test(process.env.HEADED ?? '');
 let page = null;
 let recorder = null;
 let running = false;
+// Set once the browser is actually up. The port opens ~100 lines before
+// chromium.launch, so "the server answers" and "the app works" are two
+// different facts. /healthz reports this one, and a deploy waits on it.
+let browserReady = false;
 
 const app = express();
 
@@ -162,6 +166,25 @@ app.use('/app', (req, res, next) => {
  * header that silently blocks the whole app. `Vary: Origin` is what stops a
  * cache handing one origin's response to another.
  */
+/**
+ * Liveness, and the only route outside the gate that answers anything.
+ *
+ * A deploy needs to know the difference between "express is listening" and
+ * "there is a browser". Polling the UI proves the first, which is why the
+ * previous readiness loop passed instantly against a runner whose
+ * chromium.launch had failed — a green deploy with no browser, and every
+ * page-touching route failing minutes later.
+ *
+ * Deliberately three booleans and nothing else. Everything adjacent to this in
+ * /api/state — the current URL, the origin allowlist, the vault's key names —
+ * is behind the gate for a reason, and an unauthenticated endpoint is the
+ * wrong place to start leaking the address of the page under test.
+ */
+app.get('/healthz', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.status(browserReady ? 200 : 503).json({ ok: browserReady, browser: browserReady, busy: running });
+});
+
 const WEB_ORIGIN = (process.env.GC_WEB_ORIGIN ?? '').replace(/\/+$/, '');
 app.use('/api', (req, res, next) => {
   if (WEB_ORIGIN && req.headers.origin === WEB_ORIGIN) {
@@ -270,10 +293,17 @@ function gate(res, origin) {
  */
 const identity = (() => {
   const read = (p) => { try { return readFileSync(fileURLToPath(new URL(p, import.meta.url)), 'utf8').trim(); } catch { return null; } };
-  let commit = null;
-  const head = read('./.git/HEAD');
-  if (head?.startsWith('ref: ')) commit = read(`./.git/${head.slice(5)}`);
-  else if (head) commit = head;
+  // In a container there is no .git — .dockerignore excludes it, so that a
+  // build context cannot carry the repository's history into an image layer.
+  // The sha arrives as a build argument instead. Env first, disk second: the
+  // image is the case where disk has no answer, not a case where it has a
+  // worse one.
+  let commit = process.env.GC_GIT_SHA?.trim() || null;
+  if (!commit) {
+    const head = read('./.git/HEAD');
+    if (head?.startsWith('ref: ')) commit = read(`./.git/${head.slice(5)}`);
+    else if (head) commit = head;
+  }
   return {
     commit: commit ? commit.slice(0, 7) : null,
     started: new Date().toISOString(),
@@ -677,6 +707,7 @@ const browser = await chromium.launch({
   args: ['--disable-dev-shm-usage', '--force-color-profile=srgb'],
 });
 page = await browser.newPage({ viewport: VIEW });
+browserReady = true;
 const cdp = await page.context().newCDPSession(page);
 
 let lastFrame = null;

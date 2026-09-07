@@ -1,0 +1,15 @@
+# The control plane's build context is auth/ (docker-compose.prod.yml:43).
+#
+# db.sqlite3 is the development account database — real users, real password
+# hashes. The Dockerfile's own comment says the database lives on a volume; the
+# COPY two lines above it contradicts that and bakes a copy into the image.
+
+db.sqlite3
+*.sqlite3
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+staticfiles/
+.pytest_cache/

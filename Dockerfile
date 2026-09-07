@@ -30,11 +30,18 @@ FROM mcr.microsoft.com/playwright:v1.63.0-noble
 WORKDIR /app
 ENV NODE_ENV=production
 
-COPY package.json package-lock.json ./
+# There is no .git in the image — .dockerignore excludes it so the build
+# context cannot carry the repository into a layer. Without this argument
+# /api/version reports null and the boot banner says "version -> unknown",
+# which is a version stamp that has quietly stopped working.
+ARG GC_GIT_SHA=""
+ENV GC_GIT_SHA=$GC_GIT_SHA
+
+COPY --chown=pwuser:pwuser package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY . .
-COPY --from=ui /app/web/dist ./web/dist
+COPY --chown=pwuser:pwuser . .
+COPY --from=ui --chown=pwuser:pwuser /app/web/dist ./web/dist
 
 # Run as a real user, not root. Chromium refuses to start as root without
 # --no-sandbox, and disabling the sandbox on a service whose entire job is
@@ -43,7 +50,10 @@ COPY --from=ui /app/web/dist ./web/dist
 # The directory is created and owned HERE so the named volume mounted over it
 # inherits that ownership. Without this the volume arrives root-owned and the
 # first write — the run history, the origin allowlist — fails.
-RUN mkdir -p /app/.ghostclick && chown -R pwuser:pwuser /app
+# The COPYs above already land as pwuser, so this is only the mountpoint. A
+# recursive chown of /app would rewrite every node_modules inode into a second
+# full-size layer for no gain.
+RUN mkdir -p /app/.ghostclick && chown pwuser:pwuser /app/.ghostclick
 USER pwuser
 
 EXPOSE 3000

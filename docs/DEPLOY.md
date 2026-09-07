@@ -45,6 +45,38 @@ change first for real multi-user use.
 
 ---
 
+## The short version
+
+From a laptop with the AWS CLI logged in:
+
+```bash
+bash scripts/aws-up.sh
+```
+
+It creates the key pair, security group, a t3.medium with an encrypted volume
+and IMDSv2 required, and an Elastic IP; installs Docker; clones this repo;
+generates both secrets **on the box**, where they stay; builds; and does not
+report success until five checks pass from outside the instance. It prints the
+URL. Roughly ten minutes, almost all of it the first image build.
+
+Then make yourself an account and sign in:
+
+```bash
+ssh -i ghostclick-deploy.pem ubuntu@<ip> \
+  'cd /opt/ghostclick && ./scripts/gc exec control python manage.py createsuperuser'
+```
+
+`bash scripts/aws-down.sh` deletes all of it. About $35/month while it runs.
+
+**Port 80 is open to the world by default**, because the point is to open it on
+another machine. The app is gated — anonymous requests to `/api/*` get 401 —
+but there is no TLS yet, so the session cookie and the executor token cross the
+network in cleartext. Pass `HTTP_CIDR=<ip>/32` to narrow it to one machine, and
+read "Where this goes next" before treating any of this as permanent.
+
+Everything below is what that script does, in case you want to do it by hand or
+change a piece of it.
+
 ## Architecture
 
 One EC2 host, Docker Compose, everything behind a single nginx so the whole app
@@ -159,19 +191,33 @@ cp .env.prod.example .env.prod
 nano .env.prod          # see below — GC_AUTH_SECRET and the two URLs
 ```
 
-`.env.prod` needs, at minimum:
+`.env.prod` needs three values. Generate the two secrets by RUNNING these and
+pasting what they print — do not paste the commands themselves:
 
 ```bash
-GC_AUTH_SECRET=$(node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))")
-PUBLIC_URL=http://<elastic-ip>
-DJANGO_SECRET_KEY=<50+ random chars>
+node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"   # GC_AUTH_SECRET
+node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"   # DJANGO_SECRET_KEY
 ```
+
+so that the file ends up holding literal values:
+
+```bash
+GC_AUTH_SECRET=xQ7f...           # the OUTPUT of the first command
+DJANGO_SECRET_KEY=9mKp...        # the OUTPUT of the second
+PUBLIC_URL=http://<elastic-ip>
+```
+
+> Compose reads `.env.prod` as data. It does no command substitution, so a
+> `$(...)` written into the file becomes the signing key verbatim — long enough
+> to pass every length check, identical on both services, so every token
+> verifies and the deploy is entirely healthy with a key that is printed in
+> this file. `scripts/deploy.sh` now refuses a `.env.prod` containing `$(`.
 
 Then bring it up and make yourself an account:
 
 ```bash
-docker compose -f docker/docker-compose.prod.yml up -d --build
-docker compose -f docker/docker-compose.prod.yml exec control \
+./scripts/gc up -d --build
+./scripts/gc exec control \
   python manage.py createsuperuser
 ```
 
@@ -221,7 +267,7 @@ curl -sI  http://<ip>/api/recording -X POST | head -1                     # 403 
 
 ```bash
 ssh -i cansee-deploy.pem ubuntu@<ip> \
-  'cd /opt/ghostclick && docker compose -f docker/docker-compose.prod.yml logs runner | head -20'
+  'cd /opt/ghostclick && ./scripts/gc logs runner | head -20'
 ```
 
 Look for these two lines. If `auth` says OFF, stop and fix it before anything
@@ -257,7 +303,7 @@ If all eight work, the deployment is good.
 ### 4 · Optional: the suite, on the host
 
 ```bash
-docker compose -f docker/docker-compose.prod.yml exec runner npm run check:all
+./scripts/gc exec runner npm run check:all
 ```
 
 20 checks, and slow — it drives real browsers. Worth doing once to prove the
@@ -272,7 +318,7 @@ is not is worse than one that admits the gap.
 
 **Verified here:**
 
-- `docker compose -f docker/docker-compose.prod.yml config` parses, resolves
+- `./scripts/gc config` parses, resolves
   every variable, and declares the three volumes.
 - The compose file **refuses to start with no `GC_AUTH_SECRET`** — that is not
   a comment, it is `${GC_AUTH_SECRET:?...}` and it fails the command.
@@ -348,12 +394,12 @@ From `/opt/ghostclick` on the host.
 
 | Task | Command |
 |---|---|
-| Runner logs | `docker compose -f docker/docker-compose.prod.yml logs -f runner` |
-| Control plane logs | `docker compose -f docker/docker-compose.prod.yml logs -f control` |
-| Restart the runner | `docker compose -f docker/docker-compose.prod.yml restart runner` |
+| Runner logs | `./scripts/gc logs -f runner` |
+| Control plane logs | `./scripts/gc logs -f control` |
+| Restart the runner | `./scripts/gc restart runner` |
 | Add an account | `... exec control python manage.py createsuperuser` |
 | Which origins are allowed | `cat .ghostclick/origins.json` |
-| Container status | `docker compose -f docker/docker-compose.prod.yml ps` |
+| Container status | `./scripts/gc ps` |
 | Memory, when it feels slow | `docker stats --no-stream` |
 
 ## Rolling back
@@ -362,11 +408,14 @@ No blue/green. Compose swaps containers only once the new image builds, so a
 failed build leaves the old one running.
 
 ```bash
-cd /opt/ghostclick
-git log --oneline -10
-git checkout <previous-good-sha>
-docker compose -f docker/docker-compose.prod.yml up -d --build
+EC2_HOST=<ip> bash scripts/deploy.sh rollback           # to the previous deploy
+EC2_HOST=<ip> bash scripts/deploy.sh rollback <sha>     # to a specific commit
 ```
+
+It records the sha it replaced before every deploy, resets to it, rebuilds and
+re-runs the same five smoke checks. Do not roll back by hand with
+`git checkout <sha>`: that leaves a detached HEAD, and the next deploy's branch
+lookup then resolves to the literal string `HEAD`.
 
 Both volumes survive a rollback. There are no destructive migrations in this
 app today — the control plane's schema is four columns — but that stops being

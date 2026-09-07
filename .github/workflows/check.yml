@@ -1,0 +1,96 @@
+# The twenty-one checks, on every push and pull request.
+#
+# It does NOT deploy. That is deliberate and worth stating: this stack has one
+# browser and one run lock, so recreating the runner mid-run kills somebody's
+# session with no error anywhere. A deploy is a thing a person does while
+# watching, which is why scripts/deploy.sh refuses when /healthz says busy.
+#
+# Because there is no deploy job there are no secrets here at all — no PEM, no
+# host, nothing to leak, and no reason to open port 22 to GitHub's ranges.
+name: checks
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The exact tag Dockerfile pins. If they ever drift, the browser this job
+    # runs against is not the browser production runs against, and this job is
+    # the cheapest place to notice.
+    container: mcr.microsoft.com/playwright:v1.63.0-noble
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - run: npm ci
+      # The three that need no browser, first, so a typo fails in seconds
+      # rather than after the suite has launched Chromium twenty times.
+      - run: npm run check:deploy
+      - run: npm run check:app
+      - run: npm run check:vocabulary
+      - run: npm run check:all
+        env:
+          # The theatrical pace is right for a demo and wrong for CI.
+          GC_PACE_MS: '0'
+
+  control-plane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -r auth/requirements.txt
+      - run: python manage.py test
+        working-directory: auth
+        env:
+          DJANGO_SECRET_KEY: not-a-real-key-just-for-tests-0123456789
+          GC_AUTH_SECRET: not-a-real-secret-just-for-tests-0123456789
+
+  images:
+    # Neither image has ever been through `docker build` — docs/DEPLOY.md says
+    # so in writing. This is what closes that.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: build the runner
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ghostclick-runner:ci
+          build-args: |
+            VITE_AUTH_URL=http://localhost
+            GC_GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: build the control plane
+        uses: docker/build-push-action@v6
+        with:
+          context: ./auth
+          push: false
+          load: true
+          tags: ghostclick-control:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: the pinned tag really does carry the browser this build wants
+        run: docker run --rm ghostclick-runner:ci node -e "console.log(require('playwright').chromium.executablePath())"
+      - name: and no secret rode in on the build context
+        run: |
+          set -e
+          for f in .env.prod .ghostclick/secrets.json auth/db.sqlite3; do
+            if docker run --rm --entrypoint sh ghostclick-runner:ci -c "test -e '/app/$f'"; then
+              echo "::error::$f is inside the image — check .dockerignore"; exit 1
+            fi
+          done
+          echo "no .env.prod, no vault, no account database in the image"
