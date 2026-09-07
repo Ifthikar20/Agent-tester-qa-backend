@@ -20,6 +20,12 @@
 # the box is worth keeping — see docs/DEPLOY.md, "Where this goes next".
 set -euo pipefail
 
+# Git Bash / MSYS rewrites any argument that looks like a unix path into a
+# Windows one before the program sees it, so `--names /aws/...` arrives as
+# `C:/...`. Nothing here wants that translation.
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL='*'
+
 REGION=${REGION:-${AWS_DEFAULT_REGION:-us-east-1}}
 NAME=${NAME:-ghostclick}
 TYPE=${TYPE:-t3.medium}
@@ -37,6 +43,67 @@ aws_() { aws --region "$REGION" "$@"; }
 command -v aws >/dev/null || die "no aws CLI on PATH"
 aws_ sts get-caller-identity >/dev/null 2>&1 || die "aws credentials are not working — run 'aws configure' or set AWS_PROFILE"
 ACCT=$(aws_ sts get-caller-identity --query Account --output text)
+WHO=$(aws_ sts get-caller-identity --query Arn --output text)
+
+# ---- preflight --------------------------------------------------------------
+#
+# Every permission this needs, tested before anything is created. Discovering
+# them one at a time is three round trips of "create half a thing, fail, clean
+# up" — and the first thing it creates is a key pair whose private half AWS
+# will never show again.
+#
+# Only the read calls can be tested without doing the thing. The writes are
+# listed in the policy below, which is what to attach when one of these fails.
+if [ "${SKIP_PREFLIGHT:-}" != "1" ]; then
+  MISSING=""
+  try() { # action, command...
+    local name=$1; shift
+    "$@" >/dev/null 2>&1 || MISSING="$MISSING $name"
+  }
+  try ec2:DescribeImages         aws_ ec2 describe-images --owners 099720109477 --filters Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-* --max-items 1
+  try ec2:DescribeVpcs           aws_ ec2 describe-vpcs --filters Name=isDefault,Values=true
+  try ec2:DescribeSecurityGroups aws_ ec2 describe-security-groups --max-items 1
+  try ec2:DescribeKeyPairs       aws_ ec2 describe-key-pairs
+  try ec2:DescribeInstances      aws_ ec2 describe-instances --max-items 1
+  try ec2:DescribeAddresses      aws_ ec2 describe-addresses
+
+  if [ -n "$MISSING" ]; then
+    cat >&2 <<POLICY
+
+  $WHO cannot:$MISSING
+
+  Attach this to that user (IAM > Users > Permissions > Add > Create inline
+  policy > JSON), then run this script again. It is scoped to EC2 — no IAM, no
+  SSM, nothing that can grant itself more.
+
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "ec2:DescribeImages", "ec2:DescribeVpcs", "ec2:DescribeSubnets",
+      "ec2:DescribeSecurityGroups", "ec2:DescribeSecurityGroupRules",
+      "ec2:DescribeKeyPairs", "ec2:DescribeInstances", "ec2:DescribeAddresses",
+      "ec2:DescribeInstanceStatus", "ec2:DescribeVolumes", "ec2:DescribeTags",
+      "ec2:CreateKeyPair", "ec2:CreateSecurityGroup",
+      "ec2:AuthorizeSecurityGroupIngress", "ec2:CreateTags",
+      "ec2:RunInstances", "ec2:TerminateInstances",
+      "ec2:AllocateAddress", "ec2:AssociateAddress",
+      "ec2:DisassociateAddress", "ec2:ReleaseAddress",
+      "ec2:ModifyInstanceMetadataOptions", "ec2:DeleteSecurityGroup"
+    ],
+    "Resource": "*"
+  }]
+}
+
+  If you would rather not widen that user, any admin credentials work for this
+  one script: AWS_PROFILE=<admin> bash scripts/aws-up.sh
+
+POLICY
+    exit 1
+  fi
+fi
+
 
 MY_IP=$(curl -s -m 10 https://checkip.amazonaws.com || true)
 [ -n "$MY_IP" ] || die "could not determine your public IP (needed for the SSH rule)"
@@ -90,9 +157,21 @@ if [ "$SG" = "None" ]; then
         --description "ghostclick: ssh from one address, http from the demo audience" \
         --query GroupId --output text)
 fi
-auth() { aws_ ec2 authorize-security-group-ingress --group-id "$SG" \
-           --ip-permissions "IpProtocol=tcp,FromPort=$1,ToPort=$1,IpRanges=[{CidrIp=$2,Description=\"$3\"}]" \
-           >/dev/null 2>&1 || true; }
+# Swallowing only the duplicate. A rule that failed to be created for any
+# other reason — no permission, most likely — must not pass silently: the
+# symptom is an ssh that hangs for four minutes with nothing to point at.
+auth() {
+  local out
+  if out=$(aws_ ec2 authorize-security-group-ingress --group-id "$SG" \
+            --ip-permissions "IpProtocol=tcp,FromPort=$1,ToPort=$1,IpRanges=[{CidrIp=$2,Description=\"$3\"}]" 2>&1); then
+    return 0
+  fi
+  case "$out" in
+    *InvalidPermission.Duplicate*) return 0 ;;
+    *) die "could not open port $1 to $2:
+    $(echo "$out" | tail -2)" ;;
+  esac
+}
 auth 22 "$SSH_CIDR" "deploys from the operator's laptop"
 auth 80 "$HTTP_CIDR" "the app"
 ok "security group $SG"
@@ -106,10 +185,28 @@ if [ "$EXISTING" != "None" ] && [ -n "$EXISTING" ]; then
   ID=$EXISTING
   step "reusing running instance $ID"
 else
-  AMI=$(aws_ ssm get-parameters \
-    --names /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id \
-    --query 'Parameters[0].Value' --output text)
-  [ "$AMI" != "None" ] || die "could not resolve the Ubuntu 24.04 AMI"
+  # Asked of EC2, not SSM. The published SSM parameter is the tidier lookup,
+  # but it needs ssm:GetParameters — a permission an EC2 deploy user has no
+  # other reason to hold — and its name begins with a slash, which Git Bash
+  # rewrites into a Windows path before the CLI ever sees it. Between them
+  # that is two failures for a value describe-images already knows.
+  #
+  # 099720109477 is Canonical. Pinning the owner is the security half: image
+  # NAMES are not reserved, so filtering on the name alone would let anyone
+  # who published a lookalike choose the operating system this box boots.
+  if [ -z "${AMI:-}" ]; then
+    step "finding the latest Ubuntu 24.04 image"
+    for pattern in \
+      'ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*' \
+      'ubuntu/images/hvm-ssd/ubuntu-noble-24.04-amd64-server-*'; do
+      AMI=$(aws_ ec2 describe-images --owners 099720109477 \
+              --filters "Name=name,Values=$pattern" Name=state,Values=available \
+                        Name=architecture,Values=x86_64 \
+              --query 'sort_by(Images, &CreationDate)[-1].ImageId' --output text 2>/dev/null || echo None)
+      [ "$AMI" != "None" ] && [ -n "$AMI" ] && break
+    done
+  fi
+  [ "${AMI:-None}" != "None" ] && [ -n "${AMI:-}" ] || die "could not resolve an Ubuntu 24.04 AMI — pass one with AMI=ami-xxxxxxxx bash scripts/aws-up.sh"
   step "launching $TYPE from $AMI"
   ID=$(aws_ ec2 run-instances \
     --image-id "$AMI" --instance-type "$TYPE" --key-name "$KEY_NAME" --security-group-ids "$SG" \
