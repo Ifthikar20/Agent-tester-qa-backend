@@ -6,3 +6,9 @@ node_modules/
 # The Vue build IS committed (web/dist) so `npm start` needs no bundler,
 # and it belongs to the frontend project rather than the backend's tree.
 web/node_modules/
+
+# Suites the checks create. Real ones belong in git — that is the point of
+# suites/ — but a check that leaves "Check console other" behind puts an
+# untracked file in every `git status` forever, and noise you learn to scroll
+# past is how a real change gets committed without being read.
+suites/check-*.json

@@ -818,7 +818,25 @@ await recorder.attach();
 // through the page's own ordered event channel, not from here — watching
 // navigation separately filed clicks after the transitions they caused.
 page.on('framenavigated', (f) => {
-  if (f === page.mainFrame()) publishTargets();
+  if (f !== page.mainFrame()) return;
+  /**
+   * The address first, and on its own.
+   *
+   * There is no browser chrome here — the canvas is a video — so the URL bar in
+   * the console is the ONLY way to know what you are looking at. It used to
+   * arrive as a field on the `targets` event, which is emitted after
+   * discovery has taken an aria snapshot of the whole page. That is hundreds of
+   * milliseconds on a real site, during which the console showed the previous
+   * address: you watch a redirect happen on the canvas and the bar still says
+   * where you came from.
+   *
+   * Reading page.url() costs nothing, so it goes out immediately and discovery
+   * follows when it is ready. This also covers the navigations that produce no
+   * document at all — a pushState or a hash change in an SPA — which have no
+   * response, so the NavigationLog never sees them.
+   */
+  emit({ t: 'url', url: page.url() });
+  publishTargets();
 });
 
 const home = homeUrl();

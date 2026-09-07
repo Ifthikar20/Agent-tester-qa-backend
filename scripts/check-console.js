@@ -21,6 +21,7 @@
  *     this is.
  */
 import { chromium } from 'playwright';
+import WebSocket from 'ws';
 
 const API = process.env.BASE_URL || 'http://localhost:3000';
 const APP = `${API}/app`;
@@ -460,6 +461,102 @@ if (!printed.includes('hunter2-but-from-a-vault') && /\$QA_PASS/.test(printed)) 
 await fetch(`${API}/api/suites/${sid}`, { method: 'DELETE' }).catch(() => {});
 await fetch(`${API}/api/suites/${other}`, { method: 'DELETE' }).catch(() => {});
 
+console.log('\n— 8 · the address bar the canvas does not have ————————');
+
+/**
+ * The canvas is a video, so it has no chrome. You can watch a page navigate
+ * somewhere else and have no way to learn where — and the navigations worth
+ * seeing are the ones nobody asked for: a login that bounces to an identity
+ * provider on another domain, a link that detours through a tracker, a 301 to
+ * a path that is now a friendly 404.
+ *
+ * So the bar has to answer three things, and the third is the one that matters:
+ * where am I, how did I get here, and did it leave the site I started on.
+ */
+await page.goto(`${APP}/console`, { waitUntil: 'networkidle' });
+await page.locator('textarea').last().waitFor();
+
+const bar = page.locator('div.rounded-t-xl').first();
+const openUrl = async (u) => {
+  await page.getByLabel('URL to open').fill(u);
+  await page.getByRole('button', { name: 'Open' }).click();
+  await page.waitForFunction((want) => {
+    const el = document.querySelector('div.rounded-t-xl');
+    return el && el.innerText.includes(want);
+  }, u.replace(/^https?:\/\//, '').split('?')[0], { timeout: 20000 }).catch(() => {});
+};
+
+// A plain page: the address, and nothing invented around it.
+await openUrl(`${API}/demo.html`);
+let text = await bar.innerText();
+if (/localhost:3000\/demo\.html/.test(text)) ok('the bar says where the runner is', text.split('\n')[0]);
+else bad('the bar says where the runner is', text.replace(/\n/g, ' | ').slice(0, 70));
+if (!/redirect|left /.test(text)) ok('and claims no redirect when there was none');
+else bad('and claims no redirect when there was none', text.replace(/\n/g, ' | '));
+
+/**
+ * Two hops to somewhere else on the same site. The final URL alone cannot tell
+ * you it took a detour, which is exactly why the count is shown.
+ */
+await openUrl(`${API}/go/tracked`);
+text = await bar.innerText();
+if (/pricing\.html/.test(text)) ok('it follows a redirect to where it landed', 'not where it was sent');
+else bad('it follows a redirect to where it landed', text.replace(/\n/g, ' | ').slice(0, 70));
+if (/2 redirects/.test(text)) ok('and says how many hops it took', '2 redirects');
+else bad('and says how many hops it took', text.replace(/\n/g, ' | ').slice(0, 70));
+
+// The chain itself, with the status each hop answered. "It works" and "it works
+// after two 302s" are different facts about a link.
+await bar.getByRole('button', { name: /redirect/ }).click();
+const chain = await bar.innerText();
+const hops = ['go/tracked', 'go/r?to=/pricing.html', 'pricing.html'].filter((h) => chain.includes(h));
+if (hops.length === 3 && /302/.test(chain) && /200/.test(chain)) {
+  ok('and can show every hop, with its status', '302 → 302 → 200');
+} else bad('and can show every hop, with its status', chain.replace(/\n/g, ' | ').slice(0, 90));
+
+/**
+ * The address arrives before the page has been examined.
+ *
+ * Both `url` and `targets` carry it, but `targets` is emitted after discovery
+ * has taken an aria snapshot of the whole page — hundreds of milliseconds on a
+ * real site, during which the bar would still read the address you came FROM.
+ * You would watch a redirect happen on the canvas and be told the old URL.
+ *
+ * Ordering rather than timing, so this asserts the actual claim without being
+ * a stopwatch: whichever of the two arrives first must be the cheap one.
+ */
+const socket = new WebSocket(API.replace(/^http/, 'ws'));
+const arrivals = [];
+socket.on('message', (d, isBinary) => {
+  if (isBinary) return;
+  const ev = JSON.parse(d);
+  if (ev.t === 'url' || ev.t === 'targets') arrivals.push({ t: ev.t, url: ev.url });
+});
+await new Promise((r) => { socket.on('open', r); socket.on('error', r); });
+
+arrivals.length = 0;
+await openUrl(`${API}/results.html`);
+await new Promise((r) => setTimeout(r, 1500));
+socket.close();
+
+const forPage = arrivals.filter((a) => (a.url ?? '').includes('/results.html'));
+if (forPage.length >= 2) ok('both the address and the page contents arrive', forPage.map((a) => a.t).join(' then '));
+else bad('both the address and the page contents arrive', JSON.stringify(arrivals.slice(-4)));
+if (forPage[0]?.t === 'url') ok('and the address comes first', 'not after discovery');
+else bad('and the address comes first', `${forPage[0]?.t ?? 'nothing'} arrived first — the bar would lag`);
+
+/**
+ * The one that is not cosmetic. A redirect onto another host is how a run ends
+ * up somewhere nobody allowed, and a host is not something you notice in a
+ * truncated URL — so it is named rather than left to be read.
+ */
+await openUrl(`${API}/go/offsite`);
+text = await bar.innerText();
+if (/127\.0\.0\.1:3000/.test(text)) ok('a hop to another host shows that host', '127.0.0.1:3000');
+else bad('a hop to another host shows that host', text.replace(/\n/g, ' | ').slice(0, 70));
+if (/left localhost:3000/.test(text)) ok('and says which one it left', 'left localhost:3000');
+else bad('and says which one it left', text.replace(/\n/g, ' | ').slice(0, 70));
+
 await browser.close();
 console.log(failures
   ? `\n  ${failures} FAILED\n`
@@ -467,5 +564,6 @@ console.log(failures
     '       before it can, the wheel reaches the page you are driving, and a\n' +
     '       saved case can be picked up and run from here — including one\n' +
     '       recorded after a redirect that left the origin. What the driven\n' +
-    '       page printed is here too, with vault values redacted.\n');
+    '       page printed is here too, with vault values redacted, and the\n' +
+    '       address bar says where the runner is and what it went through.\n');
 process.exit(failures ? 1 : 0);
