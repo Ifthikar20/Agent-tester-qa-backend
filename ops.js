@@ -376,9 +376,11 @@ export const OPS = {
       if (landed !== new URL(step.url).origin && !origins.has(landed)) {
         ctx.emit?.({ t: 'needs.origin', origin: landed, url: page.url(), redirected: true });
         ctx.emit?.({
-          t: 'log', level: 'error',
+          t: 'log', level: 'warn',
           msg: `${step.url} redirected to ${landed}, which is not allowed. ` +
-               `Anything recorded here will not replay until you allow it.`,
+               `A recording made here starts from the URL you asked for, so it ` +
+               `replays the redirect — allow ${landed} only if you want to point ` +
+               `at it directly.`,
         });
       }
     } catch { /* not a parseable URL; nothing to compare */ }

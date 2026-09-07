@@ -110,22 +110,29 @@ function gate(res, origin) {
  * "Am I on the latest?" should be answerable by looking, not by remembering
  * whether you pulled. The commit is read straight out of .git rather than
  * shelling out, so it works where git is not on PATH.
+ *
+ * The commit and the start time are fixed for this process. The BUILD time is
+ * not: express serves public/app off disk, so a `vite build` in another
+ * terminal changes what the browser gets without this process noticing. Read
+ * at boot, the stamp then claims a UI older than the one being served — a
+ * version stamp that is confidently wrong is worse than none, since its entire
+ * job is to be trusted at a glance.
  */
-const version = (() => {
+const identity = (() => {
   const read = (p) => { try { return readFileSync(fileURLToPath(new URL(p, import.meta.url)), 'utf8').trim(); } catch { return null; } };
   let commit = null;
   const head = read('./.git/HEAD');
   if (head?.startsWith('ref: ')) commit = read(`./.git/${head.slice(5)}`);
   else if (head) commit = head;
-  let built = null;
-  try { built = statSync(APP).mtime.toISOString(); } catch { /* not built */ }
   return {
     commit: commit ? commit.slice(0, 7) : null,
-    built,
     started: new Date().toISOString(),
   };
 })();
-app.get('/api/version', (_req, res) => res.json(version));
+const buildTime = () => {
+  try { return statSync(APP).mtime.toISOString(); } catch { return null; }   // not built
+};
+app.get('/api/version', (_req, res) => res.json({ ...identity, built: buildTime() }));
 
 app.get('/api/state', (_req, res) => res.json({
   url: page?.url() ?? null,
@@ -388,6 +395,11 @@ app.post('/api/recording', (req, res) => {
 app.get('/go/tracked', (_req, res) => res.redirect(302, '/go/r?to=/pricing.html'));
 app.get('/go/r', (req, res) => res.redirect(302, String(req.query.to || '/')));
 app.get('/go/moved', (_req, res) => res.redirect(301, '/go/moved-again'));
+// Leaves the origin, the way http://acme.com → https://www.acme.com does. The
+// host differs, so the browser follows it quite legitimately and lands
+// somewhere nobody allowed.
+app.get('/go/offsite', (_req, res) =>
+  res.redirect(302, `http://127.0.0.1:${process.env.PORT || 3000}/demo.html`));
 app.get('/go/moved-again', (_req, res) => res.redirect(302, '/pricing.html'));
 app.get('/go/gone', (_req, res) => res.status(404).send(
   '<!doctype html><title>Not found</title><h1>Page not found</h1>' +
@@ -443,8 +455,8 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  patience    ->  waits ${Number(process.env.GC_TIMEOUT_MS) || 8000}ms for a target, ` +
             `settles ${Number(process.env.GC_SETTLE_MS) || 250}ms after a click ` +
             `(GC_TIMEOUT_MS, GC_SETTLE_MS)` +
-            `\n  version     ->  ${version.commit ?? 'unknown'}` +
-            `${version.built ? `, ui built ${version.built.replace('T', ' ').slice(0, 16)}` : ', ui NOT BUILT'}\n`);
+            `\n  version     ->  ${identity.commit ?? 'unknown'}` +
+            `${buildTime() ? `, ui built ${buildTime().replace('T', ' ').slice(0, 16)}` : ', ui NOT BUILT'}\n`);
 
 // ---------------------------------------------------------------- browser
 /**
@@ -522,6 +534,29 @@ const nav = new NavigationLog(page, {
   },
 });
 nav.attach();
+
+/**
+ * Where a recording should say it begins: the URL you ASKED for, not the one a
+ * redirect left you on.
+ *
+ * You type strix.ai/enterprise; it 307s to https://www.strix.ai/enterprise,
+ * which is a different origin — different host, different scheme — and one
+ * nobody allowed. Recording the landing URL produces a case whose very first
+ * step is blocked by the origin gate, so it can never be saved and could never
+ * replay. Recording the URL you asked for replays the redirect instead, which
+ * is both what you meant and the only version that runs.
+ *
+ * Only when the chain really is this document's: an SPA route change pushes a
+ * new URL without navigating, and the last chain would then belong to the
+ * document load before it — taking hops[0] there would quietly drop the route
+ * you are standing on.
+ */
+function entryUrl(page) {
+  const here = page.url();
+  const n = nav.summary();
+  const asked = n.hops[0]?.url;
+  return n.redirects > 0 && n.url === here && asked ? asked : here;
+}
 
 // Teach mode. Canvas clicks reach the page as real DOM events, so the same
 // listener sees a human demonstrating and would see the executor replaying —
@@ -747,7 +782,7 @@ wss.on('connection', (ws) => {
       // Fingerprint where the recording begins, so replay can tell you when the
       // entry URL does not actually get you back here.
       const entry = await discover(page).then((i) => i.map((t) => t.target)).catch(() => []);
-      const steps = recorder.start(page.url(), entry);
+      const steps = recorder.start(entryUrl(page), entry);
       emit({ t: 'record.state', on: true });
       emit({ t: 'recorded', step: steps[0], count: steps.length,
              flow: toFlow({ suite: 'Recorded flow', steps }) });

@@ -369,6 +369,83 @@ const atEnd = (await page.locator('textarea').last().inputValue()).match(/-->/g)
 if (atEnd > atStart) ok('it grows as you demonstrate', `${atStart} edges → ${atEnd}`);
 else bad('it grows as you demonstrate', `stuck at ${atEnd} edges`);
 
+// ---------------------------------------------------------------------------
+console.log('\n— 6 · a recording that began with a redirect ———————');
+
+/**
+ * You type acme.com and the site sends you to https://www.acme.com — a
+ * different host, often a different scheme, and an origin nobody allowed.
+ *
+ * The recording used to say it began where the redirect LANDED, which made it
+ * unsaveable: the case is validated on the way in with the same gate the
+ * executor uses, so step 0 was refused as an origin that is not allowed. The
+ * button appeared to do nothing, because the refusal rendered at the bottom of
+ * a long scrolling page. Two symptoms, one cause.
+ *
+ * It records the URL you ASKED for now, so replaying re-does the redirect.
+ */
+const redirected = (await post('/api/suites', { name: 'Check console redirect', baseUrl: API })).suite.id;
+
+await page.goto(`${APP}/console?suite=${redirected}`, { waitUntil: 'networkidle' });
+await page.locator('textarea').last().waitFor();
+await page.getByPlaceholder('localhost:3000/demo.html').fill(`${API}/go/offsite`);
+await page.getByRole('button', { name: 'Open' }).click();
+await page.waitForTimeout(3000);
+
+await page.getByRole('button', { name: '● Record' }).click();
+await page.getByRole('button', { name: '■ Stop' }).waitFor();
+await page.waitForTimeout(500);
+const rb = await page.locator('canvas').boundingBox();
+await page.mouse.move(rb.x + rb.width * 0.5, rb.y + rb.height * 0.3);
+await page.mouse.click(rb.x + rb.width * 0.5, rb.y + rb.height * 0.3);
+await page.waitForTimeout(900);
+await page.getByRole('button', { name: '■ Stop' }).click();
+await page.waitForTimeout(900);
+
+// The recording's entry, read off the read-only box in the Recording card.
+const recorded = await page.locator('textarea').first().inputValue();
+const entryUrl = recorded.match(/n0\(\("([^"]+)"\)\)/)?.[1] ?? '(none)';
+if (entryUrl.includes('/go/offsite')) ok('it starts from the link you asked for', entryUrl);
+else bad('it starts from the link you asked for', entryUrl);
+
+// And therefore it can be stored at all.
+await page.getByPlaceholder('Sign in works').fill('Offsite recording');
+await page.getByRole('button', { name: 'Save as a case' }).click();
+await page.waitForTimeout(1500);
+
+const stored = (await (await fetch(`${API}/api/cases`)).json()).cases
+  .filter((c) => c.suiteId === redirected);
+if (stored.length) ok('and saving it actually stores it', stored[0].name);
+else bad('and saving it actually stores it', 'nothing in /api/cases');
+
+// Saved means selectable — the picker is where you go back for it.
+await page.waitForTimeout(400);
+const options = (await page.locator('select option').allTextContents()).map((t) => t.trim());
+if (options.some((t) => t.startsWith('Offsite recording'))) ok('and it is in the saved-case picker');
+else bad('and it is in the saved-case picker', options.slice(0, 3).join(' | ') || '(no options)');
+
+const card = () => page.locator('section').filter({ hasText: 'Save into this suite' }).first();
+if (/Saved/.test(await card().innerText())) ok('and says so beside the button');
+else bad('and says so beside the button', (await card().innerText()).replace(/\s+/g, ' ').slice(0, 70));
+
+/**
+ * And a REFUSAL has to appear there too. It used to set the page-level error,
+ * which renders below the log at the bottom of a long scrolling page — indoor
+ * plumbing for a message whose entire job is to be read. A save that is
+ * refused and says nothing is indistinguishable from a dead button, which is
+ * exactly how this was reported.
+ *
+ * Forced by deleting the suite behind the UI's back: a real refusal down the
+ * real path, with nothing stubbed.
+ */
+await fetch(`${API}/api/suites/${redirected}`, { method: 'DELETE' });
+await page.getByPlaceholder('Sign in works').fill('Into a suite that is gone');
+await page.getByRole('button', { name: 'Save as a case' }).click();
+await page.waitForTimeout(1200);
+const refused = await card().innerText();
+if (/no suite|not found|unknown/i.test(refused)) ok('and a refusal is shown there as well', refused.split('\n').at(-1)?.slice(0, 44));
+else bad('and a refusal is shown there as well', refused.replace(/\s+/g, ' ').slice(0, 70));
+
 await fetch(`${API}/api/suites/${sid}`, { method: 'DELETE' }).catch(() => {});
 await fetch(`${API}/api/suites/${other}`, { method: 'DELETE' }).catch(() => {});
 
@@ -377,5 +454,6 @@ console.log(failures
   ? `\n  ${failures} FAILED\n`
   : '\n  OK — the canvas paints when you arrive, says what it is waiting for\n' +
     '       before it can, the wheel reaches the page you are driving, and a\n' +
-    '       saved case can be picked up and run from here.\n');
+    '       saved case can be picked up and run from here — including one\n' +
+    '       recorded after a redirect that left the origin.\n');
 process.exit(failures ? 1 : 0);

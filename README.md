@@ -453,6 +453,73 @@ turns out to be true:
 Each of those is a real gap, not a subtlety. If your flow needs one, say so and
 it becomes an op.
 
+## A version stamp that was confidently wrong
+
+The sidebar shows the commit and when the UI was built, so "am I on the latest?"
+is answerable by looking. Both were read once, at boot.
+
+The commit is fine that way. The build time is not: express serves `public/app`
+straight off disk, so a `vite build` in another terminal changes what the
+browser gets without this process noticing. The stamp then reports a UI older
+than the one it is actually serving — and a version stamp that is confidently
+wrong is worse than no stamp at all, because its entire job is to be trusted at
+a glance.
+
+The commit and the start time stay fixed for the process; the build time is
+`stat`ed per request. `check:freshness` already asserted the build is not older
+than its source and caught this the moment a rebuild happened mid-session.
+
+## A recording that began with a redirect
+
+You type `strix.ai/enterprise`. The site 307s to `https://www.strix.ai/enterprise`
+— different host, different scheme, a **different origin**, and one nobody
+allowed. The browser follows it quite legitimately and everything looks fine.
+
+The recording used to say it began where the redirect *landed*. That made it
+unstorable: a case is validated on the way in with the same gate the executor
+uses, so step 0 was refused as an origin that is not allowed, and the case was
+never written. Which is how it was reported — **"why does my saved recording not
+appear under saved cases?"** It was never saved. The refusal was real, and it was
+rendering at the bottom of a long scrolling page, well below the button that
+caused it, so pressing Save looked exactly like pressing a dead button.
+
+Two symptoms, one cause, and the fix is the obvious one once you see it: record
+the URL you **asked for**, so replaying re-does the redirect rather than needing
+permission for wherever it ends up.
+
+```js
+function entryUrl(page) {
+  const here = page.url();
+  const n = nav.summary();
+  const asked = n.hops[0]?.url;
+  return n.redirects > 0 && n.url === here && asked ? asked : here;
+}
+```
+
+The `n.url === here` guard matters. An SPA route change pushes a new URL without
+navigating, so the last chain belongs to the document load *before* it — taking
+`hops[0]` there would quietly drop the route you are standing on.
+
+`navlog` had been computing `leftOrigin` for exactly this case, with a comment
+saying it "is how you end up with a recording whose entry URL was never allowed."
+The diagnosis was already written down. Nothing acted on it.
+
+The warning you get is now accurate about what will happen, rather than
+threatening a failure that no longer occurs — and it is a warning, in amber,
+not an error in red:
+
+> `http://acme.com/x` redirected to `https://www.acme.com`, which is not allowed.
+> A recording made here starts from the URL you asked for, so it replays the
+> redirect — allow `https://www.acme.com` only if you want to point at it directly.
+
+**And a refusal now appears beside the button that caused it.** `check:console`
+section 6 covers both: it records through a real cross-origin redirect
+(`/go/offsite`), asserts the entry is the URL asked for, that the case is really
+in `/api/cases` and in the picker, and — by deleting the suite behind the UI's
+back — that a genuine refusal is rendered in the card rather than off-screen.
+Reverting the entry fix turns four of those red; reverting the message placement
+turns the fifth red on its own.
+
 ## example.com is not www.example.com
 
 You allow `strix.ai`. The site redirects to `https://www.strix.ai`. Different
