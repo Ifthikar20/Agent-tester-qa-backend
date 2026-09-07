@@ -1409,6 +1409,9 @@ silently inside someone else's docs.
 | `auth/accounts/tokens.py` | mints the HS256 token the runner accepts, stdlib only |
 | `auth.js` | verifies it — verify-only, so the runner cannot authorise itself |
 | `docs/BOUNDARY.md` | the four rules that keep frontend and backend separable |
+| `docs/DEPLOY.md` | putting it on AWS, and why auth is not optional once you do |
+| `Dockerfile`, `docker/` | the runner image, the compose stack, nginx |
+| `scripts/deploy.sh` | deploy from your laptop; refuses without a real auth secret |
 | `public/demo.html` | Meridian — truncates a username to 16 chars |
 | `public/shop.html` | Nimbus — cart total ignores quantity |
 | `public/menu.html` | Aperture — a dropdown that only exists on hover |

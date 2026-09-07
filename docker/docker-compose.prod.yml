@@ -1,0 +1,75 @@
+# ghostclick in production shape: one runner, one control plane, one nginx.
+#
+#   docker compose -f docker/docker-compose.prod.yml up -d --build
+#
+# Read docs/DEPLOY.md first. The short version: GC_AUTH_SECRET is not optional
+# on a host anyone else can reach, and both volumes below are load-bearing.
+
+name: ghostclick
+
+services:
+  runner:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        # Baked into the bundle, so changing it rebuilds the image. Same value
+        # as GC_WEB_ORIGIN — one origin, see docker/nginx.conf.
+        VITE_AUTH_URL: ${PUBLIC_URL}
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      # The gate. Unset means the runner is open, and it says so at boot —
+      # scripts/deploy.sh refuses to deploy without it.
+      GC_AUTH_SECRET: ${GC_AUTH_SECRET:?set GC_AUTH_SECRET in .env.prod}
+      GC_WEB_ORIGIN: ${PUBLIC_URL}
+      # Nobody is watching a replay on a remote host through a browser tab, so
+      # the performance is wasted here. Drop it to 250 if you want to watch.
+      GC_PACE_MS: ${GC_PACE_MS:-250}
+      GC_TIMEOUT_MS: ${GC_TIMEOUT_MS:-8000}
+      GC_SETTLE_MS: ${GC_SETTLE_MS:-250}
+    volumes:
+      # Run history, the ORIGIN ALLOWLIST, the vault, the shared secret. Without
+      # this every deploy forgets which origins were allowed and regenerates the
+      # secret, which logs everyone out.
+      - ghostclick-state:/app/.ghostclick
+    # Chromium is told --disable-dev-shm-usage so it does not need a big /dev/shm,
+    # but headroom here is cheap and a starved browser fails in confusing ways.
+    shm_size: 512mb
+    expose: ["3000"]
+
+  control:
+    build:
+      context: ../auth
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DJANGO_DEBUG: "0"
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env.prod}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-*}
+      DJANGO_DB_PATH: /app/db/db.sqlite3
+      # The same key the runner verifies with. If these two ever differ, every
+      # token is a "bad signature" and it reads as a broken login.
+      GC_AUTH_SECRET: ${GC_AUTH_SECRET:?set GC_AUTH_SECRET in .env.prod}
+      GC_WEB_ORIGIN: ${PUBLIC_URL}
+      GC_TOKEN_TTL: ${GC_TOKEN_TTL:-600}
+    volumes:
+      - control-db:/app/db
+      - control-static:/app/staticfiles
+    expose: ["8000"]
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on: [runner, control]
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # Django's admin CSS, collected by the deploy script.
+      - control-static:/app/staticfiles:ro
+
+volumes:
+  ghostclick-state:
+  control-db:
+  control-static:
