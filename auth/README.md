@@ -9,9 +9,11 @@ services with an opinion about the same rule is how a hard gate quietly becomes
 advisory, and the gate here decides where a real browser is pointed.
 
 The design it is being built towards is [docs/AUTH.md](../docs/AUTH.md). This
-directory is at the **foundation** step of that document's build order: the
-settings profile, hashing, the audit log, the session clocks, and the stores
-and edge that the later steps stand on.
+directory is at the **tenants** step of that document's build order: the
+foundation (settings profile, hashing, the audit log, the session clocks, the
+stores and edge) plus organisations, roles, invitations and entitlements —
+the control-plane half of §10. The runner does not read the organisation
+claims yet; that is the runner-tenancy step.
 
 ## Why Django
 
@@ -144,13 +146,97 @@ EC2_HOST=<ip> bash scripts/adduser.sh qa@example.com   # the box
 | `GET /auth/csrf` | a CSRF token the SPA echoes in `X-CSRFToken` |
 | `POST /auth/login` | email + password → a session cookie, and the rotated CSRF token |
 | `POST /auth/logout` | |
-| `GET /auth/me` | who am I |
+| `GET /auth/me` | who am I, and for which organisation |
+| `POST /auth/org` | `{org}` — act for another organisation this session, after a membership check |
+| `GET /auth/invitations` | the selected organisation's invitations (owner or admin) |
+| `POST /auth/invitations` | `{email, role}` — issue one; the token is in the answer, once |
+| `DELETE /auth/invitations/<id>` | revoke one |
+| `POST /auth/invitations/accept` | `{token}` — become a member, signed in as the invited address |
 | `POST /auth/executor-token` | a short-lived signed token the **runner** will accept |
-| `/admin/` | Django's admin — where accounts are made; the edge admits it only from `GC_ADMIN_CIDRS` |
+| `/admin/` | Django's admin — where accounts, plans and organisations are managed; the edge admits it only from `GC_ADMIN_CIDRS` |
 
 `/auth/login` returns a new `csrfToken` because Django rotates it on sign-in.
 Without handing the new one back, the SPA's very next POST is a 403 — sign-in
-appears to work and everything after it fails.
+appears to work and everything after it fails. It also returns everything
+`/auth/me` would, so the SPA does not need a second round trip:
+
+```json
+{ "user": {"id": 1, "email": "ada@acme.example", "name": "Ada"},
+  "org": {"slug": "acme", "name": "Acme", "role": "admin", "personal": false, "plan": "team"},
+  "orgs": [{"slug": "ada", "name": "Ada", "role": "owner", "personal": true, "plan": "free"}, "…"],
+  "entitlements": {"suites.max": 25, "runs.per_day": 500, "origins.max": 20, "vault.enabled": true,
+                   "history.retention_days": 90, "members.max": 10, "mfa.required": false},
+  "mfa": {"required": false, "enrolled": false}, "flags": {} }
+```
+
+There is no `isStaff`. Staff is a control-plane fact that opens `/admin/`,
+and a flag shown to the browser is a flag the browser can show itself; nothing
+that decides what someone may do is ever derived from what they were told.
+
+## Organisations, roles, entitlements
+
+`tenants/` is the control-plane half of docs/AUTH.md §10.
+
+**Every account has a personal organisation**, made by a receiver on user
+creation — so it does not matter whether the account came from
+`createsuperuser`, `adduser`, the admin or a sign-up flow — and on plan
+`free` with the user as `owner`. The migration that introduced organisations
+made one for every account that already existed; `manage.py personal_orgs`
+does the same for a database restored from before the rule, and does nothing
+on a healthy one. The slug is the local part of the email (`ada`, then
+`ada-2` on a clash), because the domain is the half of an address people do
+not expect to see published, and it has to be a directory name on the runner.
+
+**The session holds the selected organisation** as a slug, and the
+membership row is looked up again every time it is used — `/auth/me`, the
+token, an invitation. A membership removed an hour ago stopped working an
+hour ago, and editing the session cannot put you somewhere you are not.
+`POST /auth/org` switches after the same check; nothing anywhere takes an
+organisation from a request body for authorisation.
+
+**Roles** are `owner`, `admin`, `member`, and they come from `Membership`
+and nowhere else. Invitations carry a role, and the cap is the rule that
+matters `[authz-tenancy-5]`: an inviter never grants above their own role,
+and only an owner grants `admin` or `owner` — so an admin can only ever add
+members, and the set of people who can manage an organisation grows only by
+an owner's hand.
+
+**Invitations** are `token_urlsafe(32)`, stored as a SHA-256 and looked up
+by it, bound to an email, good for seven days, single-use, and consumed only
+by a signed-in user holding that address. An invitation therefore never
+creates an account or a session; it turns an existing identity into a
+membership `[credentials-6]`. Acceptance is rate limited per client address
+(`GC_ACCEPT_RATE`, in `accounts/ratelimit.py`, counting in the same Redis the
+production profile insists on), every attempt is an `AuthEvent` with the
+real reason, and the client sees one sentence for every refusal — "wrong
+email" versus "no such token" is a way to learn who was invited. The raw
+token is returned once to the inviter; mailing it is the accounts step's.
+
+**Entitlements** resolve as `{**plan.entitlements, **org.entitlement_overrides}`
+over the keys in `tenants/plans.py`. Three plans are seeded:
+
+| | free | team | enterprise |
+|---|---|---|---|
+| `suites.max` | 3 | 25 | unlimited |
+| `runs.per_day` | 20 | 500 | unlimited |
+| `origins.max` | 2 | 20 | unlimited |
+| `vault.enabled` | no | yes | yes |
+| `history.retention_days` | 7 | 90 | 365 |
+| `members.max` | 1 | 10 | unlimited |
+| `mfa.required` | no | no | yes |
+
+Unlimited is `null`, not a sentinel. `entitlements_version` on the
+organisation is bumped whenever the resolved answer could change — an
+override edited, the plan switched, or the plan itself edited (which bumps
+every organisation on it) — and rides in the token as `ent_v`, so the runner
+can tell a downgrade from a token that simply has not expired yet. Only the
+five keys the runner enforces go in the token; `members.max` is enforced
+here (at issue and again at acceptance, since the plan may have shrunk in
+between) and `mfa.required` is the MFA step's.
+
+In the admin, `is_superuser` and `user_permissions` are read-only unless you
+are a superuser: read-only fields are dropped from the form, so a posted
+value is ignored rather than merely hidden `[authz-tenancy-6]`.
 
 ## The two credentials
 
@@ -178,10 +264,16 @@ matters is a token crossing between them — that is in
 holds only public keys, is the token step of docs/AUTH.md and has not happened
 yet: `GC_AUTH_SECRET` is still shared.)
 
+The claims are `sub`, `email`, `scope`, `iat`, `exp`, and since the tenants
+step `org`, `role`, `ent` and `ent_v`: the session's selected organisation,
+the role from its `Membership` row, the runner-enforced entitlements and
+their version. They are copied from the database into the signature; the
+runner reads them from the token and from nothing else.
+
 ## Tests
 
 ```bash
-python manage.py test          # 67 tests, one module per concern in accounts/tests/
+python manage.py test          # 162 tests, one module per concern in accounts/tests/ and tenants/tests/
 ```
 
 They never touch the network: `accounts/testing.py` is the test runner, and it
@@ -198,9 +290,17 @@ Python or Django is missing, because this directory is optional.
 
 - **Suites and run history.** They stay as JSON beside the runner. Moving them
   is a real project and is not what adding a login needed.
-- **RBAC, organisations.** Everyone who can sign in can drive everything. The
-  token carries a `scope` claim so there is somewhere to put this, and nothing
-  reads it yet. Tenancy is the next step of docs/AUTH.md.
+- **Enforcement of the organisation on the runner.** The token now says
+  which organisation and role, and what the plan allows; the runner does not
+  read those claims yet, so everyone who can sign in still drives the one
+  shared browser and its one set of state. Partitioning `.ghostclick/` and
+  `suites/` by organisation, the driving-org lock and the `402 entitlement`
+  refusals are the runner-tenancy step of docs/AUTH.md.
+- **Mailing an invitation.** `POST /auth/invitations` hands the token back to
+  the inviter once; the accounts step, which brings the mail templates and the
+  invite-mode sign-up, sends it. Until allauth's `EmailAddress` table exists,
+  "signed in as the invited address" is the check and "verified" is taken on
+  the operator's word, because every account was made by one.
 - **Rate limiting on `/auth/login`.** The cache it needs is here (Redis, and a
   refusal to run without one), and so are the numbers (`ACCOUNT_RATE_LIMITS`);
   the thing that reads them is allauth, which the accounts step installs.

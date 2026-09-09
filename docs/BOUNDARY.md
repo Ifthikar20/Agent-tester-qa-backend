@@ -157,8 +157,11 @@ becomes the check that the published package version matches.
 
 - **SSO.** The reason Django is here, and not built yet. It goes behind the
   same four endpoints without the runner noticing.
-- **RBAC.** Anyone who can sign in can drive everything. The token carries a
-  `scope` claim so there is somewhere to put this; nothing reads it yet.
+- **RBAC on the runner.** The control plane now has organisations, roles and
+  plans, and the token carries `org`, `role` and `ent`; the runner does not
+  read them yet, so anyone who can sign in still drives everything. Reading
+  them — and keying every store by `org` — is the runner-tenancy step of
+  docs/AUTH.md, and it still crosses this boundary only inside the token.
 - **Rate limiting on `/auth/login`.** Worth having before this meets a network
   you do not control.
 - **The WebSocket accepts any origin, and any path.** The token is the gate. An

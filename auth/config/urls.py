@@ -11,4 +11,8 @@ from django.urls import include, path
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('auth/', include('accounts.urls')),
+    # Organisations share the prefix: the edge routes /auth/* to this service
+    # as one block (docker/Caddyfile), and a second prefix would be a second
+    # line to keep in step there.
+    path('auth/', include('tenants.urls')),
 ]

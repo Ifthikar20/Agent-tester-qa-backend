@@ -311,6 +311,12 @@ A chosen password has to be at least 15 characters, at most 128, not something
 Have I Been Pwned has seen, and not your own email address. There are no
 composition rules; a passphrase with spaces is fine.
 
+Every account gets a personal organisation on the `free` plan the moment it
+is made, and `migrate` gave one to every account that existed before the
+rule. Plans and organisations are edited in `/admin/`; a database restored
+from an older dump gets its missing organisations back with
+`manage.py personal_orgs`, which does nothing when there is nothing to do.
+
 ---
 
 ## Deploying a change
@@ -514,6 +520,8 @@ From `/opt/ghostclick` on the host.
 | Add an account, prompting | `... exec control python manage.py createsuperuser` |
 | Add one without a prompt | `... exec -T control python manage.py adduser <email>` |
 | Who has an account | `... exec -T control python manage.py adduser --list` |
+| An account with no personal organisation (restored from an old dump) | `... exec -T control python manage.py personal_orgs` |
+| Plans, organisations, members, invitations | `/admin/` → Organisations, from an allowed address |
 | Who signed in, from where | `/admin/` → Auth events, from an allowed address |
 | Which origins are allowed | `docker run --rm -v ghostclick_ghostclick-state:/s alpine cat /s/origins.json` |
 | A database shell | `... exec postgres psql -U ghostclick` |

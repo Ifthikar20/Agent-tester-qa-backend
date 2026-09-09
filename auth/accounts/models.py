@@ -83,6 +83,9 @@ class AuthEvent(models.Model):
         LOGOUT = 'logout', 'signed out'
         LOGIN_FAILED = 'login_failed', 'sign-in refused'
         SESSION_EXPIRED = 'session_expired', 'session past its absolute lifetime'
+        INVITATION_SENT = 'invitation_sent', 'invitation issued'
+        INVITATION_ACCEPTED = 'invitation_accepted', 'invitation accepted'
+        INVITATION_REFUSED = 'invitation_refused', 'invitation refused'
 
     at = models.DateTimeField(default=timezone.now, db_index=True)
     # A CharField with choices rather than an enum column: later flows add

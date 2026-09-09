@@ -77,7 +77,11 @@ re-checked there, so the control plane can neither add an origin nor read a
 secret. Passwords are Argon2id-hashed, at least 15 characters, and checked
 against Have I Been Pwned; every sign-in, sign-out and refused password is a
 row in an audit log; a session ends after 12 idle hours or 7 days, whichever
-comes first. See [auth/README.md](auth/README.md), and
+comes first. Every account has a personal organisation, and organisations
+have owners, admins and members, invitations, and a plan that says what they
+may do — the token the runner sees carries which organisation you are acting
+for, your role and the plan's limits, and the runner will enforce them once
+it is partitioned by organisation. See [auth/README.md](auth/README.md), and
 [docs/AUTH.md](docs/AUTH.md) for where this is going.
 
 Deployed, the same three services sit behind one Caddy on one URL

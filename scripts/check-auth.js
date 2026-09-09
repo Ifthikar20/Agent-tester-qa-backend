@@ -136,7 +136,8 @@ const python = spawnSync('python3', ['-c',
   'import sys; sys.path.insert(0, ".");\n'
   + 'from accounts.tokens import mint\n'
   + 'import os\n'
-  + 'print(mint(subject=42, email="qa@example.com", secret=os.environ["S"], ttl=600))',
+  + 'print(mint(subject=42, email="qa@example.com", secret=os.environ["S"], ttl=600,\n'
+  + '           org="acme", role="admin", ent={"suites.max": 25, "vault.enabled": True, "runs.per_day": None}, ent_v=7))',
 ], { cwd: AUTH_DIR, encoding: 'utf8', env: { ...process.env, S: SECRET } });
 
 if (!existsSync(AUTH_DIR)) {
@@ -157,6 +158,19 @@ if (!existsSync(AUTH_DIR)) {
     }
     if (claims.exp - claims.iat === 600) ok('and the expiry it asked for survives the trip', '600s');
     else bad('and the expiry it asked for survives the trip', `${claims.exp - claims.iat}s`);
+    /**
+     * The tenancy claims (docs/AUTH.md §10) are the only way the runner learns
+     * which organisation is calling. Python's None must arrive as JSON null —
+     * "unlimited" — and not as the string "None", which would compare as
+     * greater than every number and read as unlimited by accident.
+     */
+    const ent = claims.ent ?? {};
+    if (claims.org === 'acme' && claims.role === 'admin' && claims.ent_v === 7
+        && ent['suites.max'] === 25 && ent['vault.enabled'] === true && ent['runs.per_day'] === null) {
+      ok('and so do the organisation, role and entitlements', `org=${claims.org} role=${claims.role} ent_v=${claims.ent_v}`);
+    } else {
+      bad('and so do the organisation, role and entitlements', JSON.stringify({ org: claims.org, role: claims.role, ent, ent_v: claims.ent_v }));
+    }
   } catch (err) {
     bad('Django mints a token this runner accepts', err.message);
   }

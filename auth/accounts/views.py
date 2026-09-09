@@ -4,8 +4,11 @@ Four endpoints, and one of them is the whole point.
   GET  /auth/csrf             hand the SPA a CSRF token it can echo back
   POST /auth/login            email + password -> a session cookie
   POST /auth/logout
-  GET  /auth/me               who am I
+  GET  /auth/me               who am I, and for which organisation
   POST /auth/executor-token   a short-lived token the RUNNER will accept
+
+The organisation endpoints (switching, invitations) are in tenants/views.py,
+mounted under the same /auth prefix.
 
 Errors come back as {"error": "..."} because that is the shape the UI's `req()`
 already unwraps for the executor's API — one error path in the frontend rather
@@ -25,6 +28,9 @@ from django.http import JsonResponse
 from django.middleware.csrf import get_token
 from django.views.decorators.http import require_http_methods
 
+from tenants import plans
+from tenants.session import describe, selected
+
 from .tokens import NoSigningKey, mint
 
 
@@ -37,7 +43,28 @@ def _body(request):
 
 
 def _shape(user):
-    return {'id': user.pk, 'email': user.email, 'name': user.name, 'isStaff': user.is_staff}
+    return {'id': user.pk, 'email': user.email, 'name': user.name}
+
+
+def whoami(request):
+    """
+    The answer to "who am I", for a signed-in request (docs/AUTH.md §10).
+
+      {user: {id, email, name}, org: {slug, name, role}, orgs: [...],
+       entitlements: {...}, mfa: {required, enrolled}, flags: {}}
+
+    There is no isStaff and there will not be one. Staff is a control-plane
+    fact that opens /admin/, and a flag the browser was shown is a flag the
+    browser can show itself; nothing the runner enforces may hang off it
+    [authz-tenancy-6]. The mfa block is a placeholder until the mfa flow
+    computes it from the authenticators the account holds.
+    """
+    return {
+        'user': _shape(request.user),
+        **describe(request),
+        'mfa': {'required': False, 'enrolled': False},
+        'flags': {},
+    }
 
 
 @require_http_methods(['GET'])
@@ -76,7 +103,7 @@ def login(request):
     # fetched from /auth/csrf a moment ago is now dead, and the NEXT POST it
     # makes would be a 403. Handing back the new one keeps that invisible;
     # without it, signing in works and everything after it fails.
-    return JsonResponse({'ok': True, 'user': _shape(user), 'csrfToken': get_token(request)})
+    return JsonResponse({'ok': True, **whoami(request), 'csrfToken': get_token(request)})
 
 
 @require_http_methods(['POST'])
@@ -91,7 +118,7 @@ def logout(request):
 def me(request):
     if not request.user.is_authenticated:
         return JsonResponse({'error': 'Not signed in'}, status=401)
-    return JsonResponse({'user': _shape(request.user)})
+    return JsonResponse(whoami(request))
 
 
 @require_http_methods(['POST'])
@@ -103,9 +130,24 @@ def executor_token(request):
     no header naming a subject. The claims come from request.user, which came
     from a signed session cookie. A parameter here would be an endpoint that
     mints a token for anyone you name.
+
+    The same for the organisation: it is the one this session selected, and
+    it is written into the token only after the Membership row is found, with
+    the role that row holds [authz-tenancy-3]. The entitlements are the
+    organisation's resolved plan, cut down to the keys the runner enforces.
     """
     if not request.user.is_authenticated:
         return JsonResponse({'error': 'Not signed in'}, status=401)
+    # Django's own get_user already returns anonymous for an inactive account,
+    # so this line is belt and braces — but it is the line the spec names,
+    # and a deactivated account must never be one refactor away from a token.
+    if not request.user.is_active:
+        return JsonResponse({'error': 'Not signed in'}, status=401)
+
+    membership = selected(request)
+    if membership is None:
+        return JsonResponse({'error': 'no_organisation'}, status=403)
+    org = membership.organization
 
     try:
         token = mint(
@@ -114,6 +156,10 @@ def executor_token(request):
             scope='run',
             secret=settings.GC_AUTH_SECRET,
             ttl=settings.GC_TOKEN_TTL,
+            org=org.slug,
+            role=membership.role,
+            ent=plans.runner_subset(org.entitlements()),
+            ent_v=org.entitlements_version,
         )
     except NoSigningKey as err:
         # 503, not 500: nothing is broken, this service has not been told the

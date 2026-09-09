@@ -26,6 +26,20 @@ class UserAdmin(BaseUserAdmin):
         (None, {'classes': ['wide'], 'fields': ['email', 'name', 'password1', 'password2']}),
     ]
 
+    # The two fields that make an account able to do anything in this admin
+    # are editable only by an account that already can do everything. A staff
+    # user with change permission on User could otherwise tick is_superuser on
+    # their own row, and "staff" would mean "superuser after one click"
+    # [authz-tenancy-6]. Read-only fields are dropped from the form, so a
+    # posted value is ignored rather than merely hidden.
+    SUPERUSER_ONLY = ['is_superuser', 'user_permissions']
+
+    def get_readonly_fields(self, request, obj=None):
+        fields = list(super().get_readonly_fields(request, obj))
+        if not request.user.is_superuser:
+            fields += self.SUPERUSER_ONLY
+        return fields
+
 
 @admin.register(AuthEvent)
 class AuthEventAdmin(admin.ModelAdmin):
