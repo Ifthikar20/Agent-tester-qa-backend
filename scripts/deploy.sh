@@ -32,6 +32,25 @@ die()  { printf '\n  %s\n' "$*" >&2; exit 1; }
 chmod 600 "$PEM" 2>/dev/null || true
 remote() { ssh -i "$PEM" -o StrictHostKeyChecking=accept-new "$EC2_USER@$EC2_HOST" "$@"; }
 
+# Every probe of the running stack goes through the edge with the public
+# host name, because the edge answers for exactly that host and the control
+# plane refuses any other. A curl to http://localhost gets an empty page from
+# Caddy and a 400 from Django, both of which read as "down" when it is not.
+# Shared with the remote script below as text, hence the single quotes.
+read -r -d '' EDGE <<'EDGE' || true
+PUBLIC_URL=$(grep -E '^PUBLIC_URL=' .env.prod | cut -d= -f2- | tr -d '\r' | sed 's#/*$##')
+SCHEME=${PUBLIC_URL%%://*}
+HOSTPORT=${PUBLIC_URL#*://}
+HOST=${HOSTPORT%%:*}
+PORT=${HOSTPORT##*:}
+[ "$PORT" != "$HOSTPORT" ] || { [ "$SCHEME" = https ] && PORT=443 || PORT=80; }
+# --resolve pins the public name to this box without touching DNS, so the
+# request is the same one a browser makes — TLS handshake and certificate
+# included. An https URL whose certificate has not been issued fails here,
+# which is a real failure and not one to hide with -k.
+edge() { curl -s -m "${2:-5}" --resolve "$HOST:$PORT:127.0.0.1" "$PUBLIC_URL$1"; }
+EDGE
+
 CMD=${1:-deploy}; shift || true
 
 case "$CMD" in
@@ -44,7 +63,11 @@ case "$CMD" in
       "cd $REMOTE_DIR && $GC logs -f --tail=200 ${*:-}" ;;
 
   health)
-    remote "curl -sS -m 10 http://localhost/healthz || echo '  no answer — the runner is down'"
+    remote bash -s <<REMOTE
+cd "$REMOTE_DIR"
+$EDGE
+edge /healthz 10 || echo '  no answer — the runner is down'
+REMOTE
     echo; exit 0 ;;
 
   status)
@@ -82,7 +105,7 @@ flock -n 9 || { echo "  another deploy holds $REMOTE_DIR/.deploy.lock"; exit 1; 
 
 CMD="$CMD"; BRANCH="$BRANCH"; TARGET_SHA="$TARGET_SHA"
 
-# ---- the three refusals ----------------------------------------------------
+# ---- the refusals ------------------------------------------------------------
 #
 # Each of these produces a deployment that LOOKS healthy. That is why they are
 # refusals and not warnings, and why none of them has a --force.
@@ -104,9 +127,9 @@ grep -qE '^GC_AUTH_SECRET=.{32,}' .env.prod || {
 
 # The placeholder check is the one that catches a copied example file. A
 # literal CHANGE_ME is long enough to pass every length test above.
-grep -qE '^(GC_AUTH_SECRET|DJANGO_SECRET_KEY|PUBLIC_URL)=CHANGE_ME' .env.prod && {
+grep -qE '^(GC_AUTH_SECRET|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' .env.prod && {
   echo "  .env.prod still has CHANGE_ME placeholders. Fill them in first:"
-  grep -nE '^(GC_AUTH_SECRET|DJANGO_SECRET_KEY|PUBLIC_URL)=CHANGE_ME' .env.prod | sed 's/^/    /'
+  grep -nE '^(GC_AUTH_SECRET|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' .env.prod | sed 's/^/    /'
   exit 1; }
 
 # A '\$(' in the file is command substitution that never ran. Compose reads
@@ -121,11 +144,50 @@ grep -qE '^[A-Z_]+=.*\\\$\(' .env.prod && {
   exit 1; }
 
 grep -qE '^PUBLIC_URL=https?://.+' .env.prod || {
-  echo "  .env.prod has no usable PUBLIC_URL (want http://<host> or https://<host>)."
+  echo "  .env.prod has no usable PUBLIC_URL (want https://<host>, or http://<ip> for a demo)."
   echo "  It is a BUILD argument: empty ships a UI with no sign-in at all."; exit 1; }
 
 grep -qE '^DJANGO_SECRET_KEY=.{32,}' .env.prod || {
   echo "  .env.prod has no DJANGO_SECRET_KEY of at least 32 characters."; exit 1; }
+
+# The two store passwords are spliced into URLs (postgres://user:PASS@…), so
+# they must be URL-safe as well as long. A '@' or '/' in one would be parsed
+# as part of the address and read as "the database is unreachable".
+for var in POSTGRES_PASSWORD REDIS_PASSWORD; do
+  grep -qE "^\$var=[A-Za-z0-9_-]{16,}\$" .env.prod || {
+    echo "  .env.prod has no \$var of at least 16 URL-safe characters (letters, digits, - and _)."
+    exit 1; }
+done
+
+# Hosts are derived from PUBLIC_URL now; this variable is not read at all.
+# It is refused rather than ignored because someone who wrote '*' here meant
+# it to do something, and what it used to do was accept any Host header.
+grep -qE '^DJANGO_ALLOWED_HOSTS=' .env.prod && {
+  echo "  .env.prod sets DJANGO_ALLOWED_HOSTS. Nothing reads it any more: the host is"
+  echo "  derived from PUBLIC_URL. Remove the line — '*' in particular is refused."
+  exit 1; }
+
+# Ten minutes is the ceiling on what a leaked token is worth. The control
+# plane clamps it too; refusing here is what keeps the .env.prod honest.
+ttl=\$(grep -E '^GC_TOKEN_TTL=' .env.prod | cut -d= -f2- || true)
+if [ -n "\$ttl" ] && { ! [ "\$ttl" -eq "\$ttl" ] 2>/dev/null || [ "\$ttl" -gt 600 ] || [ "\$ttl" -lt 60 ]; }; then
+  echo "  GC_TOKEN_TTL=\$ttl — an executor token lives 60 to 600 seconds, no longer."
+  exit 1
+fi
+
+$EDGE
+
+if [ "\$SCHEME" = http ]; then
+  echo
+  echo "  ! PUBLIC_URL is http://. That works for a demo, and this is what it means:"
+  echo "  !   - the session cookie is NOT Secure and NOT __Host- prefixed, because a"
+  echo "  !     browser will not send a Secure cookie over http — it would sign in"
+  echo "  !     and stay signed out"
+  echo "  !   - no HSTS, no certificate: the cookie and the executor token cross the"
+  echo "  !     network in the clear, and anyone on the path can drive your browser"
+  echo "  !   Give it a hostname, set PUBLIC_URL=https://that, and Caddy does the rest."
+  echo
+fi
 
 ok_disk=\$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
 if [ "\${ok_disk:-99}" -lt 8 ]; then
@@ -147,7 +209,7 @@ fi
 echo "  before  \$(git rev-parse --short \$PRIOR_SHA)"
 echo "  after   \$(git rev-parse --short \$WANT)"
 
-# reset --hard, never `checkout <sha>`: a detached HEAD makes the NEXT deploy's
+# reset --hard, never 'checkout <sha>': a detached HEAD makes the NEXT deploy's
 # branch lookup resolve to the literal string "HEAD".
 git reset --hard --quiet "\$WANT"
 git checkout --quiet -B "\$BRANCH"
@@ -155,23 +217,33 @@ git checkout --quiet -B "\$BRANCH"
 echo "\$PRIOR_SHA" > .last_deploy_prior
 
 # ---- refuse to interrupt someone -------------------------------------------
-busy=\$(curl -s -m 5 http://localhost/healthz | grep -o '"busy":true' || true)
+busy=\$(edge /healthz | grep -o '"busy":true' || true)
 if [ -n "\$busy" ] && [ "\${FORCE:-}" != "1" ]; then
   echo "  a run is in progress. Recreating the runner kills its browser mid-step."
   echo "  Wait, or re-run with FORCE=1."; exit 1
 fi
 
 export GC_GIT_SHA=\$(git rev-parse --short HEAD)
+
+# The edge config, checked by the edge itself before anything is built. A
+# Caddyfile mistake would otherwise surface as a caddy container in a restart
+# loop and a readiness wait that times out blaming the runner.
+echo "  validating the edge config"
+$GC run --rm --no-deps -T caddy caddy validate --config /etc/caddy/Caddyfile >/dev/null || {
+  echo "  docker/Caddyfile does not validate. Caddy's own message is above."; exit 1; }
+
 echo "  building and starting (\$GC_GIT_SHA)"
 $GC up -d --build
 
 echo "  migrating"
 $GC exec -T control python manage.py migrate --noinput
 $GC exec -T control python manage.py collectstatic --noinput >/dev/null
+# Sessions are rows. Expired ones are never removed by being expired, only by
+# this; after a deploy is the one moment guaranteed to come round.
+$GC exec -T control python manage.py clearsessions
 
-# nginx resolves runner and control once, at config load, and --build just gave
-# them new addresses.
-$GC exec -T nginx nginx -s reload 2>/dev/null || $GC restart nginx >/dev/null
+# No edge reload: Caddy resolves runner and control per request, so the
+# new containers' addresses are picked up on the next one.
 
 # ---- readiness: the BROWSER, not the port ----------------------------------
 #
@@ -180,9 +252,12 @@ $GC exec -T nginx nginx -s reload 2>/dev/null || $GC restart nginx >/dev/null
 # browser and never will. /healthz is 503 until the page object exists.
 echo "  waiting for the browser"
 for i in \$(seq 1 60); do
-  body=\$(curl -s -m 5 http://localhost/healthz || true)
+  body=\$(edge /healthz || true)
   case "\$body" in *'"browser":true'*) break ;; esac
-  [ "\$i" = 60 ] && { echo "  no browser after 120s. Last answer: \${body:-<none>}"; $GC logs --tail=40 runner; exit 1; }
+  [ "\$i" = 60 ] && {
+    echo "  no browser after 120s. Last answer: \${body:-<none>}"
+    [ "\$SCHEME" = https ] && echo "  (no answer at all over https? Caddy may still be getting a certificate: $GC logs caddy)"
+    $GC logs --tail=40 runner; exit 1; }
   sleep 2
 done
 
@@ -192,14 +267,14 @@ echo "  smoke checks"
 FAIL=0
 probe() { # path expected description [method]
   local code
-  code=\$(curl -s -o /dev/null -w '%{http_code}' -X "\${4:-GET}" "http://localhost\$1" || echo 000)
+  code=\$(curl -s -o /dev/null -m 10 -w '%{http_code}' -X "\${4:-GET}" --resolve "\$HOST:\$PORT:127.0.0.1" "\$PUBLIC_URL\$1" || echo 000)
   if [ "\$code" = "\$2" ]; then printf '    %-34s %s\n' "\$3" "\$code"
   else printf '    %-34s %s  WANT \$2\n' "\$3" "\$code"; FAIL=1; fi
 }
 
 # Ahead of the table, because a 200 here is not a failed check, it is the one
 # outcome this whole script exists to prevent.
-api=\$(curl -s -o /dev/null -w '%{http_code}' http://localhost/api/state || true)
+api=\$(curl -s -o /dev/null -w '%{http_code}' --resolve "\$HOST:\$PORT:127.0.0.1" "\$PUBLIC_URL/api/state" || true)
 if [ "\$api" = "200" ]; then
   echo "    THE RUNNER IS UNAUTHENTICATED. Taking it down."
   $GC down; exit 1
@@ -209,15 +284,19 @@ probe /app/            200 "the UI loads"
 probe /api/state       401 "the API is gated"
 probe /auth/csrf       200 "the control plane answers"
 probe /healthz         200 "the browser is up"
-# nginx is the only thing closing this one — server.js exempts it from the
-# bearer gate by design, so an edit that drops the location block is a real
+# The edge is the only thing closing this one — server.js exempts it from the
+# bearer gate by design, so an edit that drops the respond line is a real
 # regression and must not deploy green.
 probe /api/recording   403 "the extension hand-off is shut" POST
+# From this box the admin is reachable only if GC_ADMIN_CIDRS says so, and
+# the docker bridge is not in anyone's list. A 200 or 302 here means the
+# allowlist is not being applied.
+probe /admin/          403 "the admin is behind the allowlist"
 
 [ "\$FAIL" = 0 ] || { echo; echo "  smoke checks failed — rolling back is: bash scripts/deploy.sh rollback"; exit 1; }
 REMOTE
 
-step "deployed — open http://$EC2_HOST/app/"
+step "deployed — open the app at the PUBLIC_URL in .env.prod (/app/)"
 ok "no account yet?  ssh -t -i $PEM $EC2_USER@$EC2_HOST 'cd $REMOTE_DIR && ./scripts/gc exec control python manage.py createsuperuser'"
 ok "roll back:       EC2_HOST=$EC2_HOST bash scripts/deploy.sh rollback"
 echo

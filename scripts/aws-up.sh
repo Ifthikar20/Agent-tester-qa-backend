@@ -121,12 +121,14 @@ if [ "$HTTP_CIDR" = "0.0.0.0/0" ]; then
 
       - The app IS gated. /api/* answers 401 without a token, and the token
         comes from a Django login. An anonymous visitor gets a sign-in page.
-      - There is NO TLS yet. The session cookie and the executor token (which
-        rides in the WebSocket query string, because a browser cannot set
-        headers on a WebSocket) cross the network in cleartext. Anyone on the
-        path can read them and drive your browser.
+      - There is NO TLS on a bare IP. The session cookie and the executor
+        token (which rides in the WebSocket query string, because a browser
+        cannot set headers on a WebSocket) cross the network in cleartext.
+        Anyone on the path can read them and drive your browser.
       - So: fine for a demo you are watching. Not fine for anything real, and
-        not fine to leave running. Take it down with scripts/aws-down.sh.
+        not fine to leave running. Take it down with scripts/aws-down.sh —
+        or give it a hostname, set PUBLIC_URL=https://it, and redeploy: the
+        edge gets a certificate on its own (docs/DEPLOY.md).
 
     To restrict it to one other machine instead, re-run with:
       HTTP_CIDR=<that-machine-ip>/32 bash scripts/aws-up.sh
@@ -176,6 +178,9 @@ auth() {
 # there, so the apostrophe in "operator's" failed the whole call.
 auth 22 "$SSH_CIDR" "deploys from one laptop"
 auth 80 "$HTTP_CIDR" "the app"
+# 443 as well: with a hostname in PUBLIC_URL, Caddy answers there and uses
+# 80 only to redirect and to prove the domain to Let's Encrypt.
+auth 443 "$HTTP_CIDR" "the app over tls"
 ok "security group $SG"
 
 # ---- the instance -----------------------------------------------------------
@@ -256,7 +261,7 @@ ok "in"
 # script's output or your shell history.
 step "installing docker, cloning, generating secrets, building"
 ok "the first build downloads a Playwright image — expect 5-10 minutes"
-$SSH "REPO_URL='$REPO_URL' BRANCH='$BRANCH' PUBLIC_IP='$IP' bash -s" <<'REMOTE'
+$SSH "REPO_URL='$REPO_URL' BRANCH='$BRANCH' PUBLIC_IP='$IP' ADMIN_CIDR='$SSH_CIDR' bash -s" <<'REMOTE'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -299,7 +304,11 @@ if [ ! -f .env.prod ]; then
   # sed with a | delimiter: a base64url secret can contain / but never |.
   sed -i "s|^GC_AUTH_SECRET=.*|GC_AUTH_SECRET=$(gen)|"        .env.prod
   sed -i "s|^DJANGO_SECRET_KEY=.*|DJANGO_SECRET_KEY=$(gen)|"  .env.prod
+  sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(gen)|"  .env.prod
+  sed -i "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=$(gen)|"        .env.prod
   sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=http://$PUBLIC_IP|"     .env.prod
+  # The admin, from the same address the ssh rule admits.
+  sed -i "s|^# GC_ADMIN_CIDRS=.*|GC_ADMIN_CIDRS=$ADMIN_CIDR|"  .env.prod
   chmod 600 .env.prod
 fi
 
@@ -307,10 +316,12 @@ export GC_GIT_SHA=$(git rev-parse --short HEAD)
 sg docker -c './scripts/gc up -d --build'
 sg docker -c './scripts/gc exec -T control python manage.py migrate --noinput'
 sg docker -c './scripts/gc exec -T control python manage.py collectstatic --noinput' >/dev/null
+sg docker -c './scripts/gc exec -T control python manage.py clearsessions'
 
 echo "  waiting for the browser"
 for i in $(seq 1 90); do
-  case "$(curl -s -m 5 http://localhost/healthz || true)" in
+  # The Host header: Caddy answers for PUBLIC_URL's host and nothing else.
+  case "$(curl -s -m 5 -H "Host: $PUBLIC_IP" http://localhost/healthz || true)" in
     *'"browser":true'*) break ;;
   esac
   [ "$i" = 90 ] && { echo "  the browser never came up:"; sg docker -c './scripts/gc logs --tail=40 runner'; exit 1; }

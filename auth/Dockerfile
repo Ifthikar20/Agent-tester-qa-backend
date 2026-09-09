@@ -10,10 +10,15 @@ RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
 COPY . .
 
-# The database lives on a volume, not in the image. Baking it in would mean
-# every deploy shipped a fresh empty one over the top of the real accounts.
-RUN mkdir -p /app/db && useradd -m app && chown -R app:app /app
+# The accounts live in Postgres, not in this image; the only thing written at
+# runtime is the collected static tree, on a volume.
+RUN useradd -m app && chown -R app:app /app
 USER app
 
 EXPOSE 8000
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "60"]
+# --forwarded-allow-ips='*': trust X-Forwarded-* from any peer, because the
+# only peer that can reach this port is the edge (docker-compose.prod.yml puts
+# nothing else on the network), and the edge overwrites those headers on every
+# request. Without it gunicorn would strip the scheme and every cookie would be
+# set insecure behind TLS.
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "60", "--forwarded-allow-ips", "*"]

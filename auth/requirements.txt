@@ -1,8 +1,21 @@
-# The control plane's whole dependency list.
+# The control plane's whole dependency list, pinned.
+#
+# Pinned to the version that was tested, because "Django>=5" is a request to
+# be upgraded by whoever runs pip next. Hashes (--require-hashes) are the ops
+# flow's job; exact versions are this one's.
 #
 # There is no JWT library here on purpose: minting an HS256 token is HMAC-SHA256
 # over two base64url segments (accounts/tokens.py), and the executor verifies it
 # with Node's stdlib for the same reason. Neither side gains a package for the
 # easy half of the problem.
-Django>=5.0,<6.0
-django-cors-headers>=4.0
+Django==5.2.17
+django-cors-headers==4.9.0
+# Argon2id for password hashes (PASSWORD_HASHERS).
+argon2-cffi==25.1.0
+# Have I Been Pwned, by k-anonymity, as a password validator.
+pwned-passwords-django==5.2.0
+# The shared cache the rate limits count in.
+redis==8.1.0
+# DATABASE_URL -> DATABASES, and the Postgres driver it names.
+dj-database-url==3.1.2
+psycopg[binary]==3.3.5

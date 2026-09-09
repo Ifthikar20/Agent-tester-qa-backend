@@ -62,7 +62,7 @@ cat <<'NEXT'
     git clone <repo-url> /opt/ghostclick
     cd /opt/ghostclick
     cp .env.prod.example .env.prod
-    nano .env.prod            # GC_AUTH_SECRET and PUBLIC_URL
+    nano .env.prod            # PUBLIC_URL, the two secrets, the two store passwords
 
   Then from your laptop:
 

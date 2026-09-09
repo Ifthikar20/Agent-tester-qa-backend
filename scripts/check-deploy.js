@@ -17,7 +17,7 @@
  * deploy was completely healthy — with a key published verbatim in a public
  * repository. Nothing anywhere reported a problem.
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
@@ -56,7 +56,7 @@ else bad('and the deploy refuses one on the host', 'nothing catches a hand-edite
  *     argument that decides whether the shipped UI has a sign-in at all, so an
  *     empty value ships a login-less app and a 401-free deploy looks fine.
  */
-for (const key of ['GC_AUTH_SECRET', 'DJANGO_SECRET_KEY', 'PUBLIC_URL']) {
+for (const key of ['GC_AUTH_SECRET', 'DJANGO_SECRET_KEY', 'PUBLIC_URL', 'POSTGRES_PASSWORD', 'REDIS_PASSWORD']) {
   const uses = [...compose.matchAll(new RegExp(`\\$\\{${key}([^}]*)\\}`, 'g'))].map((m) => m[1]);
   if (!uses.length) bad(`${key} is used by compose`, 'not referenced at all');
   else if (uses.every((u) => u.startsWith(':?'))) ok(`${key} is required, not defaulted`, `${uses.length} use${uses.length > 1 ? 's' : ''}`);
@@ -139,10 +139,149 @@ else bad('the rollback recipe does not detach HEAD', 'it breaks the NEXT deploy'
 if (/rollback\)/.test(deploy) && /last_deploy_prior/.test(deploy)) ok('and rollback is a subcommand', 'with the sha recorded before the deploy');
 else bad('and rollback is a subcommand', 'recovery is prose');
 
+/**
+ * 10 · The edge is Caddy, configured from the one URL, and it does the four
+ *      things docs/AUTH.md §1 gives it: header hygiene, exact routing, the
+ *      admin allowlist, and a log that cannot hold a credential.
+ */
+console.log('\n— the edge ————————————————————————————————————————————');
+const caddy = read('../docker/Caddyfile');
+if (!existsSync(new URL('../docker/nginx.conf', import.meta.url))) ok('nginx.conf is gone', 'one edge, not two');
+else bad('nginx.conf is gone', 'two edge configs is one that is not deployed');
+if (/^\{\$GC_PUBLIC_URL\} \{/m.test(caddy)) ok('the site address is {$GC_PUBLIC_URL}', 'https gets a certificate; http still works');
+else bad('the site address is {$GC_PUBLIC_URL}', 'a second copy of the hostname to keep in sync');
+
+// The runner never authenticates by cookie, so it must never receive one.
+const runnerBlock = /reverse_proxy runner:3000 \{([\s\S]*?)\n\t\t\}/.exec(caddy)?.[1] ?? '';
+if (/header_up -Cookie/.test(runnerBlock)) ok('Cookie is stripped on the way to the runner');
+else bad('Cookie is stripped on the way to the runner', 'a session cookie reaches the process holding the browser');
+
+// Overwritten, not appended: a client-supplied X-Forwarded-* must not survive.
+for (const upstream of ['control:8000', 'runner:3000']) {
+  const block = new RegExp(`reverse_proxy ${upstream} \\{([\\s\\S]*?)\\n\\t\\t\\}`).exec(caddy)?.[1] ?? '';
+  const sets = ['X-Forwarded-For', 'X-Forwarded-Proto', 'X-Forwarded-Host'].filter((h) => new RegExp(`header_up ${h} \\{`).test(block));
+  if (sets.length === 3) ok(`X-Forwarded-* are overwritten for ${upstream}`);
+  else bad(`X-Forwarded-* are overwritten for ${upstream}`, `only ${sets.join(', ') || 'none'}`);
+}
+
+if (/@https protocol https/.test(caddy) && /header @https Strict-Transport-Security "max-age=63072000; includeSubDomains"/.test(caddy)) {
+  ok('HSTS on https sites only', 'two years, subdomains included');
+} else bad('HSTS on https sites only', 'TLS at the edge alone can be stripped on first contact');
+
+// Exact routes. /accounts/* wholesale would expose allauth's csrf-exempt
+// One Tap endpoint; only the Google callback is let through.
+const controlMatch = /@control path ([^\n]+)/.exec(caddy)?.[1]?.trim().split(/\s+/) ?? [];
+const wanted = ['/auth/*', '/_allauth/*', '/accounts/google/login/callback/', '/admin/*'];
+const missing = wanted.filter((p) => !controlMatch.includes(p));
+if (!missing.length && !controlMatch.includes('/accounts/*')) ok('the control plane is routed by exact prefix', controlMatch.join(' '));
+else bad('the control plane is routed by exact prefix', missing.length ? `missing ${missing.join(' ')}` : '/accounts/* is routed wholesale');
+if (/handle_path \/static\/\* \{/.test(caddy) && /file_server/.test(caddy)) ok('and /static/* is served from the collected volume', 'Django does not serve it with DEBUG off');
+else bad('and /static/* is served from the collected volume', 'the admin has no CSS');
+
+// Caddy re-sorts handle blocks by matcher, so a refusal must live INSIDE
+// the handle whose upstream it guards — where `respond` runs before
+// `reverse_proxy` by directive order — never as a sibling that happens to be
+// written first.
+// A top-level handle block is `\thandle … {` down to the next `\t}` at that
+// indentation; the one that proxies to `marker` is the one under test.
+const handleOf = (marker) => [...caddy.matchAll(/^\thandle(?: [^\n{]*)? \{\n([\s\S]*?)\n\t\}/gm)]
+  .map((m) => m[1]).find((b) => b.includes(marker)) ?? '';
+const controlHandle = handleOf('reverse_proxy control:8000');
+const runnerHandle = handleOf('reverse_proxy runner:3000');
+if (/not remote_ip \{\$GC_ADMIN_CIDRS/.test(controlHandle) && /respond @admin_outside "[^"]*" 403/.test(controlHandle)) ok('/admin/ is allowed only from GC_ADMIN_CIDRS', 'refused inside the control-plane handle, ahead of its proxy');
+else bad('/admin/ is allowed only from GC_ADMIN_CIDRS', 'the refusal is not inside the handle that proxies /admin/');
+if (/\{\$GC_ADMIN_CIDRS:192\.0\.2\.1\/32\}/.test(caddy)) ok('and the default admits nobody', 'TEST-NET-1');
+else bad('and the default admits nobody', 'an operator who has not chosen has opened the admin');
+
+if (/respond \/api\/recording "[^"]*" 403/.test(runnerHandle)) ok('the extension hand-off is shut at the edge', 'refused inside the runner handle, ahead of its proxy');
+else bad('the extension hand-off is shut at the edge', 'the refusal is not inside the handle that proxies /api/');
+if (/\n\thandle \{\n[\s\S]*reverse_proxy runner:3000/.test(caddy)) ok('and the runner is the bare fallback handle', 'a handle with no matcher always sorts last');
+else bad('and the runner is the bare fallback handle');
+
+// A socket ticket rides in the query string. The access log must not keep it.
+const logBlock = /log \{([\s\S]*?)\n\t\}/.exec(caddy)?.[1] ?? '';
+if (/request>uri query \{[\s\S]*?delete ticket/.test(logBlock)) ok('the access log deletes the ticket parameter');
+else bad('the access log deletes the ticket parameter', 'a ticket in a log is a ticket');
+if (/request>headers>Authorization delete/.test(logBlock) && /request>headers>Cookie delete/.test(logBlock)) ok('and never logs a credential header');
+else bad('and never logs a credential header');
+if (/^\tadmin off/m.test(caddy) || /^\s*admin off/m.test(caddy)) ok('the Caddy admin API is off');
+else bad('the Caddy admin API is off', 'it can rewrite the running config');
+
+/**
+ * 11 · Compose: two networks and which side of the line each service is on.
+ *      The runner — and the Chromium it drives — has no route to the control
+ *      plane or the stores; the stores have no route to the internet.
+ */
+console.log('\n— the networks —————————————————————————————————————————');
+const service = (name) => {
+  // A service's block runs to the next service, or to the top-level
+  // `volumes:` that closes the file.
+  const m = new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-z]+:|^[a-z]+:)`, 'm').exec(compose);
+  return m ? m[1] : '';
+};
+const nets = (name) => /networks: \[([^\]]*)\]/.exec(service(name))?.[1].split(',').map((s) => s.trim()) ?? [];
+if (/^networks:\n  edge:\n  data:\n    internal: true/m.test(compose)) ok('edge and data networks exist, data is internal');
+else bad('edge and data networks exist, data is internal', 'the stores could reach the internet, or be reached');
+const expected = { caddy: ['edge'], runner: ['edge'], control: ['edge', 'data'], postgres: ['data'], redis: ['data'] };
+for (const [name, want] of Object.entries(expected)) {
+  const got = nets(name);
+  if (got.length === want.length && want.every((n) => got.includes(n))) ok(`${name} is on ${want.join(' + ')} only`);
+  else bad(`${name} is on ${want.join(' + ')} only`, `got ${got.join(', ') || 'nothing'}`);
+}
+if (!/^  nginx:/m.test(compose) && /^  caddy:/m.test(compose)) ok('the edge service is caddy');
+else bad('the edge service is caddy');
+for (const name of Object.keys(expected)) {
+  if (/cap_drop: \[ALL\]/.test(service(name))) ok(`${name} drops every capability`);
+  else bad(`${name} drops every capability`);
+}
+if (/--requirepass \\"\$\$REDIS_PASSWORD\\"/.test(service('redis'))) ok('redis requires a password', '"internal network" is about routing, not who is on it');
+else bad('redis requires a password');
+if (/scram-sha-256/.test(service('postgres')) && /POSTGRES_HOST_AUTH_METHOD: scram-sha-256/.test(service('postgres'))) ok('postgres authenticates with scram-sha-256');
+else bad('postgres authenticates with scram-sha-256');
+if (/DATABASE_URL: postgres:\/\/ghostclick:\$\{POSTGRES_PASSWORD/.test(service('control')) && /GC_REDIS_URL: redis:\/\/:\$\{REDIS_PASSWORD/.test(service('control'))) ok('the control plane is given both stores by URL');
+else bad('the control plane is given both stores by URL', 'it would fall back to SQLite and LocMemCache — and refuse to start');
+if (!/^\s+DJANGO_ALLOWED_HOSTS:/m.test(compose) && /GC_PUBLIC_URL: \$\{PUBLIC_URL:\?/.test(service('control'))) ok('hosts are derived from PUBLIC_URL, not set separately');
+else bad('hosts are derived from PUBLIC_URL, not set separately', 'two values that have to agree');
+if (/--forwarded-allow-ips", "\*"/.test(read('../auth/Dockerfile'))) ok('gunicorn trusts X-Forwarded-* from the edge', "--forwarded-allow-ips='*'; only the edge can reach it");
+else bad('gunicorn trusts X-Forwarded-* from the edge', 'the scheme is stripped and every cookie is set insecure');
+if (/headers=\{'Host': urlsplit\(os\.environ\['GC_PUBLIC_URL'\]\)\.hostname\}/.test(service('control'))) ok('the control healthcheck sends the public Host', 'ALLOWED_HOSTS is exactly that host now');
+else bad('the control healthcheck sends the public Host', '"localhost" is a 400 and the service never becomes healthy');
+
+/**
+ * 12 · The deploy's new refusals, and the things it does after migrate.
+ */
+console.log('\n— the deploy ———————————————————————————————————————————');
+if (/DJANGO_ALLOWED_HOSTS=/.test(deploy) && /is refused/.test(deploy)) ok("the deploy refuses DJANGO_ALLOWED_HOSTS ('*' included)");
+else bad("the deploy refuses DJANGO_ALLOWED_HOSTS ('*' included)");
+if (/GC_TOKEN_TTL/.test(deploy) && /-gt 600/.test(deploy)) ok('and a GC_TOKEN_TTL over 600');
+else bad('and a GC_TOKEN_TTL over 600', 'a leaked token would be worth more than ten minutes');
+if (/SCHEME" = http \]/.test(deploy) && /NOT Secure/.test(deploy)) ok('and says loudly when PUBLIC_URL is http://');
+else bad('and says loudly when PUBLIC_URL is http://');
+if (/POSTGRES_PASSWORD REDIS_PASSWORD/.test(deploy) && /URL-safe/.test(deploy)) ok('and requires URL-safe store passwords', "a '@' in one reads as an address");
+else bad('and requires URL-safe store passwords');
+const validateAt = deploy.indexOf('caddy caddy validate --config /etc/caddy/Caddyfile');
+const upAt = deploy.indexOf('up -d --build');
+if (validateAt > 0 && validateAt < upAt) ok('the edge validates its own config before the build', 'a Caddyfile mistake stops the deploy with Caddy’s message');
+else bad('the edge validates its own config before the build', 'it would surface as a restart loop blamed on the runner');
+const migrateAt = deploy.indexOf('manage.py migrate');
+const clearAt = deploy.indexOf('manage.py clearsessions');
+if (migrateAt > 0 && clearAt > migrateAt) ok('clearsessions runs after migrate');
+else bad('clearsessions runs after migrate', 'expired session rows are only removed by this');
+if (!/nginx -s reload/.test(deploy)) ok('and nothing reloads an edge that resolves per request');
+else bad('and nothing reloads an edge that resolves per request');
+if (/--resolve "\\?\$HOST:\\?\$PORT:127\.0\.0\.1"/.test(deploy) && !/http:\/\/localhost\/healthz/.test(deploy)) ok('every probe goes through the edge with the public host', 'localhost is an empty page from Caddy and a 400 from Django');
+else bad('every probe goes through the edge with the public host');
+if (probes.some((p) => p.startsWith('/admin/ 403'))) ok('including the admin being behind the allowlist');
+else bad('including the admin being behind the allowlist');
+if (!/^DJANGO_ALLOWED_HOSTS=/m.test(example) && /^POSTGRES_PASSWORD=CHANGE_ME/m.test(example) && /^REDIS_PASSWORD=CHANGE_ME/m.test(example)) ok('.env.prod.example matches', 'no hosts line; both passwords as placeholders');
+else bad('.env.prod.example matches');
+
 console.log(failures
   ? `\n  ${failures} FAILED\n`
   : '\n  OK — no secret reaches an image layer, no placeholder or unexpanded\n'
     + '       $( ) reaches a signing key, readiness means the browser and not\n'
-    + '       the port, every probe printed is a probe asserted, and every\n'
-    + '       command in the runbook is one that runs.\n');
+    + '       the port, every probe printed is a probe asserted, every command\n'
+    + '       in the runbook is one that runs, the runner has no route to the\n'
+    + '       control plane, and the edge keeps cookies, tickets and the admin\n'
+    + '       where they belong.\n');
 process.exit(failures ? 1 : 0);

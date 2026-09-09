@@ -74,7 +74,16 @@ cd auth && python manage.py runserver 8000   GC_AUTH_SECRET=… npm start   VITE
 
 The origin allowlist and the vault stay entirely on the runner and are
 re-checked there, so the control plane can neither add an origin nor read a
-secret. See [auth/README.md](auth/README.md).
+secret. Passwords are Argon2id-hashed, at least 15 characters, and checked
+against Have I Been Pwned; every sign-in, sign-out and refused password is a
+row in an audit log; a session ends after 12 idle hours or 7 days, whichever
+comes first. See [auth/README.md](auth/README.md), and
+[docs/AUTH.md](docs/AUTH.md) for where this is going.
+
+Deployed, the same three services sit behind one Caddy on one URL
+(`PUBLIC_URL`), from which every host, origin and cookie rule is derived, with
+the runner on a network that has no route to the control plane or its stores.
+See [docs/DEPLOY.md](docs/DEPLOY.md).
 
 It prints what it is running, and the sidebar shows the same thing:
 
@@ -1410,7 +1419,7 @@ silently inside someone else's docs.
 | `auth.js` | verifies it — verify-only, so the runner cannot authorise itself |
 | `docs/BOUNDARY.md` | the four rules that keep frontend and backend separable |
 | `docs/DEPLOY.md` | putting it on AWS, and why auth is not optional once you do |
-| `Dockerfile`, `docker/` | the runner image, the compose stack, nginx |
+| `Dockerfile`, `docker/` | the runner image, the compose stack, the Caddyfile |
 | `scripts/deploy.sh` | deploy from your laptop; refuses without a real auth secret |
 | `public/demo.html` | Meridian — truncates a username to 16 chars |
 | `public/shop.html` | Nimbus — cart total ignores quantity |

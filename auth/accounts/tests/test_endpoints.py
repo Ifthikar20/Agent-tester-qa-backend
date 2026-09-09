@@ -1,7 +1,7 @@
 """
-The control plane's own checks.
+The five endpoints, the token, and `adduser`.
 
-    python3 manage.py test
+    python manage.py test
 
 What is NOT here: whether the runner accepts what this mints. That crosses a
 language boundary and neither project can assert it alone, so it lives in
@@ -20,7 +20,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import Client, TestCase, override_settings
 
-from .tokens import MIN_SECRET, NoSigningKey, mint
+from ..tokens import MIN_SECRET, NoSigningKey, mint
 
 SECRET = 'tests-secret-long-enough-for-hmac-0123456789012'
 User = get_user_model()

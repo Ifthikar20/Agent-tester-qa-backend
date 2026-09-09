@@ -1,0 +1,127 @@
+# The edge: one origin in front of two services, and the only thing on the
+# internet.
+#
+# It does four jobs and nothing else: TLS, routing, header hygiene, and the
+# admin allowlist. Everything that decides who someone is happens behind it.
+#
+# The site address is the one URL the whole deployment is configured from.
+# An https://host here gets certificates automatically; an http://ip still
+# works for a demo, and scripts/deploy.sh says loudly that cookies are not
+# Secure in that case. Caddy replaces the variable when it reads this file,
+# so there is no template step and no second copy of the hostname.
+#
+# Caddy re-sorts `handle` blocks by their matchers before evaluating them, so
+# nothing below relies on the order they are written in. Each refusal sits
+# INSIDE the handle whose upstream it guards, where `respond` runs before
+# `reverse_proxy` by Caddy's fixed directive order; the bare `handle` at the
+# end is the fallback, and a handle with no matcher always sorts last.
+
+{
+	# The admin API can rewrite the running config. Nothing here uses it.
+	admin off
+}
+
+{$GC_PUBLIC_URL} {
+	# Caddy already redacts Cookie and Authorization in its logs. The ticket
+	# that opens a socket rides in the query string, because a browser cannot
+	# set headers on a WebSocket, and a URL is exactly what an access log
+	# keeps — so the parameter is deleted before the line is written. A token
+	# that leaks into a log is a token, and this log is on a shared volume.
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>uri query {
+					delete ticket
+					delete t
+				}
+				request>headers>Cookie delete
+				request>headers>Authorization delete
+				request>headers>X-Csrftoken delete
+			}
+		}
+	}
+
+	# HSTS on https only. The refuted control was "TLS at the edge" alone:
+	# without this a first contact over http can be stripped by whoever is on
+	# the path. Two years, subdomains included; the preload list is the step
+	# after this one, once the hostname is stable. Over plain http the header
+	# is meaningless and browsers ignore it, so it is not sent.
+	@https protocol https
+	header @https Strict-Transport-Security "max-age=63072000; includeSubDomains"
+	header -Server
+
+	# A screencast frame is a JPEG of a 1180x760 viewport; a recording POST
+	# carries a whole flow. Say the limit rather than discover it.
+	request_body {
+		max_size 8MB
+	}
+
+	# ---- the control plane, by exact prefix ----------------------------------
+	#
+	# Not /accounts/* wholesale: allauth's One Tap token endpoint lives there,
+	# is csrf-exempt, and stays unrouted. Only the Google callback is let
+	# through, and only at its full path.
+	@control path /auth/* /_allauth/* /accounts/google/login/callback/ /admin /admin/*
+	handle @control {
+		# The admin, from the operator's addresses only. GC_ADMIN_CIDRS is
+		# space-separated. The default is a TEST-NET address that no packet
+		# ever comes from: an operator who has not chosen their addresses has
+		# not opened the admin. remote_ip is the address the connection
+		# actually came from — there is no trusted proxy in front of this, so
+		# it cannot be forged with a header.
+		@admin_outside {
+			path /admin /admin/*
+			not remote_ip {$GC_ADMIN_CIDRS:192.0.2.1/32}
+		}
+		respond @admin_outside "Not from here." 403
+
+		reverse_proxy control:8000 {
+			# Overwritten, never appended to: a client that sends its own
+			# X-Forwarded-For or -Proto is lying, and gunicorn runs with
+			# --forwarded-allow-ips='*' because only this process can reach it.
+			header_up X-Forwarded-For {http.request.remote.host}
+			header_up X-Forwarded-Proto {http.request.scheme}
+			header_up X-Forwarded-Host {http.request.host}
+		}
+	}
+
+	# Django's admin CSS, collected by the deploy into a volume this container
+	# mounts read-only. Django itself does not serve static files with DEBUG
+	# off, so the edge does.
+	handle_path /static/* {
+		root * /srv/static
+		file_server
+	}
+
+	# ---- everything else is the runner ---------------------------------------
+	#
+	# Including /app/, /api/*, the /ws upgrade and the pages under test.
+	# Caddy proxies WebSocket upgrades without being told to, and puts no
+	# idle timeout on them — the screencast goes quiet whenever the page under
+	# test is still, and a 60-second read timeout would cut the socket every
+	# time someone stopped to think.
+	handle {
+		# The extension hand-off, closed. POST /api/recording is
+		# unauthenticated on the runner by design: the extension records on a
+		# page where it has no session and no way to be handed a token. It
+		# validates through the origin gate and never executes, but it is the
+		# one reachable unauthenticated endpoint and the extension is not part
+		# of this deployment. Closed here rather than argued about.
+		respond /api/recording "Not here." 403
+
+		reverse_proxy runner:3000 {
+			# The runner never authenticates by cookie, so the runner never
+			# sees one. A session cookie that reaches a process holding a
+			# browser other people drive is a cookie that can be replayed.
+			header_up -Cookie
+			header_up X-Forwarded-For {http.request.remote.host}
+			header_up X-Forwarded-Proto {http.request.scheme}
+			header_up X-Forwarded-Host {http.request.host}
+			# Frames are pushed as they are produced; buffering them would
+			# turn a live screencast into a slideshow.
+			flush_interval -1
+		}
+	}
+}

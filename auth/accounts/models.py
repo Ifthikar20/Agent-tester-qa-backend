@@ -61,3 +61,45 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.email
+
+
+class AuthEvent(models.Model):
+    """
+    One row per thing that happened to an account: a sign-in, a sign-out, a
+    refused password, a session that ran out. Append-only, and the reason it
+    exists is the paragraph in docs/AUTH.md §13 about what cannot be
+    survived: a compromised control plane or operator is detected by the log
+    they cannot avoid writing to, so the log has to be written by the framework's
+    own signals rather than by whichever view remembered to.
+
+    The email is stored as typed, separately from the user row, because the
+    interesting failed attempts are the ones against addresses that have no
+    row. The IP is the client as the edge reports it (accounts.events.client_ip),
+    never the header a client can set.
+    """
+
+    class Kind(models.TextChoices):
+        LOGIN = 'login', 'signed in'
+        LOGOUT = 'logout', 'signed out'
+        LOGIN_FAILED = 'login_failed', 'sign-in refused'
+        SESSION_EXPIRED = 'session_expired', 'session past its absolute lifetime'
+
+    at = models.DateTimeField(default=timezone.now, db_index=True)
+    # A CharField with choices rather than an enum column: later flows add
+    # kinds (mint, signup, verification, reauthentication) without a migration
+    # that rewrites every row.
+    kind = models.CharField(max_length=32, choices=Kind.choices, db_index=True)
+    user = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='auth_events',
+    )
+    email = models.CharField(max_length=254, blank=True)
+    ip = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=512, blank=True)
+    detail = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-at']
+
+    def __str__(self):
+        who = self.user.email if self.user_id else (self.email or '-')
+        return f'{self.at:%Y-%m-%d %H:%M:%S} {self.kind} {who}'

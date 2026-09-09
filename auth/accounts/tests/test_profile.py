@@ -1,0 +1,169 @@
+"""
+The production profile, derived from one URL — and the refusals.
+
+These import config.settings in a SUBPROCESS with a chosen environment and
+print what came out, because the settings module is imported once per
+process and the rules under test are the ones that raise at import. A test
+that could not exercise "this configuration refuses to start" would be
+testing the easy half.
+"""
+import json
+import os
+import subprocess
+import sys
+
+from django.test import SimpleTestCase
+
+AUTH_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Everything the settings module reads. Stripped from the inherited
+# environment so the test decides each one, then re-added per case.
+OURS = ('DJANGO_', 'GC_', 'DATABASE_URL', 'EMAIL_', 'DEFAULT_FROM_EMAIL')
+
+KEYS = [
+    'DEBUG', 'ALLOWED_HOSTS', 'CSRF_TRUSTED_ORIGINS', 'CORS_ALLOWED_ORIGINS',
+    'SECURE_PROXY_SSL_HEADER', 'USE_X_FORWARDED_HOST',
+    'SESSION_COOKIE_SECURE', 'CSRF_COOKIE_SECURE', 'SESSION_COOKIE_NAME', 'CSRF_COOKIE_NAME',
+    'SESSION_COOKIE_SAMESITE', 'CSRF_COOKIE_SAMESITE', 'SESSION_COOKIE_HTTPONLY',
+    'SESSION_COOKIE_AGE', 'SESSION_SAVE_EVERY_REQUEST', 'SESSION_ENGINE', 'GC_SESSION_ABSOLUTE_SECONDS',
+    'SECURE_REFERRER_POLICY', 'SECURE_HSTS_SECONDS', 'SECURE_SSL_REDIRECT',
+    'ALLAUTH_TRUSTED_PROXY_COUNT', 'EMAIL_BACKEND', 'EMAIL_HOST', 'PASSWORD_HASHERS', 'MFA_TOTP_TOLERANCE',
+]
+
+PRODUCTION = {
+    'DJANGO_DEBUG': '0',
+    'DJANGO_SECRET_KEY': 'a-test-secret-key-that-is-long-enough-0123456789',
+    'GC_PUBLIC_URL': 'https://app.example.com',
+    'DATABASE_URL': 'postgres://ghostclick:pw@postgres:5432/ghostclick',
+    'GC_REDIS_URL': 'redis://:pw@redis:6379/0',
+    'EMAIL_HOST': 'smtp.example.com',
+}
+
+
+def load(env):
+    """Import the settings with exactly `env` on top of a scrubbed environment."""
+    base = {k: v for k, v in os.environ.items() if not k.startswith(OURS)}
+    base['DJANGO_SETTINGS_MODULE'] = 'config.settings'
+    base['PYTHONIOENCODING'] = 'utf-8'
+    code = (
+        'import json\n'
+        'from django.conf import settings\n'
+        f'print(json.dumps({{k: getattr(settings, k, None) for k in {KEYS!r}}}, default=str))\n'
+    )
+    done = subprocess.run([sys.executable, '-c', code], cwd=AUTH_DIR, env={**base, **env},
+                          capture_output=True, text=True, encoding='utf-8', timeout=60)
+    return done
+
+
+class ProductionProfileTests(SimpleTestCase):
+    def test_everything_derives_from_the_public_url(self):
+        done = load(PRODUCTION)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        got = json.loads(done.stdout)
+        self.assertEqual(got['ALLOWED_HOSTS'], ['app.example.com'])
+        self.assertEqual(got['CSRF_TRUSTED_ORIGINS'], ['https://app.example.com'])
+        self.assertEqual(got['SECURE_PROXY_SSL_HEADER'], ['HTTP_X_FORWARDED_PROTO', 'https'])
+        self.assertFalse(got['USE_X_FORWARDED_HOST'])
+        self.assertTrue(got['SESSION_COOKIE_SECURE'])
+        self.assertTrue(got['CSRF_COOKIE_SECURE'])
+        self.assertEqual(got['SESSION_COOKIE_NAME'], '__Host-sessionid')
+        self.assertEqual(got['CSRF_COOKIE_NAME'], '__Host-csrftoken')
+        # Strict would arrive at the Google callback with no session.
+        self.assertEqual(got['SESSION_COOKIE_SAMESITE'], 'Lax')
+        self.assertEqual(got['CSRF_COOKIE_SAMESITE'], 'Lax')
+        self.assertTrue(got['SESSION_COOKIE_HTTPONLY'])
+        self.assertEqual(got['SESSION_COOKIE_AGE'], 12 * 3600)
+        self.assertTrue(got['SESSION_SAVE_EVERY_REQUEST'])
+        self.assertEqual(got['GC_SESSION_ABSOLUTE_SECONDS'], 7 * 24 * 3600)
+        self.assertEqual(got['SESSION_ENGINE'], 'django.contrib.sessions.backends.db')
+        self.assertEqual(got['SECURE_REFERRER_POLICY'], 'strict-origin-when-cross-origin')
+        self.assertEqual(got['ALLAUTH_TRUSTED_PROXY_COUNT'], 1)
+        self.assertTrue(got['EMAIL_BACKEND'].endswith('smtp.EmailBackend'))
+        self.assertEqual(got['MFA_TOTP_TOLERANCE'], 0)
+
+    def test_hsts_is_the_edge_s_job(self):
+        # TLS ends at Caddy, which emits HSTS. A second copy here would be a
+        # second place for the value to be wrong.
+        got = json.loads(load(PRODUCTION).stdout)
+        self.assertEqual(got['SECURE_HSTS_SECONDS'], 0)
+        self.assertFalse(got['SECURE_SSL_REDIRECT'])
+
+    def test_an_http_demo_still_signs_in(self):
+        # Secure cookies are simply not sent over http, so a demo on a bare IP
+        # would sign in and stay signed out. The scheme decides.
+        got = json.loads(load({**PRODUCTION, 'GC_PUBLIC_URL': 'http://203.0.113.10'}).stdout)
+        self.assertEqual(got['ALLOWED_HOSTS'], ['203.0.113.10'])
+        self.assertFalse(got['SESSION_COOKIE_SECURE'])
+        self.assertEqual(got['SESSION_COOKIE_NAME'], 'sessionid')
+        self.assertEqual(got['CSRF_COOKIE_NAME'], 'csrftoken')
+
+    def test_a_trailing_slash_does_not_break_the_origin(self):
+        got = json.loads(load({**PRODUCTION, 'GC_PUBLIC_URL': 'https://app.example.com/'}).stdout)
+        self.assertEqual(got['CSRF_TRUSTED_ORIGINS'], ['https://app.example.com'])
+
+    def test_the_legacy_hosts_variable_is_ignored_once_the_url_is_set(self):
+        # Two sources of truth is the bug this profile exists to remove.
+        got = json.loads(load({**PRODUCTION, 'DJANGO_ALLOWED_HOSTS': 'other.example.com'}).stdout)
+        self.assertEqual(got['ALLOWED_HOSTS'], ['app.example.com'])
+
+
+class RefusalTests(SimpleTestCase):
+    """Configurations that would come up healthy and be wrong do not come up."""
+
+    def refuses(self, env, *mentions):
+        done = load(env)
+        self.assertNotEqual(done.returncode, 0, f'it started:\n{done.stdout}')
+        for m in mentions:
+            self.assertIn(m, done.stderr)
+
+    def test_wildcard_hosts_are_refused_when_debug_is_off(self):
+        self.refuses({**PRODUCTION, 'GC_PUBLIC_URL': '', 'DJANGO_ALLOWED_HOSTS': '*'}, "'*'", 'GC_PUBLIC_URL')
+
+    def test_wildcard_hosts_are_fine_on_a_laptop(self):
+        done = load({'DJANGO_DEBUG': '1', 'DJANGO_ALLOWED_HOSTS': '*'})
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_an_in_process_cache_is_refused_when_debug_is_off(self):
+        # Five attempts per worker, reset on restart, is not a rate limit.
+        self.refuses({**PRODUCTION, 'GC_REDIS_URL': ''}, 'LocMemCache', 'GC_REDIS_URL')
+
+    def test_sqlite_is_refused_when_debug_is_off(self):
+        self.refuses({**PRODUCTION, 'DATABASE_URL': ''}, 'DATABASE_URL')
+
+    def test_smtp_without_a_host_is_refused(self):
+        self.refuses({**PRODUCTION, 'EMAIL_HOST': ''}, 'EMAIL_HOST')
+
+    def test_but_a_backend_named_on_purpose_is_allowed(self):
+        done = load({**PRODUCTION, 'EMAIL_HOST': '',
+                     'DJANGO_EMAIL_BACKEND': 'django.core.mail.backends.console.EmailBackend'})
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_a_public_url_without_a_scheme_is_refused(self):
+        self.refuses({**PRODUCTION, 'GC_PUBLIC_URL': 'app.example.com'}, 'GC_PUBLIC_URL')
+
+    def test_a_missing_secret_key_is_refused(self):
+        self.refuses({**PRODUCTION, 'DJANGO_SECRET_KEY': ''}, 'DJANGO_SECRET_KEY')
+
+
+class LaptopProfileTests(SimpleTestCase):
+    def test_nothing_set_is_the_laptop(self):
+        done = load({})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        got = json.loads(done.stdout)
+        self.assertTrue(got['DEBUG'])
+        self.assertEqual(got['ALLOWED_HOSTS'], ['localhost', '127.0.0.1', '[::1]'])
+        self.assertIsNone(got['SECURE_PROXY_SSL_HEADER'])
+        self.assertFalse(got['SESSION_COOKIE_SECURE'])
+        self.assertEqual(got['SESSION_COOKIE_NAME'], 'sessionid')
+        # No edge, so no proxy is trusted and the peer is the client.
+        self.assertEqual(got['ALLAUTH_TRUSTED_PROXY_COUNT'], 0)
+        self.assertTrue(got['EMAIL_BACKEND'].endswith('console.EmailBackend'))
+        # The clocks apply on a laptop too; they are not a production feature.
+        self.assertEqual(got['SESSION_COOKIE_AGE'], 12 * 3600)
+        self.assertEqual(got['GC_SESSION_ABSOLUTE_SECONDS'], 7 * 24 * 3600)
+
+    def test_argon2_is_first_and_pbkdf2_is_kept_for_old_hashes(self):
+        got = json.loads(load({}).stdout)
+        self.assertTrue(got['PASSWORD_HASHERS'][0].endswith('Argon2PasswordHasher'))
+        self.assertTrue(got['PASSWORD_HASHERS'][1].endswith('PBKDF2PasswordHasher'))
+        self.assertEqual(len(got['PASSWORD_HASHERS']), 2)
