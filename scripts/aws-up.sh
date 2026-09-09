@@ -301,8 +301,26 @@ if [ ! -f .env.prod ]; then
   echo "  generating secrets (on this host only — they are never printed or sent back)"
   cp .env.prod.example .env.prod
   gen() { head -c 48 /dev/urandom | base64 | tr -d '=+/\n' | cut -c1-64; }
-  # sed with a | delimiter: a base64url secret can contain / but never |.
-  sed -i "s|^GC_AUTH_SECRET=.*|GC_AUTH_SECRET=$(gen)|"        .env.prod
+  # The token signing keypair, made with openssl because there is no Python
+  # with `cryptography` on the box yet. The kid is the RFC 7638 thumbprint of
+  # the public key — SHA-256 over {"crv","kty","x"} in that order with no
+  # whitespace — which is exactly what accounts/tokens.py derives, so the
+  # control plane's tokens name the key the runner was given.
+  b64url() { base64 | tr '+/' '-_' | tr -d '=\n'; }
+  openssl genpkey -algorithm ed25519 -out /tmp/gc-signing.pem
+  chmod 600 /tmp/gc-signing.pem
+  x=$(openssl pkey -in /tmp/gc-signing.pem -pubout -outform DER | tail -c 32 | b64url)
+  kid=$(printf '{"crv":"Ed25519","kty":"OKP","x":"%s"}' "$x" | openssl dgst -sha256 -binary | b64url)
+  private_line=$(awk 'BEGIN{ORS="\\n"} {print}' /tmp/gc-signing.pem | sed 's/\\n$//')
+  public_line=$(openssl pkey -in /tmp/gc-signing.pem -pubout | awk 'BEGIN{ORS="\\n"} {print}')
+  rm -f /tmp/gc-signing.pem
+  # Not sed for these two: sed reads a backslash-n in a replacement as a
+  # newline, and the whole point of the one-line PEM is that it has none.
+  grep -vE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS)=' .env.prod > .env.prod.tmp
+  printf "GC_SIGNING_KEY='%s'\n" "$private_line" >> .env.prod.tmp
+  printf "GC_AUTH_PUBLIC_KEYS='{\"%s\": \"%s\"}'\n" "$kid" "$public_line" >> .env.prod.tmp
+  mv .env.prod.tmp .env.prod
+  # sed with a | delimiter: base64 can contain / but never |.
   sed -i "s|^DJANGO_SECRET_KEY=.*|DJANGO_SECRET_KEY=$(gen)|"  .env.prod
   sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(gen)|"  .env.prod
   sed -i "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=$(gen)|"        .env.prod

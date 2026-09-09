@@ -11,7 +11,10 @@ import * as origins from './origins.js';
 import * as vault from './secrets.js';
 import * as history from './runs.js';
 import { chooseHome } from './home.js';
-import { bearer, verify, MIN_SECRET } from './auth.js';
+import { bearer, verify } from './auth.js';
+import { AUTH_ON, DEMO, PUBLIC_KEYS, KEY_ERROR, WEB_ORIGIN, AUTH_ORIGIN } from './mode.js';
+import * as tickets from './tickets.js';
+import { blocked } from './reach.js';
 import * as suites from './suites.js';
 import { discover, links } from './targets.js';
 import { parse } from './parse.js';
@@ -31,27 +34,56 @@ const homeUrl = () => chooseHome({
 });
 
 /**
- * Auth is OFF unless GC_AUTH_SECRET is set, and that is a deliberate default
- * for a tool whose normal shape is one person, one laptop, one localhost port.
- * What is not acceptable is being quiet about it — an operator who thinks this
- * is protected and is wrong is worse off than one who knows it is open — so the
- * boot banner says which mode it is in, every time.
+ * Auth is OFF unless GC_AUTH_PUBLIC_KEYS names a key (mode.js), and that is a
+ * deliberate default for a tool whose normal shape is one person, one laptop,
+ * one localhost port. What is not acceptable is being quiet about it — an
+ * operator who thinks this is protected and is wrong is worse off than one
+ * who knows it is open — so the boot banner says which mode it is in, every
+ * time.
  *
- * Set, it is enforced on every /api route and on the socket. Set to something
- * short, the process refuses to start: a weak shared key still "works", which
- * means nothing ever surfaces the mistake.
+ * Set, it is enforced on every /api route and on the socket, with PUBLIC keys
+ * only. The one thing this process must never be handed is signing material:
+ * a runner that could mint would be a runner that can authorise itself, and
+ * the cutover from the shared HMAC secret is one-directional on purpose — a
+ * GC_AUTH_SECRET still in the environment is refused, not ignored, because it
+ * means a deployment that was half moved and still has the old key lying
+ * around next to the browser [token-1] [token-2].
  */
-const AUTH_SECRET = process.env.GC_AUTH_SECRET ?? '';
-if (AUTH_SECRET && AUTH_SECRET.length < MIN_SECRET) {
+if ('GC_AUTH_SECRET' in process.env) {
   console.error(
-    `\n  GC_AUTH_SECRET is ${AUTH_SECRET.length} characters; it must be at least ${MIN_SECRET}.\n` +
-    '\n  It is the key this runner and the Django control plane share, so a short\n' +
-    '  one weakens both and nothing would tell you. Generate one:\n' +
-    '\n    node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'base64url\'))"\n' +
-    '\n  Then set the SAME value here and in auth/.env.\n'
+    '\n  GC_AUTH_SECRET is set, and this process must not hold a signing key.\n' +
+    '\n  Tokens are signed with an Ed25519 private key that lives ONLY in the control\n' +
+    "  plane (GC_SIGNING_KEY). The runner is given the public half:\n" +
+    '\n    cd auth && python manage.py signing_key --new\n' +
+    '\n  and GC_AUTH_PUBLIC_KEYS is the line it prints for the runner. Remove\n' +
+    '  GC_AUTH_SECRET from every environment; nothing reads it any more.\n'
   );
   process.exit(1);
 }
+if (KEY_ERROR) {
+  console.error(`\n  ${KEY_ERROR}\n\n  \`cd auth && python manage.py signing_key\` prints the value the runner expects.\n`);
+  process.exit(1);
+}
+if (AUTH_ON && !WEB_ORIGIN) {
+  // Every socket upgrade is checked against the app origin when auth is on,
+  // so a gated runner with no origin to check against is one nobody's
+  // browser can connect to. Say so now rather than as a 403 on every socket.
+  console.error(
+    '\n  GC_AUTH_PUBLIC_KEYS is set but GC_WEB_ORIGIN is not.\n' +
+    '\n  With auth on, a socket is accepted only from the origin the UI is served at,\n' +
+    '  so the runner has to be told what that is — e.g. GC_WEB_ORIGIN=http://localhost:3000.\n'
+  );
+  process.exit(1);
+}
+/**
+ * Whether the driven page may reach private addresses (reach.js). On
+ * whenever auth is on, because that is the deployed shape; GC_BLOCK_PRIVATE
+ * overrides either way, and `npm run app -- --auth` turns it off with GC_DEMO
+ * on so a laptop with a login can still drive the bundled apps on localhost.
+ */
+const BLOCK_PRIVATE = process.env.GC_BLOCK_PRIVATE != null
+  ? /^(1|true|yes|on)$/i.test(process.env.GC_BLOCK_PRIVATE)
+  : AUTH_ON;
 
 const HEADED = /^(1|true|yes|on)$/i.test(process.env.HEADED ?? '');
 
@@ -85,6 +117,36 @@ let browserReady = false;
 const app = express();
 
 /**
+ * The headers every response carries (docs/AUTH.md §11 [browser-side-3]
+ * [browser-side-4]).
+ *
+ * The CSP is written for the UI: no inline script, nothing from another
+ * origin, the socket and the control plane as the only things it may connect
+ * to, and no framing at all. It is set on every response rather than on the
+ * UI's alone because "every response" is a rule that survives a new route
+ * and "the UI's" is a list that has to be kept. connect-src carries the
+ * control plane's origin when the UI signs in somewhere else (the laptop);
+ * deployed, both sit behind one origin and 'self' already says it.
+ */
+const CSP = "default-src 'self'; connect-src 'self' wss: https:" + (AUTH_ORIGIN ? ` ${AUTH_ORIGIN}` : '') +
+  "; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'";
+/**
+ * The bundled demo apps carry their behaviour in inline scripts — they are
+ * fixtures whose job is to be driven, not the UI — so the pages under
+ * public/ keep everything above except the inline-script rule. They are
+ * only served in demo mode at all.
+ */
+const FIXTURE_CSP = CSP.replace("default-src 'self';", "default-src 'self'; script-src 'self' 'unsafe-inline';");
+app.use((_req, res, next) => {
+  res.setHeader('Content-Security-Policy', CSP);
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
+
+/**
  * Cache-Control, the one header that matters here.
  *
  * Vite fingerprints its assets, so those are safe to cache forever. index.html
@@ -106,7 +168,21 @@ const cacheHeaders = (res, path) => {
  * root — fine for `npm start`, wrong the moment it is started by a process
  * manager, a container ENTRYPOINT, or from anywhere else.
  */
-app.use(express.static(fileURLToPath(new URL('./public', import.meta.url)), { setHeaders: cacheHeaders }));
+/**
+ * The demo apps are fixtures, and a gated runner on a public address does
+ * not serve fixtures: the pages exist to be driven, and driving this
+ * process's own origin is exactly what production must not do. Off when
+ * auth is on unless GC_DEMO=1 says so [browser-side-6]. The hero images are
+ * the operator's own pictures for the dashboard, not a fixture, so they stay.
+ */
+const PUBLIC = fileURLToPath(new URL('./public', import.meta.url));
+app.use('/hero', express.static(join(PUBLIC, 'hero'), { setHeaders: cacheHeaders }));
+if (DEMO) {
+  app.use(express.static(PUBLIC, { setHeaders: (res, path) => {
+    cacheHeaders(res, path);
+    if (path.endsWith('.html')) res.setHeader('Content-Security-Policy', FIXTURE_CSP);
+  } }));
+}
 app.use(express.json({ limit: '512kb' }));
 
 /**
@@ -154,17 +230,16 @@ app.use('/app', (req, res, next) => {
 /**
  * Who may call the API from a browser.
  *
- * `*` is the base case and it is deliberate: the extension POSTs a recording
- * from whatever page you were recording on, so there is no single origin to
- * name. It costs nothing here because every /api route is either a read or
- * gated — /api/recording validates and never executes, and nothing can add an
- * allowed origin except a person pressing a button.
+ * With auth off, `*`: the extension POSTs a recording from whatever page you
+ * were recording on, so there is no single origin to name, and an open
+ * runner has nothing to protect from a cross-origin read. With auth on the
+ * wildcard is gone: only GC_WEB_ORIGIN is echoed, and any other origin gets
+ * no CORS headers at all, so a page elsewhere cannot use a token it somehow
+ * holds from a browser [browser-side-4].
  *
- * GC_WEB_ORIGIN names the frontend when it is deployed somewhere this server is
- * not. It has to be echoed rather than starred: a browser rejects `*` on any
- * credentialed request, so the day this grows a session cookie, `*` is the
- * header that silently blocks the whole app. `Vary: Origin` is what stops a
- * cache handing one origin's response to another.
+ * Echoed rather than starred because a browser rejects `*` on any
+ * credentialed request. `Vary: Origin` is what stops a cache handing one
+ * origin's response to another.
  */
 /**
  * Liveness, and the only route outside the gate that answers anything.
@@ -185,41 +260,42 @@ app.get('/healthz', (_req, res) => {
   res.status(browserReady ? 200 : 503).json({ ok: browserReady, browser: browserReady, busy: running });
 });
 
-const WEB_ORIGIN = (process.env.GC_WEB_ORIGIN ?? '').replace(/\/+$/, '');
+const fail = (res, err, code = 400) => res.status(code).json({ ok: false, error: err.message ?? String(err) });
+const sendOk = (res, body) => res.json({ ok: true, ...body });
+
 app.use('/api', (req, res, next) => {
   if (WEB_ORIGIN && req.headers.origin === WEB_ORIGIN) {
     res.set('Access-Control-Allow-Origin', WEB_ORIGIN);
     res.set('Access-Control-Allow-Credentials', 'true');
     res.set('Vary', 'Origin');
-  } else {
+  } else if (!AUTH_ON) {
     res.set('Access-Control-Allow-Origin', '*');
   }
   res.set('Access-Control-Allow-Headers', 'content-type, authorization');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
   // A preflight carries no Authorization header by definition, so it must be
   // answered before the gate. Requiring auth here would make every
   // cross-origin call fail at the preflight, which reads as a CORS bug.
   if (req.method === 'OPTIONS') return res.sendStatus(204);
 
-  if (!AUTH_SECRET) return next();
+  if (!AUTH_ON) return next();
 
   /**
-   * One exception, and it is the extension.
-   *
-   * POST /api/recording is called from whatever page you were recording on. It
-   * has no session with the control plane and no way to be handed a token, so
-   * requiring one here does not secure the endpoint, it deletes the feature.
-   *
-   * It is the safest route to leave open: it parses a flow, validates it
-   * through the same origin gate as everything else, and puts the text in the
-   * script box. It never executes anything — a human presses Run. Giving the
-   * extension a real token is worth doing and is not this change.
+   * No exceptions. POST /api/recording used to be the one route left open
+   * for the extension, which records on a page where it has no session. With
+   * auth on it is under the gate like everything else: the extension gets a
+   * token of its own through the control plane (docs/AUTH.md §11
+   * [browser-side-2]), which is the ops flow's to build, and until then the
+   * hand-off is a laptop feature.
    */
-  if (req.method === 'POST' && req.path === '/recording') return next();
-
   const token = bearer(req.headers.authorization);
   if (!token) return res.status(401).json({ ok: false, error: 'Not signed in' });
   try {
-    req.user = verify(token, AUTH_SECRET);
+    // The claims are `req.user`, and they are USED: the organisation keys
+    // every store, `su` gates allowing an origin, `role` and `ent` are read
+    // where they are enforced. Nothing about who is calling is ever read
+    // from anywhere else.
+    req.user = verify(token, PUBLIC_KEYS);
   } catch (err) {
     // The reason is safe to say: the caller already holds the token, so
     // "expired" versus "bad signature" tells them nothing they could not
@@ -229,6 +305,30 @@ app.use('/api', (req, res, next) => {
   }
   next();
 });
+
+/**
+ * Trade a token for a socket ticket (tickets.js). A browser cannot set
+ * headers on a WebSocket, so the socket is opened with this instead of the
+ * token: thirty seconds, one use, bound to these claims. Exists only when
+ * auth is on; an open runner's socket needs nothing.
+ */
+app.post('/api/socket-ticket', (req, res) => {
+  if (!AUTH_ON) return res.status(404).json({ ok: false, error: 'auth is off; the socket needs no ticket' });
+  try { res.json({ ok: true, ...tickets.issue(req.user) }); }
+  catch (err) { fail(res, err, err.name === 'TooManyTickets' ? 429 : 500); }
+});
+
+/**
+ * Step-up: is this token fresh enough for the one action that demands it?
+ *
+ * Allowing an origin is the blast-radius action — it is what decides where
+ * the browser may be pointed — so it wants a recent authentication, not a
+ * session that has been sitting open since Monday. The control plane does
+ * the reasoning about which factor counts and writes the answer into the
+ * token as `su`, "step-up valid until"; the runner's whole check is that the
+ * clock has not passed it (docs/AUTH.md §9 [mfa-recovery-2]).
+ */
+const steppedUp = (claims) => !AUTH_ON || (typeof claims?.su === 'number' && Date.now() / 1000 < claims.su);
 
 app.get('/api/runs', (req, res) => res.json(history.summary(14, req.query.suite || null)));
 app.get('/api/defects', (_req, res) => res.json(history.defects(14)));
@@ -263,8 +363,6 @@ app.get('/api/hero', (_req, res) => {
  * an origin: `POST /api/origins` exists for that, and it is only ever reached
  * by someone pressing a button.
  */
-const fail = (res, err, code = 400) => res.status(code).json({ ok: false, error: err.message ?? String(err) });
-const sendOk = (res, body) => res.json({ ok: true, ...body });
 
 /** Parse+validate a flow the way the executor will. Suites store nothing unrunnable. */
 const checkFlow = (flow) => validate(flatten(parseFlow(flow)));
@@ -331,6 +429,7 @@ app.get('/api/state', (_req, res) => res.json({
 
 app.get('/api/origins', (_req, res) => res.json({ origins: origins.list() }));
 app.post('/api/origins', (req, res) => {
+  if (!steppedUp(req.user)) return res.status(403).json({ ok: false, error: 'step_up_required' });
   try {
     const r = origins.add(req.body?.origin);
     emit({ t: 'origins', origins: origins.list() });
@@ -578,21 +677,34 @@ app.post('/api/recording', (req, res) => {
  * Every one of these is a link that "works" — you land on a page, the URL looks
  * plausible — and every one is a different kind of wrong. They exist so the
  * redirect assertions have something honest to assert against.
+ *
+ * Demo mode only, like the pages they lead to. And /go/r takes a relative
+ * path and nothing else: an open redirect on a gated runner is a way to make
+ * an allowed origin lead anywhere [browser-side-6].
  */
-app.get('/go/tracked', (_req, res) => res.redirect(302, '/go/r?to=/pricing.html'));
-app.get('/go/r', (req, res) => res.redirect(302, String(req.query.to || '/')));
-app.get('/go/moved', (_req, res) => res.redirect(301, '/go/moved-again'));
-// Leaves the origin, the way http://acme.com → https://www.acme.com does. The
-// host differs, so the browser follows it quite legitimately and lands
-// somewhere nobody allowed.
-app.get('/go/offsite', (_req, res) =>
-  res.redirect(302, `http://127.0.0.1:${process.env.PORT || 3000}/demo.html`));
-app.get('/go/moved-again', (_req, res) => res.redirect(302, '/pricing.html'));
-app.get('/go/gone', (_req, res) => res.status(404).send(
-  '<!doctype html><title>Not found</title><h1>Page not found</h1>' +
-  '<p>The friendly 404 that makes a URL assertion pass anyway.</p>'));
-app.get('/pricing.html', (_req, res) => res.send(
-  '<!doctype html><title>Pricing</title><h1>Pricing</h1><p>Three plans.</p>'));
+if (DEMO) {
+  app.get('/go/tracked', (_req, res) => res.redirect(302, '/go/r?to=/pricing.html'));
+  app.get('/go/r', (req, res) => {
+    const to = String(req.query.to || '/');
+    // One leading slash, not two: `//evil.example` is a protocol-relative URL
+    // and a browser follows it off this host. A backslash is what some
+    // browsers read as a slash.
+    if (!/^\/(?![\/\\])/.test(to)) return res.status(400).send('relative paths only');
+    res.redirect(302, to);
+  });
+  app.get('/go/moved', (_req, res) => res.redirect(301, '/go/moved-again'));
+  // Leaves the origin, the way http://acme.com → https://www.acme.com does. The
+  // host differs, so the browser follows it quite legitimately and lands
+  // somewhere nobody allowed.
+  app.get('/go/offsite', (_req, res) =>
+    res.redirect(302, `http://127.0.0.1:${process.env.PORT || 3000}/demo.html`));
+  app.get('/go/moved-again', (_req, res) => res.redirect(302, '/pricing.html'));
+  app.get('/go/gone', (_req, res) => res.status(404).send(
+    '<!doctype html><title>Not found</title><h1>Page not found</h1>' +
+    '<p>The friendly 404 that makes a URL assertion pass anyway.</p>'));
+  app.get('/pricing.html', (_req, res) => res.send(
+    '<!doctype html><title>Pricing</title><h1>Pricing</h1><p>Three plans.</p>'));
+}
 
 // Vendored so the viewer works with no CDN and no network.
 app.get('/vendor/mermaid.min.js', (_req, res) =>
@@ -623,42 +735,58 @@ await new Promise((resolve) => {
   });
 });
 /**
- * The socket, upgraded by hand so the token can be checked first.
+ * The socket, upgraded by hand so the ticket can be checked first.
  *
  * `new WebSocketServer({ server })` would accept the upgrade and only then let
  * us look, which means an unauthenticated client is already a connected client
  * receiving screencast frames. noServer + an explicit handler is the difference
  * between refusing and disconnecting.
  *
- * The token rides in the query string because a browser cannot set headers when
- * opening a WebSocket — there is no `fetch`-style options object for
- * `new WebSocket()`. That puts a credential somewhere URLs get logged, which is
- * exactly why the control plane mints them ten minutes long.
+ * What rides in the query string is a TICKET (tickets.js), never the token: a
+ * browser cannot set headers when opening a WebSocket, and a URL is what logs,
+ * referrers and history keep, so the thing in it is thirty seconds long and
+ * good once. A `?t=` token in the URL is refused outright — a token in a URL
+ * must fail, not work, or someone will keep doing it [ops-supply-4].
  *
- * The PATH is deliberately not restricted. The browser uses /ws, but this
- * repository's own check scripts connect to the root, and the path was never
- * the boundary — the token is. Narrowing it here would break six checks and
- * secure nothing.
+ * Origin is checked when auth is on: a page on another origin can open a
+ * WebSocket to this one — the browser sends no preflight for sockets — and
+ * with a ticket it somehow obtained would be a viewer. The app origin is the
+ * only one that may connect [websocket-6] [browser-side-5]. With auth off
+ * nothing is checked, and the repository's own check scripts, which connect
+ * from Node with no Origin at all, keep working.
+ *
+ * The PATH is deliberately not restricted. The browser uses /ws, but the
+ * check scripts connect to the root, and the path was never the boundary.
+ *
+ * maxPayload: a message from a viewer is a command or a cursor position, and
+ * a megabyte is a generous bound on either [websocket-5].
  */
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 1 << 20 });
 wss.on('error', (err) => console.error(`  websocket server: ${err.message}`));
 
 http.on('upgrade', (req, socket, head) => {
-  if (AUTH_SECRET) {
-    let token = null;
-    try { token = new URL(req.url, 'http://localhost').searchParams.get('t'); } catch { /* unparseable */ }
-    try {
-      verify(token, AUTH_SECRET);
-    } catch (err) {
-      // A real HTTP response, not a bare destroy: a socket that closes with no
-      // status looks like a crashed server, and the UI would sit reconnecting
-      // on its timer forever without ever saying why.
-      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
-      socket.destroy();
-      return;
-    }
+  // A real HTTP response, not a bare destroy: a socket that closes with no
+  // status looks like a crashed server, and the UI would sit reconnecting
+  // on its timer forever without ever saying why.
+  const refuse = (code, text, why) => {
+    socket.write(`HTTP/1.1 ${code} ${text}\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: ${Buffer.byteLength(why)}\r\n\r\n${why}`);
+    socket.destroy();
+  };
+  let claims = null;
+  if (AUTH_ON) {
+    let params;
+    try { params = new URL(req.url, 'http://localhost').searchParams; } catch { return refuse(400, 'Bad Request', 'unreadable url'); }
+    if (params.has('t')) return refuse(401, 'Unauthorized', 'a token in a URL is refused; POST /api/socket-ticket and open the socket with ?ticket=');
+    if (req.headers.origin !== WEB_ORIGIN) return refuse(403, 'Forbidden', 'the socket is open to the app origin only');
+    claims = tickets.redeem(params.get('ticket'));
+    if (!claims) return refuse(401, 'Unauthorized', 'no ticket, or a ticket already spent or expired');
   }
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    // Bound at the upgrade and read by every message handler. `null` is auth
+    // off, and nothing downstream may treat null as "anyone".
+    ws.claims = claims;
+    wss.emit('connection', ws, req);
+  });
 });
 
 // Starting with HOME_URL set is a person naming an origin on the command line,
@@ -672,9 +800,15 @@ if (process.env.HOME_URL) {
 console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  serving     ->  ${WEB_DIR}${process.env.GC_WEB_DIR ? '  (GC_WEB_DIR)' : ''}` +
             `\n  driving     ->  ${homeUrl() ?? 'nothing yet — open a URL in the console'}` +
-            `\n  auth        ->  ${AUTH_SECRET
-              ? 'on — a token from the control plane is required'
-              : 'OFF — GC_AUTH_SECRET unset, anyone who can reach this port can drive it'}` +
+            `\n  auth        ->  ${AUTH_ON
+              ? `on — an EdDSA token from the control plane is required; keys: ${[...PUBLIC_KEYS.keys()].join(', ')}`
+              : 'OFF — GC_AUTH_PUBLIC_KEYS unset, anyone who can reach this port can drive it'}` +
+            `\n  reach       ->  ${BLOCK_PRIVATE
+              ? 'the driven page cannot reach loopback, private or link-local addresses'
+              : 'unrestricted — the driven page may reach anything this host can (GC_BLOCK_PRIVATE=1 to close it)'}` +
+            `\n  demo        ->  ${DEMO
+              ? 'the bundled apps and /go/* fixtures are served'
+              : 'not served — GC_DEMO=1 serves them behind the gate'}` +
             `\n  browser     ->  ${HEADED ? 'headed — a real window you can watch' : 'headless — streamed to the canvas (HEADED=1 for a window)'}` +
             `\n  allowed     ->  ${origins.list().join(', ')}` +
             `\n  secrets     ->  ${vault.names().join(', ') || '(none set)'}` +
@@ -707,7 +841,6 @@ const browser = await chromium.launch({
   args: ['--disable-dev-shm-usage', '--force-color-profile=srgb'],
 });
 page = await browser.newPage({ viewport: VIEW });
-browserReady = true;
 const cdp = await page.context().newCDPSession(page);
 
 let lastFrame = null;
@@ -717,6 +850,23 @@ function emit(ev) {
   const msg = JSON.stringify(ev);
   for (const c of clients) if (c.readyState === 1) c.send(msg);
 }
+
+/**
+ * Every request the driven page makes, inspected (reach.js). The allowlist
+ * decides where the browser may NAVIGATE; this decides what a page there may
+ * then fetch, which is the half an allowlist cannot see. Installed before
+ * browserReady, so nothing is driven through a gap.
+ */
+if (BLOCK_PRIVATE) {
+  await page.context().route('**/*', async (route) => {
+    const url = route.request().url();
+    const why = await blocked(url);
+    if (!why) return route.continue();
+    emit({ t: 'log', level: 'error', msg: `blocked ${url} — ${why}` });
+    return route.abort('blockedbyclient');
+  });
+}
+browserReady = true;
 
 cdp.on('Page.screencastFrame', async ({ data, sessionId }) => {
   // ACK FIRST. Chrome sends no further frames until this lands — it is the
@@ -962,8 +1112,32 @@ async function run(plan, meta = {}) {
 }
 
 // ---------------------------------------------------------------- sockets
+/** Live sockets per subject. A fourth closes the oldest [websocket-5]. */
+const MAX_SOCKETS_PER_SUB = 3;
+
 wss.on('connection', (ws) => {
+  const claims = ws.claims ?? null;
+  // Only to this viewer — a refusal is theirs, not the room's.
+  const tell = (ev) => { if (ws.readyState === 1) ws.send(JSON.stringify(ev)); };
+
+  let expiry = null;
+  if (claims) {
+    const sub = String(claims.sub);
+    // Insertion order is age: the Set was added to as sockets arrived.
+    const mine = [...clients].filter((c) => c.claims && String(c.claims.sub) === sub);
+    while (mine.length >= MAX_SOCKETS_PER_SUB) mine.shift().close(4409, 'replaced by a newer connection');
+    // The socket lives exactly as long as the token that opened it. The UI
+    // reconnects with a fresh ticket from a fresh token, so a session that
+    // has ended stops seeing frames within ten minutes, with no revocation
+    // channel needed [websocket-1].
+    expiry = setTimeout(() => ws.close(4401, 'token expired'), Math.max(0, claims.exp * 1000 - Date.now()));
+  }
   clients.add(ws);
+  // A socket that sends more than maxPayload, or breaks the framing, raises
+  // 'error' on the socket — and an 'error' event with no listener is an
+  // uncaught exception that takes the whole runner down. One bad viewer
+  // must not cost everyone else the browser.
+  ws.on('error', (err) => console.error(`  socket: ${err.message}`));
 
   // LISTEN FIRST, then greet.
   //
@@ -976,6 +1150,17 @@ wss.on('connection', (ws) => {
   ws.on('message', async (raw) => {
     let m;
     try { m = JSON.parse(raw); } catch { return; }
+    if (!m || typeof m !== 'object') return;
+
+    // Every message is authorised against the claims bound at the upgrade,
+    // exactly as the HTTP routes are against req.user — never against
+    // anything in the message. The driving-org lock and the per-org
+    // broadcast (docs/AUTH.md §9.5–6) read `claims.org` here; that is the
+    // runner-tenancy step. What is enforced today is step-up on origin.add.
+
+    // The UI says goodbye on sign-out and before a new sign-in, and the
+    // socket is dropped at once rather than left to time out [session-3].
+    if (m.t === 'bye') return void ws.close(1000, 'bye');
 
     if (m.t === 'command') {
       let plan;
@@ -1030,8 +1215,14 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // Allowing an origin is a human act, through the UI. No plan can reach it.
+    // Allowing an origin is a human act, through the UI. No plan can reach it,
+    // and — identical to POST /api/origins — it wants a recent authentication.
     if (m.t === 'origin.add') {
+      if (!steppedUp(claims)) {
+        tell({ t: 'refused', of: 'origin.add', error: 'step_up_required' });
+        tell({ t: 'log', level: 'error', msg: 'allowing an origin needs a recent sign-in — sign in again and retry' });
+        return;
+      }
       try {
         const r = origins.add(m.origin);
         emit({ t: 'origins', origins: origins.list() });
@@ -1113,7 +1304,7 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => clients.delete(ws));
+  ws.on('close', () => { clients.delete(ws); if (expiry) clearTimeout(expiry); });
 
   // Now say hello. Frames are damage-driven — a static page emits nothing — so
   // prime the viewer with the last one we held rather than leaving it black.

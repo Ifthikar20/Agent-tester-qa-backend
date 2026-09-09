@@ -52,7 +52,6 @@ jobs:
         working-directory: auth
         env:
           DJANGO_SECRET_KEY: not-a-real-key-just-for-tests-0123456789
-          GC_AUTH_SECRET: not-a-real-secret-just-for-tests-0123456789
 
   images:
     # Neither image has ever been through `docker build` — docs/DEPLOY.md says

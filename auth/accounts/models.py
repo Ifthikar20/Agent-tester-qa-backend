@@ -86,6 +86,10 @@ class AuthEvent(models.Model):
         INVITATION_SENT = 'invitation_sent', 'invitation issued'
         INVITATION_ACCEPTED = 'invitation_accepted', 'invitation accepted'
         INVITATION_REFUSED = 'invitation_refused', 'invitation refused'
+        # One row per executor token, with its jti in `detail`: a token that
+        # never appears here was not minted here [token-5].
+        MINT = 'mint', 'executor token minted'
+        MINT_REFUSED = 'mint_refused', 'executor token refused'
 
     at = models.DateTimeField(default=timezone.now, db_index=True)
     # A CharField with choices rather than an enum column: later flows add

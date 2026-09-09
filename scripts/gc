@@ -5,7 +5,7 @@
 #   ./scripts/gc ps
 #   ./scripts/gc exec control python manage.py createsuperuser
 #
-# Without --env-file, compose cannot interpolate GC_AUTH_SECRET and exits 1
+# Without --env-file, compose cannot interpolate GC_SIGNING_KEY and exits 1
 # before doing anything — including for `logs` and `ps`, which need no
 # variables at all. That error reads like a broken config file, and it is the
 # first thing you hit after a deploy. This wrapper is the fix, and it is why

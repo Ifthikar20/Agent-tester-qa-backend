@@ -9,11 +9,14 @@ services with an opinion about the same rule is how a hard gate quietly becomes
 advisory, and the gate here decides where a real browser is pointed.
 
 The design it is being built towards is [docs/AUTH.md](../docs/AUTH.md). This
-directory is at the **tenants** step of that document's build order: the
+directory is at the **token-runner** step of that document's build order: the
 foundation (settings profile, hashing, the audit log, the session clocks, the
-stores and edge) plus organisations, roles, invitations and entitlements —
-the control-plane half of §10. The runner does not read the organisation
-claims yet; that is the runner-tenancy step.
+stores and edge), organisations, roles, invitations and entitlements (the
+control-plane half of §10), and now the Ed25519 executor token, its claims and
+its audit row (§8). The runner verifies with public keys only, opens its
+socket for a ticket rather than a token, and enforces step-up on allowing an
+origin; it does not partition its state by organisation yet — that is the
+runner-tenancy step.
 
 ## Why Django
 
@@ -26,7 +29,8 @@ someone has to write.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env                  # then set GC_AUTH_SECRET
+cp .env.example .env
+python manage.py signing_key --new    # prints GC_SIGNING_KEY for .env, and the runner's line
 export $(grep -v '^#' .env | xargs)
 
 python manage.py migrate
@@ -34,13 +38,19 @@ python manage.py createsuperuser      # email is the login
 python manage.py runserver 8000
 ```
 
-Then point the UI at it and give the runner the same shared secret:
+Then point the UI at it and give the runner the PUBLIC half of the key — the
+`GC_AUTH_PUBLIC_KEYS=` line `signing_key` printed — and the two origins it
+needs to know:
 
 ```bash
 # in the repository root
-GC_AUTH_SECRET=<the same value> npm start
+GC_AUTH_PUBLIC_KEYS='{"<kid>": "-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----\n"}' \
+GC_WEB_ORIGIN=http://localhost:3000 GC_AUTH_ORIGIN=http://localhost:8000 npm start
 VITE_AUTH_URL=http://localhost:8000 npm run build
 ```
+
+`npm run app -- --auth` from the repository root does all of that, keeping
+the keypair in `.ghostclick/`.
 
 Leave `VITE_AUTH_URL` unset and the UI runs with no login at all, against a
 runner that is also unauthenticated. That is the laptop case and it stays
@@ -101,10 +111,11 @@ the expired rows; the deploy runs it after every migrate.
 
 ## The audit log
 
-`AuthEvent` is one row per sign-in, sign-out, refused password and expired
-session, written by receivers on Django's own `user_logged_in`,
-`user_logged_out` and `user_login_failed` signals — so a view that signs
-someone in cannot forget to log it. Each row has the address **as the edge
+`AuthEvent` is one row per sign-in, sign-out, refused password, expired
+session and **minted token** (with the token's `jti`, so a token that never
+appears here was not minted here), written by receivers on Django's own
+`user_logged_in`, `user_logged_out` and `user_login_failed` signals and by
+the mint view — so a view that signs someone in cannot forget to log it. Each row has the address **as the edge
 reports it** (`accounts.events.client_ip`, the same arithmetic allauth uses
 for its rate limits, with `ALLAUTH_TRUSTED_PROXY_COUNT = 1` behind Caddy and
 `0` on a laptop), the user agent, and for a refusal the email as typed. It is
@@ -152,7 +163,8 @@ EC2_HOST=<ip> bash scripts/adduser.sh qa@example.com   # the box
 | `POST /auth/invitations` | `{email, role}` — issue one; the token is in the answer, once |
 | `DELETE /auth/invitations/<id>` | revoke one |
 | `POST /auth/invitations/accept` | `{token}` — become a member, signed in as the invited address |
-| `POST /auth/executor-token` | a short-lived signed token the **runner** will accept |
+| `POST /auth/executor-token` | a short-lived signed token the **runner** will accept; 12 per 10 minutes per session |
+| `GET /auth/jwks` | the public key the tokens verify with, for humans and tooling — the runner never fetches it |
 | `/admin/` | Django's admin — where accounts, plans and organisations are managed; the edge admits it only from `GC_ADMIN_CIDRS` |
 
 `/auth/login` returns a new `csrfToken` because Django rotates it on sign-in.
@@ -250,30 +262,51 @@ value is ignored rather than merely hidden `[authz-tenancy-6]`.
 
 The runner is never given the session cookie — in production the edge strips
 the `Cookie` header from everything it routes to the runner. It is a different
-service reached over a WebSocket, and a WebSocket cannot carry headers — the
-token ends up in a query string, which is precisely why it is minted
-short-lived and why a cookie must never take its place there.
+service reached over a WebSocket, and a WebSocket cannot carry headers — so
+the token does not go there either. The UI trades it, over a Bearer header,
+for a thirty-second single-use **ticket** (`POST /api/socket-ticket` on the
+runner) and opens the socket with that; a `?t=` token in a socket URL is
+refused, because a URL is what logs and history keep.
 
-`accounts/tokens.py` mints an HS256 JWT using the standard library, and the
-runner verifies it with Node's. Neither side has a JWT dependency: signing is
-HMAC-SHA256 over two base64url segments, and the half that is genuinely easy to
-get wrong is verification, which is written out explicitly in `../auth.js`.
-Because both sides implement the format independently, the assertion that
-matters is a token crossing between them — that is in
-`../scripts/check-auth.js`, not here. (The move to Ed25519, where the runner
-holds only public keys, is the token step of docs/AUTH.md and has not happened
-yet: `GC_AUTH_SECRET` is still shared.)
+`accounts/tokens.py` mints an **EdDSA** JWT over Ed25519 with the
+`cryptography` package, and the runner verifies it with Node's `crypto`.
+Neither side has a JWT dependency: signing is one signature over two
+base64url segments, and the half that is genuinely easy to get wrong is
+verification, which is written out explicitly in `../auth.js` — the algorithm
+pinned, the key chosen by `kid` from the set the runner was started with, the
+lifetime bounded. Because both sides implement the format independently, the
+assertion that matters is a token crossing between them — that is in
+`../scripts/check-auth.js`, not here.
 
-The claims are `sub`, `email`, `scope`, `iat`, `exp`, and since the tenants
-step `org`, `role`, `ent` and `ent_v`: the session's selected organisation,
-the role from its `Membership` row, the runner-enforced entitlements and
-their version. They are copied from the database into the signature; the
-runner reads them from the token and from nothing else.
+The private key is `GC_SIGNING_KEY`, here and nowhere else; the runner is
+given `GC_AUTH_PUBLIC_KEYS`, `{kid: pem}`, and can only verify. `manage.py
+signing_key --new` makes a pair and prints both lines; without `--new` it
+prints the public half of the key in use, which is also what `GET /auth/jwks`
+answers. The `kid` is the RFC 7638 thumbprint of the public key, so it can be
+recomputed from the public key alone. Rotation is: make a new pair, add its
+public key to the runner's set beside the old one, restart the runner, switch
+this service to the new private key, and drop the old public key once every
+token signed with it has expired.
+
+The claims (docs/AUTH.md §8): `iss` and `aud` name the two services; `sub`
+and `email` the account; `org`, `role`, `ent` and `ent_v` the session's
+selected organisation, the role from its `Membership` row, the
+runner-enforced entitlements and their version; `amr` and `auth_time` the
+methods actually used in this session and when, read from the list of
+authentication events the sign-in receiver appends to the session; `su` —
+"step-up valid until" — is `auth_time + 600` when the strongest factor the
+account has was used at `auth_time`, which today is every password sign-in,
+and `0` for a session with no recorded event, and the runner checks nothing
+about it but `now < su` before it allows an origin; `sid` is a hash of the
+session key; `iat`, `exp` (at most 600 seconds later — `GC_TOKEN_TTL` is
+clamped to 60–600) and `jti`. Every one is copied from the database or the
+session into the signature; the runner reads them from the token and from
+nothing else.
 
 ## Tests
 
 ```bash
-python manage.py test          # 162 tests, one module per concern in accounts/tests/ and tenants/tests/
+python manage.py test          # 187 tests, one module per concern in accounts/tests/ and tenants/tests/
 ```
 
 They never touch the network: `accounts/testing.py` is the test runner, and it

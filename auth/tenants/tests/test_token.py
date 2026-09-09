@@ -1,23 +1,16 @@
 """
 The executor token carries the organisation, and only from the database.
 """
-import base64
-import json
-
 from django.test import TestCase, override_settings
+
+from accounts.tests import keys
+from accounts.tests.keys import claims_of
 
 from ..models import Membership, Organization, Role
 from .support import Api, member, org, user
 
-SECRET = 'tests-secret-long-enough-for-hmac-0123456789012'
 
-
-def claims_of(token):
-    segment = token.split('.')[1]
-    return json.loads(base64.urlsafe_b64decode(segment + '=' * (-len(segment) % 4)))
-
-
-@override_settings(GC_AUTH_SECRET=SECRET, GC_TOKEN_TTL=600)
+@override_settings(GC_SIGNING_KEY=keys.PRIVATE_PEM, GC_TOKEN_TTL=600)
 class TokenClaimsTests(TestCase):
     def setUp(self):
         self.ada = user('ada@acme.example')

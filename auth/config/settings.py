@@ -35,8 +35,10 @@ Environment (see .env.example):
   EMAIL_HOST_PASSWORD, EMAIL_USE_TLS, DEFAULT_FROM_EMAIL
                       where mail goes. The console while developing; SMTP
                       when DEBUG is off, and then EMAIL_HOST is required.
-  GC_AUTH_SECRET      shared with the executor. Without it, tokens cannot be
-                      minted and /auth/executor-token says so plainly.
+  GC_SIGNING_KEY      the Ed25519 private key executor tokens are signed with,
+                      as a one-line PEM. `manage.py signing_key --new` prints
+                      it and the public half the runner is given. Without it
+                      tokens cannot be minted and /auth/executor-token says so.
   GC_WEB_ORIGIN       laptop only: where the UI is served from, for CORS and
                       CSRF. In production the UI is the same origin as this.
   GC_TOKEN_TTL        seconds an executor token is good for (default 600).
@@ -351,12 +353,33 @@ GC_ACCEPT_RATE = '10/m/ip'    # invitation acceptance
 
 # ---------------------------------------------------------------- the executor
 #
-# The key this service signs executor tokens with, shared with the runner. There
-# is deliberately no default: a fallback secret is one that reaches production
-# unnoticed, because everything keeps working. Missing means tokens cannot be
-# minted, and the endpoint says exactly that.
-GC_AUTH_SECRET = os.environ.get('GC_AUTH_SECRET', '')
-GC_TOKEN_TTL = int(os.environ.get('GC_TOKEN_TTL', '600'))
+# The Ed25519 private key this service signs executor tokens with. The runner
+# holds only the public half (GC_AUTH_PUBLIC_KEYS), so nothing outside this
+# process can produce a signature. `manage.py signing_key --new` prints both
+# halves. There is deliberately no default and no generated-and-forgotten
+# key: a fallback would reach production unnoticed, and a key regenerated on
+# restart would refuse every token the runner still trusts. Missing on a
+# laptop means /auth/executor-token answers 503 and says so; missing with
+# DEBUG off is refused at import, because a control plane nobody can mint
+# from would otherwise come up healthy.
+#
+# The PEM arrives on one line with literal "\n" between its lines (an env
+# file cannot hold a newline); accounts.tokens.unescape turns those back.
+GC_SIGNING_KEY = os.environ.get('GC_SIGNING_KEY', '')
+if GC_SIGNING_KEY and 'PRIVATE KEY' not in GC_SIGNING_KEY:
+    raise ImproperlyConfigured(
+        'GC_SIGNING_KEY does not look like a PEM private key. It is the output of '
+        '`manage.py signing_key --new`, on one line, with \\n between the PEM lines.'
+    )
+if not DEBUG and not GC_SIGNING_KEY:
+    raise ImproperlyConfigured(
+        'GC_SIGNING_KEY is required when DJANGO_DEBUG is off: without it no executor token '
+        'can be minted. `manage.py signing_key --new` prints one, and the public half for the runner.'
+    )
+# Clamped to 60–600 rather than trusted: ten minutes is the ceiling on what a
+# leaked token is worth, and the runner refuses anything longer anyway, so a
+# larger value here would only produce tokens nothing accepts [token-4].
+GC_TOKEN_TTL = max(60, min(600, int(os.environ.get('GC_TOKEN_TTL', '600') or 600)))
 
 # ---------------------------------------------------------------- tests
 #

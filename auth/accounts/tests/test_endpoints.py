@@ -13,61 +13,101 @@ import io
 import json
 import re
 import sys
-import time
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import Client, TestCase, override_settings
 
-from ..tokens import MIN_SECRET, NoSigningKey, mint
+from ..tokens import ALGORITHM, AUDIENCE, ISSUER, NoSigningKey, kid_of, load_private, mint
+from . import keys
 
-SECRET = 'tests-secret-long-enough-for-hmac-0123456789012'
 User = get_user_model()
 
 
 class TokenTests(TestCase):
     def test_claims_are_what_the_runner_expects(self):
         now = 1_700_000_000
-        token = mint(subject=7, email='qa@example.com', secret=SECRET, ttl=600, now=now)
+        token = mint(subject=7, email='qa@example.com', key=keys.PRIVATE_PEM, ttl=600, now=now,
+                     org='acme', role='member')
         header, claims, signature = token.split('.')
         self.assertTrue(header and claims and signature)
 
-        import base64
-        decoded = json.loads(base64.urlsafe_b64decode(claims + '=' * (-len(claims) % 4)))
+        decoded = keys.claims_of(token)
+        self.assertEqual(decoded['iss'], ISSUER)
+        self.assertEqual(decoded['aud'], AUDIENCE)
         self.assertEqual(decoded['sub'], '7')
         self.assertEqual(decoded['email'], 'qa@example.com')
-        self.assertEqual(decoded['scope'], 'run')
+        self.assertEqual(decoded['org'], 'acme')
         self.assertEqual(decoded['iat'], now)
         self.assertEqual(decoded['exp'], now + 600)
+        self.assertTrue(decoded['jti'])
+
+    def test_the_header_is_pinned_and_names_the_key(self):
+        # The runner refuses any alg but EdDSA and any kid it was not given,
+        # so a token that said anything else here would be a token nothing
+        # accepts.
+        head = keys.header_of(mint(subject=1, key=keys.PRIVATE_PEM, org='acme', role='member'))
+        self.assertEqual(head['alg'], ALGORITHM)
+        self.assertEqual(head['typ'], 'JWT')
+        self.assertEqual(head['kid'], keys.KID)
+
+    def test_the_public_key_alone_verifies_it(self):
+        token = mint(subject=1, key=keys.PRIVATE_PEM, org='acme', role='member')
+        self.assertEqual(keys.verify(token)['sub'], '1')
+
+    def test_another_key_does_not(self):
+        from cryptography.exceptions import InvalidSignature
+        _, other_public, _ = __import__('accounts.tokens', fromlist=['generate']).generate()
+        token = mint(subject=1, key=keys.PRIVATE_PEM, org='acme', role='member')
+        with self.assertRaises(InvalidSignature):
+            keys.verify(token, other_public)
 
     def test_segments_are_unpadded(self):
         # base64url in a JWT carries no '=' padding. Emitting it produces a
         # token that some verifiers accept and others refuse, which is the
         # worst possible failure: it works until it meets a different library.
-        self.assertNotIn('=', mint(subject=1, secret=SECRET))
+        self.assertNotIn('=', mint(subject=1, key=keys.PRIVATE_PEM, org='acme', role='member'))
 
-    def test_a_short_secret_refuses_rather_than_signs(self):
-        with self.assertRaises(NoSigningKey):
-            mint(subject=1, secret='x' * (MIN_SECRET - 1))
-
-    def test_no_secret_refuses_rather_than_signs(self):
+    def test_no_key_refuses_rather_than_signs(self):
         # The failure that matters: a default would let an unconfigured service
         # issue tokens nobody can verify, and nothing would say so.
         with self.assertRaises(NoSigningKey):
-            mint(subject=1, secret='')
+            mint(subject=1, key='', org='acme', role='member')
+
+    def test_a_key_that_is_not_ed25519_is_refused(self):
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        rsa_pem = rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption(),
+        ).decode('ascii')
+        with self.assertRaises(NoSigningKey):
+            mint(subject=1, key=rsa_pem, org='acme', role='member')
+
+    def test_a_one_line_pem_is_read_back(self):
+        # An env file cannot hold a newline, so the key travels with literal
+        # backslash-n between its lines.
+        self.assertEqual(kid_of(load_private(keys.PRIVATE_ONE_LINE)), keys.KID)
+
+    def test_the_lifetime_is_clamped(self):
+        now = 1_700_000_000
+        long = keys.claims_of(mint(subject=1, key=keys.PRIVATE_PEM, ttl=3600, now=now, org='acme', role='member'))
+        short = keys.claims_of(mint(subject=1, key=keys.PRIVATE_PEM, ttl=5, now=now, org='acme', role='member'))
+        self.assertEqual(long['exp'] - long['iat'], 600)
+        self.assertEqual(short['exp'] - short['iat'], 60)
+
+    def test_an_organisation_is_required(self):
+        with self.assertRaises(ValueError):
+            mint(subject=1, key=keys.PRIVATE_PEM, org=None, role=None)
 
     def test_the_subject_is_stringified(self):
         # The runner compares sub as a string; an int here and a str there is
         # the kind of mismatch that only shows up under a permissions check.
-        token = mint(subject=42, secret=SECRET)
-        import base64
-        claims = token.split('.')[1]
-        decoded = json.loads(base64.urlsafe_b64decode(claims + '=' * (-len(claims) % 4)))
-        self.assertIsInstance(decoded['sub'], str)
+        token = mint(subject=42, key=keys.PRIVATE_PEM, org='acme', role='member')
+        self.assertIsInstance(keys.claims_of(token)['sub'], str)
 
 
-@override_settings(GC_AUTH_SECRET=SECRET, GC_TOKEN_TTL=600)
+@override_settings(GC_SIGNING_KEY=keys.PRIVATE_PEM, GC_TOKEN_TTL=600)
 class EndpointTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(email='qa@example.com', password='a-long-test-password', name='QA')
@@ -128,9 +168,7 @@ class EndpointTests(TestCase):
         r = self.c.post('/auth/executor-token', data=json.dumps({'sub': 999, 'email': 'root@example.com'}),
                         content_type='application/json', HTTP_X_CSRFTOKEN=tok)
         self.assertEqual(r.status_code, 200)
-        import base64
-        claims = r.json()['token'].split('.')[1]
-        decoded = json.loads(base64.urlsafe_b64decode(claims + '=' * (-len(claims) % 4)))
+        decoded = keys.claims_of(r.json()['token'])
         self.assertEqual(decoded['sub'], str(self.user.pk))
         self.assertEqual(decoded['email'], 'qa@example.com')
 
@@ -140,13 +178,13 @@ class EndpointTests(TestCase):
         self.assertEqual(self.c.get('/auth/me').status_code, 401)
         self.assertEqual(self.c.post('/auth/executor-token', HTTP_X_CSRFTOKEN=after).status_code, 401)
 
-    @override_settings(GC_AUTH_SECRET='')
+    @override_settings(GC_SIGNING_KEY='')
     def test_unconfigured_says_so_rather_than_failing_obscurely(self):
         tok = self.login()
         r = self.c.post('/auth/executor-token', HTTP_X_CSRFTOKEN=tok)
-        # 503, not 500: nothing is broken, it has not been told the key.
+        # 503, not 500: nothing is broken, it has not been given a key.
         self.assertEqual(r.status_code, 503)
-        self.assertIn('GC_AUTH_SECRET', r.json()['error'])
+        self.assertIn('GC_SIGNING_KEY', r.json()['error'])
 
 
 class PasswordTests(TestCase):

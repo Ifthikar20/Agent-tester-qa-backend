@@ -8,4 +8,5 @@ urlpatterns = [
     path('logout', views.logout, name='logout'),
     path('me', views.me, name='me'),
     path('executor-token', views.executor_token, name='executor-token'),
+    path('jwks', views.jwks, name='jwks'),
 ]

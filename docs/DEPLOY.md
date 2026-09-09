@@ -16,11 +16,15 @@ ghostclick launches a real Chromium and drives it at URLs it is told to drive.
 That makes three ordinary decisions load-bearing:
 
 **1 · Authentication is not optional here.**
-`GC_AUTH_SECRET` unset means the runner is open — the banner says so at every
-boot. On a laptop that is correct. On a public IP it is an unauthenticated
-service that will fetch any allowed URL on your behalf, from inside your VPC,
-and stream the result back. The deploy refuses to start without it (see
-`scripts/deploy.sh`), and that refusal is deliberate.
+`GC_AUTH_PUBLIC_KEYS` unset means the runner is open — the banner says so at
+every boot. On a laptop that is correct. On a public IP it is an
+unauthenticated service that will fetch any allowed URL on your behalf, from
+inside your VPC, and stream the result back. The deploy refuses to start
+without it (see `scripts/deploy.sh`), and that refusal is deliberate. The
+runner holds the *public* half of an Ed25519 keypair and can only verify; the
+private half (`GC_SIGNING_KEY`) reaches the control plane and nothing else, so
+a runner that is taken over cannot mint. A `GC_AUTH_SECRET` — the old shared
+HMAC secret — anywhere in the runner's environment stops it from booting.
 
 **2 · The origin allowlist is the blast radius.**
 The runner will only navigate to origins someone has explicitly allowed, and
@@ -30,12 +34,22 @@ endpoint — and that assertion is a load-bearing part of this deployment, not a
 curiosity. **Also set IMDSv2 to required on the instance**, so that even a hole
 in the allowlist does not hand out instance credentials.
 
-**3 · `POST /api/recording` is deliberately unauthenticated.**
+**3 · `POST /api/recording` is under the gate, and closed at the edge too.**
 The browser extension posts a recording from whatever page you were recording
-on, so it has no session and no way to be handed a token. It validates through
-the same origin gate and never executes anything — a human presses Run — but it
-is still a reachable POST endpoint. For this deploy the edge answers it with a
-403, because the extension is not part of what we are demonstrating.
+on, and until the ops step gives it a token of its own through the control
+plane it has none to present — so with auth on the runner answers 401, and the
+edge answers 403 before that, because the extension is not part of what we are
+demonstrating. It validates through the same origin gate and never executes
+anything — a human presses Run.
+
+**4 · The driven page cannot reach inward.** With auth on, every request the
+browser makes is checked against the address it resolves to, and one bound for
+loopback, RFC 1918, link-local (the instance metadata service included), a
+bare compose hostname, `*.internal` or `*.local` is aborted. The compose
+networks give the runner no route to the control plane or the stores anyway;
+this is the check that holds when a page at an allowed origin tries. The
+bundled demo pages are not served on a gated runner (`GC_DEMO=1` brings them
+back), and its own origin is not seeded as drivable.
 
 **And one product limit, so nobody is surprised:** there is one browser and one
 run lock per process. Two signed-in people share the same browser. A login says
@@ -170,7 +184,7 @@ and a trap for a container. Four volumes, or every deploy silently resets:
 
 | Volume | Holds | Lost without it |
 |---|---|---|
-| `ghostclick-state` | run history, the **origin allowlist**, the vault, the shared auth secret | Every allowed origin. Every run. And a regenerated secret, which logs everyone out and invalidates in-flight tokens. |
+| `ghostclick-state` | run history, the **origin allowlist**, the vault | Every allowed origin. Every run. |
 | `postgres-data` | the accounts, the sessions, the audit log | Every account. You would create a superuser on every deploy. |
 | `caddy-data` | certificates and the ACME account key | A fresh certificate request per deploy, against a rate limit that will eventually say no. |
 | `control-static` | Django's collected admin CSS | Nothing you would miss for long; it is rebuilt by `collectstatic`. |
@@ -202,7 +216,7 @@ how you actually reach the box — exactly as you would type it in the browser.
 | the UI, **at build time** | `VITE_AUTH_URL` | where to sign in — its own origin |
 | Caddy | the site address | which host to answer for; whether to get a certificate |
 | Django | `GC_PUBLIC_URL` | `ALLOWED_HOSTS`, the CSRF origin, and whether cookies are `Secure` and `__Host-` prefixed |
-| the runner | `GC_WEB_ORIGIN` | the origin allowed to call `/api` |
+| the runner | `GC_WEB_ORIGIN` | the origin allowed to call `/api`, and the only origin a socket is accepted from |
 
 There used to be four values here that all had to agree with each other, and a
 deployment where they did not failed with a 403 that read like a bug. Now they
@@ -250,14 +264,22 @@ ssh -i cansee-deploy.pem ubuntu@<ip>
 git clone <repo-url> /opt/ghostclick
 cd /opt/ghostclick
 cp .env.prod.example .env.prod
-nano .env.prod          # see below — the URL and four secrets
+nano .env.prod          # see below — the URL, the keypair and three secrets
 ```
 
-`.env.prod` needs five values. Generate the secrets by RUNNING these and
-pasting what they print — do not paste the commands themselves:
+`.env.prod` needs six values. The signing keypair comes from one command, run
+on your laptop in `auth/` (it needs Django and `cryptography` installed —
+`pip install -r auth/requirements.txt`), which prints both lines ready to
+paste, quotes included:
 
 ```bash
-node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"   # GC_AUTH_SECRET
+cd auth && python manage.py signing_key --new     # GC_SIGNING_KEY and GC_AUTH_PUBLIC_KEYS
+```
+
+Generate the other secrets by RUNNING these and pasting what they print — do
+not paste the commands themselves:
+
+```bash
 node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"   # DJANGO_SECRET_KEY
 python3 -c "import secrets; print(secrets.token_urlsafe(24))"                     # POSTGRES_PASSWORD
 python3 -c "import secrets; print(secrets.token_urlsafe(24))"                     # REDIS_PASSWORD
@@ -267,18 +289,25 @@ so that the file ends up holding literal values:
 
 ```bash
 PUBLIC_URL=http://<elastic-ip>   # or https://<hostname> once you have one
-GC_AUTH_SECRET=xQ7f...           # the OUTPUT of the first command
-DJANGO_SECRET_KEY=9mKp...        # the OUTPUT of the second
+GC_SIGNING_KEY='-----BEGIN PRIVATE KEY-----\nMC4C...\n-----END PRIVATE KEY-----'   # as printed, one line
+GC_AUTH_PUBLIC_KEYS='{"<kid>": "-----BEGIN PUBLIC KEY-----\nMCow...\n-----END PUBLIC KEY-----\n"}'
+DJANGO_SECRET_KEY=9mKp...        # the OUTPUT of the first node command
 POSTGRES_PASSWORD=Lk2a...        # URL-safe: letters, digits, - and _
 REDIS_PASSWORD=p0Xn...
 GC_ADMIN_CIDRS=<your-ip>/32      # or /admin/ is closed to everyone
 ```
 
+The PEMs are on one line with `\n` where the line breaks were, and the single
+quotes keep those literal; both services turn them back into newlines. No
+Python on the box? `scripts/aws-up.sh` makes the same keypair with `openssl`,
+and its `kid` the same way — the RFC 7638 thumbprint of the public key — so the
+two halves still name each other.
+
 > Compose reads `.env.prod` as data. It does no command substitution, so a
-> `$(...)` written into the file becomes the signing key verbatim — long enough
-> to pass every length check, identical on both services, so every token
-> verifies and the deploy is entirely healthy with a key that is printed in
-> this file. `scripts/deploy.sh` refuses a `.env.prod` containing `$(`.
+> `$(...)` written into the file becomes the value verbatim. With the old
+> shared secret that produced a deploy that was entirely healthy with a key
+> printed in this file; with a PEM it produces a control plane that refuses to
+> start. `scripts/deploy.sh` refuses a `.env.prod` containing `$(` either way.
 
 The two store passwords are spliced into URLs (`postgres://ghostclick:PASS@…`),
 which is why they have to be URL-safe: a `@` or `/` in one would be parsed as
@@ -330,9 +359,11 @@ EC2_HOST=<elastic-ip> bash scripts/deploy.sh
 It SSHes in itself. What it does, in order:
 
 1. **Refuses** a `.env.prod` that only looks filled in: a placeholder, an
-   unexpanded `$(`, CRLF line endings, a duplicate key, no `GC_AUTH_SECRET`,
-   a `DJANGO_ALLOWED_HOSTS` line (nothing reads it; `'*'` in particular),
-   a `GC_TOKEN_TTL` outside 60–600, or a store password that is not URL-safe
+   unexpanded `$(`, CRLF line endings, a duplicate key, no PEM in
+   `GC_SIGNING_KEY`, no public key in `GC_AUTH_PUBLIC_KEYS` (or a private one
+   there), a leftover `GC_AUTH_SECRET` line, a `DJANGO_ALLOWED_HOSTS` line
+   (nothing reads it; `'*'` in particular), a `GC_TOKEN_TTL` outside 60–600,
+   or a store password that is not URL-safe
 2. **Warns**, loudly, when `PUBLIC_URL` is `http://`
 3. Fetches and resets to the target commit
 4. `docker compose up -d --build`
@@ -383,8 +414,14 @@ else:
 
 ```
   serving     ->  /app/web/dist
-  auth        ->  on — a token from the control plane is required
+  auth        ->  on — an EdDSA token from the control plane is required; keys: <kid>
+  reach       ->  the driven page cannot reach loopback, private or link-local addresses
+  demo        ->  not served — GC_DEMO=1 serves them behind the gate
 ```
+
+The kid after `keys:` is the one `./scripts/gc exec control python manage.py
+signing_key` prints for the control plane's key. If they differ, every token
+is "unknown key" and it reads as a broken login.
 
 ### 3 · The actual thing — drive a page
 
@@ -565,6 +602,11 @@ fine until a migration ever changes a column — none does today.
 - **Mail.** `.env.prod.example` names the console backend, so verification
   codes and reset links go to the control plane's log until an `EMAIL_HOST`
   is set. Nothing sends mail yet; the moment something does, set the host.
+- **Key rotation on a schedule.** `signing_key --new`, add the new public key
+  to `GC_AUTH_PUBLIC_KEYS` beside the old one, restart the runner, switch
+  `GC_SIGNING_KEY`, restart the control plane, and drop the old public key
+  after fifteen minutes. Every mint is in the audit log with its `jti`, so a
+  token that was never minted is detectable. Nothing does this for you yet.
 
 ## Pre-deploy checklist
 
@@ -573,7 +615,8 @@ fine until a migration ever changes a column — none does today.
 - [ ] Launched with the `cansee-deploy` key pair
 - [ ] Security group: 22 to **your IP only**; 80 and 443 to your audience
 - [ ] IMDSv2 required, hop limit 1
-- [ ] `.env.prod` has real values for all five (48 random bytes, not a word)
+- [ ] `.env.prod` has real values for all six — the keypair from `signing_key --new`, 48 random bytes for the rest
+- [ ] `GC_AUTH_PUBLIC_KEYS` holds the public key and `GC_SIGNING_KEY` the private one, not the other way round
 - [ ] `PUBLIC_URL` matches how you will actually reach the box
 - [ ] `GC_ADMIN_CIDRS` is your address, or you accept that `/admin/` is closed
 - [ ] All four volumes declared in the compose file before the first `up`

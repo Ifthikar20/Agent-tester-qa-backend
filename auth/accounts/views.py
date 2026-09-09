@@ -1,11 +1,12 @@
 """
-Four endpoints, and one of them is the whole point.
+Six endpoints, and one of them is the whole point.
 
   GET  /auth/csrf             hand the SPA a CSRF token it can echo back
   POST /auth/login            email + password -> a session cookie
   POST /auth/logout
   GET  /auth/me               who am I, and for which organisation
   POST /auth/executor-token   a short-lived token the RUNNER will accept
+  GET  /auth/jwks             the public keys that token verifies with
 
 The organisation endpoints (switching, invitations) are in tenants/views.py,
 mounted under the same /auth prefix.
@@ -15,12 +16,14 @@ already unwraps for the executor's API — one error path in the frontend rather
 than two, and the words the server chose rather than "Request failed".
 
 Why a separate token instead of forwarding this session cookie to the runner:
-the runner is a different service, on a different origin, reached over a
-WebSocket that cannot carry custom headers. Handing it a long-lived session
-cookie would make every socket URL a durable credential. A ten-minute token
-scoped to one job is the smaller thing to leak.
+the runner is a different service, on a different origin, and it never sees a
+cookie — the edge strips them. Handing it a long-lived session cookie would
+make every socket a durable credential. A ten-minute token scoped to one
+organisation is the smaller thing to leak.
 """
 import json
+import secrets
+import time
 
 from django.contrib.auth import authenticate, login as django_login, logout as django_logout
 from django.conf import settings
@@ -31,7 +34,12 @@ from django.views.decorators.http import require_http_methods
 from tenants import plans
 from tenants.session import describe, selected
 
-from .tokens import NoSigningKey, mint
+from .events import LOGIN_AT, auth_events, record
+from .models import AuthEvent
+from .ratelimit import over
+from .tokens import (
+    NoSigningKey, STEP_UP_SECONDS, jwk, kid_of, load_private, mint, public_pem, session_id,
+)
 
 
 def _body(request):
@@ -135,6 +143,18 @@ def executor_token(request):
     it is written into the token only after the Membership row is found, with
     the role that row holds [authz-tenancy-3]. The entitlements are the
     organisation's resolved plan, cut down to the keys the runner enforces.
+
+    The rest of the claims come from the session's authentication events
+    (docs/AUTH.md §8): `amr` is the set of methods actually used, `auth_time`
+    the most recent one, and `su` — "step-up valid until" — is computed HERE
+    so the runner's check is nothing more than `now < su`. Every account today
+    has a password and nothing stronger, so the strongest factor it has was
+    used at auth_time and su is auth_time + 600. A session that predates the
+    events list gets `su: 0`: it cannot allow an origin until its owner signs
+    in again, which is the safe way round.
+
+    Rate limited per session key and written to the audit log with its jti:
+    a token that never appears in the log was not minted here [token-5].
     """
     if not request.user.is_authenticated:
         return JsonResponse({'error': 'Not signed in'}, status=401)
@@ -144,27 +164,69 @@ def executor_token(request):
     if not request.user.is_active:
         return JsonResponse({'error': 'Not signed in'}, status=401)
 
+    # The session key is the bucket: a stolen cookie mints against its own
+    # limit and nobody else's, and a script minting on every call is stopped
+    # without touching the person's other sessions.
+    if over('mint', request.session.session_key or '-', settings.GC_MINT_RATE):
+        record(AuthEvent.Kind.MINT_REFUSED, request, user=request.user, reason='rate_limited')
+        return JsonResponse({'error': 'rate_limited'}, status=429)
+
     membership = selected(request)
     if membership is None:
         return JsonResponse({'error': 'no_organisation'}, status=403)
     org = membership.organization
 
+    events = auth_events(request)
+    now = int(time.time())
+    if events:
+        amr = sorted({e['method'] for e in events})
+        auth_time = max(e['at'] for e in events)
+        su = auth_time + STEP_UP_SECONDS
+    else:
+        amr, auth_time, su = [], int(request.session.get(LOGIN_AT) or now), 0
+
+    jti = secrets.token_urlsafe(16)
     try:
         token = mint(
             subject=request.user.pk,
             email=request.user.email,
-            scope='run',
-            secret=settings.GC_AUTH_SECRET,
+            key=settings.GC_SIGNING_KEY,
             ttl=settings.GC_TOKEN_TTL,
+            now=now,
             org=org.slug,
             role=membership.role,
             ent=plans.runner_subset(org.entitlements()),
             ent_v=org.entitlements_version,
+            amr=amr,
+            auth_time=auth_time,
+            su=su,
+            sid=session_id(request.session.session_key),
+            jti=jti,
         )
     except NoSigningKey as err:
-        # 503, not 500: nothing is broken, this service has not been told the
-        # key it shares with the runner. The message names the variable.
+        # 503, not 500: nothing is broken, this service has not been given a
+        # signing key. The message names the variable and the command.
         return JsonResponse({'error': str(err)}, status=503)
 
+    record(AuthEvent.Kind.MINT, request, user=request.user, jti=jti, org=org.slug, role=membership.role)
     return JsonResponse({'token': token, 'expiresIn': settings.GC_TOKEN_TTL})
 
+
+@require_http_methods(['GET'])
+def jwks(request):
+    """
+    The public key set, for humans and tooling.
+
+    The runner does NOT fetch this: its trust anchor arrives in its own
+    environment (GC_AUTH_PUBLIC_KEYS), so a control plane that has been taken
+    over cannot hand the runner a new key by answering this URL differently
+    [token-3]. It exists so an operator can check which key a deployment is
+    signing with, and copy the `pem` into the runner's set on rotation.
+    """
+    try:
+        key = load_private(settings.GC_SIGNING_KEY)
+    except NoSigningKey:
+        return JsonResponse({'keys': []})
+    return JsonResponse({'keys': [{
+        **jwk(key), 'kid': kid_of(key), 'use': 'sig', 'alg': 'EdDSA', 'pem': public_pem(key),
+    }]})

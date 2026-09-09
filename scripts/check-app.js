@@ -4,10 +4,10 @@
  *   node scripts/check-app.js        (no server needed)
  *
  * Three projects now have to come up together, and the ways that goes wrong are
- * quiet ones: the runner and the control plane are handed different secrets, so
- * every token is refused; the UI is built without knowing where to sign in, so
- * the login screen never appears; a stray flag is ignored rather than refused,
- * so `--fast` silently does nothing.
+ * quiet ones: the runner is handed the private key, or the wrong public one,
+ * so it can mint or refuses every token; the UI is built without knowing where
+ * to sign in, so the login screen never appears; a stray flag is ignored
+ * rather than refused, so `--fast` silently does nothing.
  *
  * None of that shows up as an error. It shows up as "I signed in and it did not
  * work", half an hour later. So the composition is a pure function and this
@@ -46,39 +46,59 @@ if (parseArgs(['--fastt']).unknown.join() === '--fastt') ok('a flag it does not 
 else bad('a flag it does not know is kept, to refuse', JSON.stringify(parseArgs(['--fastt'])));
 
 // ---------------------------------------------------------------------------
-console.log('\n— both halves are handed the same secret ——————————————');
+console.log('\n— each half is handed its own half of the key —————————');
 
 /**
- * THE thing that goes wrong. The runner verifies with GC_AUTH_SECRET and the
- * control plane signs with it, and if the two ever differ every token is a
- * "bad signature" — which reads as a broken login, not a mismatched key.
+ * THE thing that goes wrong. The control plane signs with the private key and
+ * the runner verifies with the public one, and if the runner were handed the
+ * private key it could mint — while a public set that was not made from that
+ * private key makes every token a "bad signature", which reads as a broken
+ * login rather than a mismatched key.
  */
-const SECRET = 'x'.repeat(48);
-const on = envFor(parseArgs(['--auth']), SECRET);
-if (on.runner.GC_AUTH_SECRET === SECRET && on.control.GC_AUTH_SECRET === SECRET) {
-  ok('the runner and the control plane share one key');
-} else {
-  bad('the runner and the control plane share one key',
-    `runner=${String(on.runner.GC_AUTH_SECRET).slice(0, 8)} control=${String(on.control.GC_AUTH_SECRET).slice(0, 8)}`);
-}
+const KEYS = { privatePem: '-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2Vw…\n-----END PRIVATE KEY-----\n',
+               publicKeys: { 'kid-1': '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2Vw…\n-----END PUBLIC KEY-----\n' } };
+const on = envFor(parseArgs(['--auth']), KEYS);
+if (on.control.GC_SIGNING_KEY === KEYS.privatePem) ok('the control plane is handed the private key');
+else bad('the control plane is handed the private key', String(on.control.GC_SIGNING_KEY).slice(0, 30));
+if (on.runner.GC_AUTH_PUBLIC_KEYS === JSON.stringify(KEYS.publicKeys)) ok('and the runner the public set', 'kid-1');
+else bad('and the runner the public set', String(on.runner.GC_AUTH_PUBLIC_KEYS).slice(0, 30));
+const leaked = Object.entries(on.runner).filter(([k, v]) => k === 'GC_SIGNING_KEY' || k === 'GC_AUTH_SECRET' || /PRIVATE KEY/.test(String(v)));
+if (!leaked.length) ok('and never the private key, nor the old shared secret');
+else bad('and never the private key, nor the old shared secret', leaked.map(([k]) => k).join(', '));
+if (!('GC_AUTH_SECRET' in on.control)) ok('and the control plane is not handed the old secret either');
+else bad('and the control plane is not handed the old secret either');
 
 // The browser refuses a credentialed request answered with '*', so the control
 // plane has to be told the UI's origin — and it has to be the port the runner
-// is actually on, not the default.
-const moved = envFor(parseArgs(['--auth', '--port', '3100', '--auth-port', '8100']), SECRET);
-if (moved.control.GC_WEB_ORIGIN === 'http://localhost:3100') ok('CORS names the port the UI is really on', moved.control.GC_WEB_ORIGIN);
-else bad('CORS names the port the UI is really on', String(moved.control.GC_WEB_ORIGIN));
+// is actually on, not the default. The runner needs the same origin for the
+// socket's Origin check, and the control plane's origin for its CSP.
+const moved = envFor(parseArgs(['--auth', '--port', '3100', '--auth-port', '8100']), KEYS);
+if (moved.control.GC_WEB_ORIGIN === 'http://localhost:3100' && moved.runner.GC_WEB_ORIGIN === 'http://localhost:3100') ok('CORS and the socket name the port the UI is really on', moved.control.GC_WEB_ORIGIN);
+else bad('CORS and the socket name the port the UI is really on', `${moved.control.GC_WEB_ORIGIN} / ${moved.runner.GC_WEB_ORIGIN}`);
 if (moved.build.VITE_AUTH_URL === 'http://localhost:8100') ok('and the UI is built pointing at the real one', moved.build.VITE_AUTH_URL);
 else bad('and the UI is built pointing at the real one', String(moved.build.VITE_AUTH_URL));
+if (moved.runner.GC_AUTH_ORIGIN === 'http://localhost:8100') ok('and the runner lets the UI connect to it', 'GC_AUTH_ORIGIN, for the CSP');
+else bad('and the runner lets the UI connect to it', String(moved.runner.GC_AUTH_ORIGIN));
 
 /**
- * Off is off. A secret in the environment with auth disabled would turn the
- * gate on without anyone asking — the runner enables itself purely on the
- * presence of GC_AUTH_SECRET.
+ * A laptop with a login is still a laptop: the bundled apps on the runner's
+ * own port are what there is to drive. So --auth says, by name, that the demo
+ * fixtures are served and the private-address block is off — the two things
+ * a deployed runner turns on with the gate, and which compose does not set.
  */
-const offEnv = envFor(parseArgs([]), SECRET);
-if (!offEnv.runner.GC_AUTH_SECRET && !offEnv.control.GC_AUTH_SECRET) ok('and without --auth no key is passed at all');
+if (on.runner.GC_DEMO === '1' && on.runner.GC_BLOCK_PRIVATE === '0') ok('--auth keeps the demo apps drivable', 'GC_DEMO=1 GC_BLOCK_PRIVATE=0, said by name');
+else bad('--auth keeps the demo apps drivable', JSON.stringify({ GC_DEMO: on.runner.GC_DEMO, GC_BLOCK_PRIVATE: on.runner.GC_BLOCK_PRIVATE }));
+
+/**
+ * Off is off. A key set in the environment with auth disabled would turn the
+ * gate on without anyone asking — the runner enables itself purely on the
+ * presence of GC_AUTH_PUBLIC_KEYS.
+ */
+const offEnv = envFor(parseArgs([]), null);
+if (!offEnv.runner.GC_AUTH_PUBLIC_KEYS && !offEnv.control.GC_SIGNING_KEY) ok('and without --auth no key is passed at all');
 else bad('and without --auth no key is passed at all', 'the gate would turn itself on');
+if (offEnv.runner.GC_DEMO === undefined && offEnv.runner.GC_BLOCK_PRIVATE === undefined) ok('nor a demo or reach flag', 'the laptop defaults stand');
+else bad('nor a demo or reach flag');
 if (offEnv.build.VITE_AUTH_URL === '') ok('so the UI is built with no sign-in', 'VITE_AUTH_URL=""');
 else bad('so the UI is built with no sign-in', String(offEnv.build.VITE_AUTH_URL));
 
@@ -144,7 +164,7 @@ else bad('and says what it skipped', 'no idea what it did');
 
 console.log(failures
   ? `\n  ${failures} FAILED\n`
-  : '\n  OK — one command, the same key on both sides, the UI built pointing at\n'
-    + '       the control plane that is actually running, and a typo refused\n'
-    + '       rather than ignored.\n');
+  : '\n  OK — one command, each half of the key on its own side, the UI built\n'
+    + '       pointing at the control plane that is actually running, and a typo\n'
+    + '       refused rather than ignored.\n');
 process.exit(failures ? 1 : 0);

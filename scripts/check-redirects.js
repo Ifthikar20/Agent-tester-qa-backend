@@ -59,6 +59,19 @@ for (const [path, status, hops] of CASES) {
   } else bad(`${path}`, `got ${n.status} with ${n.redirects} redirects`);
 }
 
+/**
+ * The tracker fixture redirects to whatever `?to=` says, which on a gated
+ * runner would be an open redirect: an allowed origin leading anywhere. It
+ * takes a relative path and nothing else (docs/AUTH.md §11 [browser-side-6]).
+ * `//evil.example` is the shape to watch — protocol-relative, and a browser
+ * follows it off the host.
+ */
+for (const [to, want] of [['/pricing.html', 302], ['https://evil.example/', 400], ['//evil.example/', 400], ['\\\\evil.example', 400], ['/%2F%2Fevil.example', 302]]) {
+  const r = await fetch(`${BASE}/go/r?to=${encodeURIComponent(to)}`, { redirect: 'manual' });
+  if (r.status === want) ok(`/go/r?to=${to} is ${want}`, want === 400 ? 'relative paths only' : r.headers.get('location'));
+  else bad(`/go/r?to=${to} is ${want}`, `got ${r.status}`);
+}
+
 // ---------------------------------------------------------------------------
 console.log('\n— the assertions ——————————————————————————————————');
 

@@ -78,7 +78,8 @@ owning `public/app` cannot pass that.
 | | what it names | who reads it | default |
 |---|---|---|---|
 | `GC_WEB_DIR` | the built UI to serve | backend | `web/dist` |
-| `GC_AUTH_SECRET` | the key the runner and the control plane share | **both** | none — auth is off |
+| `GC_SIGNING_KEY` | the Ed25519 private key tokens are signed with | control plane | none — no token can be minted |
+| `GC_AUTH_PUBLIC_KEYS` | the public half, `{kid: pem}` | backend | none — auth is off |
 | `VITE_AUTH_URL` | where the built app signs in | frontend, at build time | empty — no login at all |
 | `GC_WEB_ORIGIN` | the origin allowed to call `/api` with credentials | backend | none — `*`, uncredentialed |
 | `VITE_API_URL` | where the built app sends `/api` and `/ws` | frontend, at build time | empty — its own origin |
@@ -109,26 +110,29 @@ though it were one.
 
 ## Authentication, and where it does not reach
 
-`GC_AUTH_SECRET` is the switch. Unset — the default — the runner is open and the
-UI shows no login; that is the laptop case and `npm start` alone must keep
-working. Set, every `/api` route and the WebSocket upgrade require a token the
-control plane signed, and the boot banner says which mode it is in every time,
-because an operator who believes this is protected and is wrong is worse off
-than one who knows it is open.
+`GC_AUTH_PUBLIC_KEYS` is the switch. Unset — the default — the runner is open
+and the UI shows no login; that is the laptop case and `npm start` alone must
+keep working. Set, every `/api` route and the WebSocket upgrade require a
+token the control plane signed with the matching private key, and the boot
+banner says which mode it is in every time, because an operator who believes
+this is protected and is wrong is worse off than one who knows it is open.
+The runner holds public keys only: it verifies and cannot mint, and it refuses
+to start with the old shared `GC_AUTH_SECRET` anywhere in its environment.
 
-Three things stay outside it deliberately:
+Two things stay outside it deliberately:
 
 - **The origin allowlist and the vault** remain entirely on the runner and are
   re-checked there. The control plane cannot add an origin or read a secret's
   value; it stores names at most.
-- **`POST /api/recording`** stays open. The extension posts from whatever page
-  you were recording on, with no session and no way to be handed a token, so
-  requiring one would not secure the endpoint — it would delete the feature. It
-  validates through the same origin gate as everything else and never executes;
-  a human presses Run. Giving the extension a real token is worth doing.
-- **The UI and the driven pages** are never gated. A login screen you cannot
-  load is not a login screen, and the pages under test are fetched by the driven
-  browser, which has no token and never will.
+- **The UI** is never gated. A login screen you cannot load is not a login
+  screen. The pages under test are fetched by the driven browser, which has no
+  token and never will — but the *bundled* demo pages are fixtures, and a gated
+  runner does not serve them unless `GC_DEMO=1` says so.
+
+`POST /api/recording` used to be a third: the extension posts from whatever
+page you were recording on, with no session, so it was left open. With auth on
+it is now under the gate like everything else, and the extension gets a token
+of its own through the control plane (docs/AUTH.md §11) — the ops step's.
 
 ## Splitting, when the time comes
 
@@ -164,10 +168,10 @@ becomes the check that the published package version matches.
   docs/AUTH.md, and it still crosses this boundary only inside the token.
 - **Rate limiting on `/auth/login`.** Worth having before this meets a network
   you do not control.
-- **The WebSocket accepts any origin, and any path.** The token is the gate. An
-  `Origin` check would break the repository's own check scripts, which connect
-  from Node and send no `Origin` header at all; narrowing the path would break
-  six of them and secure nothing.
+- **The WebSocket accepts any path.** The ticket is the gate, and with auth on
+  the `Origin` header must be the app's — the repository's own check scripts,
+  which connect from Node with no `Origin` at all, run against an open runner.
+  Narrowing the path would break six of them and secure nothing.
 - **One driven browser, one process.** The runner holds a single Playwright
   browser and a single run lock. A login says *who*, not *which runner* — two
   signed-in people still share one browser, and that is the scaling

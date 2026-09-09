@@ -14,6 +14,8 @@ import sys
 
 from django.test import SimpleTestCase
 
+from . import keys
+
 AUTH_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Everything the settings module reads. Stripped from the inherited
@@ -28,6 +30,7 @@ KEYS = [
     'SESSION_COOKIE_AGE', 'SESSION_SAVE_EVERY_REQUEST', 'SESSION_ENGINE', 'GC_SESSION_ABSOLUTE_SECONDS',
     'SECURE_REFERRER_POLICY', 'SECURE_HSTS_SECONDS', 'SECURE_SSL_REDIRECT',
     'ALLAUTH_TRUSTED_PROXY_COUNT', 'EMAIL_BACKEND', 'EMAIL_HOST', 'PASSWORD_HASHERS', 'MFA_TOTP_TOLERANCE',
+    'GC_TOKEN_TTL', 'GC_SIGNING_KEY',
 ]
 
 PRODUCTION = {
@@ -37,6 +40,8 @@ PRODUCTION = {
     'DATABASE_URL': 'postgres://ghostclick:pw@postgres:5432/ghostclick',
     'GC_REDIS_URL': 'redis://:pw@redis:6379/0',
     'EMAIL_HOST': 'smtp.example.com',
+    # As an env file carries it: one line, backslash-n between the PEM lines.
+    'GC_SIGNING_KEY': keys.PRIVATE_ONE_LINE,
 }
 
 
@@ -144,6 +149,22 @@ class RefusalTests(SimpleTestCase):
     def test_a_missing_secret_key_is_refused(self):
         self.refuses({**PRODUCTION, 'DJANGO_SECRET_KEY': ''}, 'DJANGO_SECRET_KEY')
 
+    def test_a_missing_signing_key_is_refused(self):
+        # A control plane nobody can mint from would come up healthy and
+        # answer 503 to every token request; the refusal names the command.
+        self.refuses({**PRODUCTION, 'GC_SIGNING_KEY': ''}, 'GC_SIGNING_KEY', 'signing_key --new')
+
+    def test_something_that_is_not_a_pem_is_refused_even_on_a_laptop(self):
+        self.refuses({'DJANGO_DEBUG': '1', 'GC_SIGNING_KEY': 'not-a-real-secret-just-for-tests'}, 'GC_SIGNING_KEY')
+
+    def test_the_token_lifetime_is_clamped(self):
+        # Ten minutes is the ceiling on what a leaked token is worth; the
+        # runner refuses anything longer, so a bigger value here would only
+        # mint tokens nothing accepts [token-4].
+        self.assertEqual(json.loads(load({**PRODUCTION, 'GC_TOKEN_TTL': '86400'}).stdout)['GC_TOKEN_TTL'], 600)
+        self.assertEqual(json.loads(load({**PRODUCTION, 'GC_TOKEN_TTL': '5'}).stdout)['GC_TOKEN_TTL'], 60)
+        self.assertEqual(json.loads(load({**PRODUCTION, 'GC_TOKEN_TTL': '300'}).stdout)['GC_TOKEN_TTL'], 300)
+
 
 class LaptopProfileTests(SimpleTestCase):
     def test_nothing_set_is_the_laptop(self):
@@ -151,6 +172,8 @@ class LaptopProfileTests(SimpleTestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         got = json.loads(done.stdout)
         self.assertTrue(got['DEBUG'])
+        # No key is fine on a laptop: the mint endpoint says so when asked.
+        self.assertEqual(got['GC_SIGNING_KEY'], '')
         self.assertEqual(got['ALLOWED_HOSTS'], ['localhost', '127.0.0.1', '[::1]'])
         self.assertIsNone(got['SECURE_PROXY_SSL_HEADER'])
         self.assertFalse(got['SESSION_COOKIE_SECURE'])

@@ -61,16 +61,28 @@ See [docs/BOUNDARY.md](docs/BOUNDARY.md).
 ## Signing in, when you want to
 
 There is no login by default, and that is the intended shape for one person on
-one laptop. Set `GC_AUTH_SECRET` and every `/api` route and the WebSocket
-require a short-lived token minted by the Django control plane in `auth/`; the
-boot banner says which mode it is in every time.
+one laptop. Give the runner a public key (`GC_AUTH_PUBLIC_KEYS`) and every
+`/api` route and the WebSocket require a short-lived Ed25519-signed token
+minted by the Django control plane in `auth/`, which alone holds the private
+key (`GC_SIGNING_KEY`); the boot banner says which mode it is in, and which
+keys it trusts, every time. `npm run app -- --auth` does all of this; by hand:
 
 ```bash
-GC_AUTH_SECRET=$(node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))")
+cd auth && python manage.py signing_key --new      # prints both lines below, once
 
-# the control plane                          # the runner              # the UI
-cd auth && python manage.py runserver 8000   GC_AUTH_SECRET=… npm start   VITE_AUTH_URL=http://localhost:8000 npm run build
+# the control plane                                    # the runner
+GC_SIGNING_KEY='…' python manage.py runserver 8000     GC_AUTH_PUBLIC_KEYS='{"<kid>": "…"}' GC_WEB_ORIGIN=http://localhost:3000 GC_AUTH_ORIGIN=http://localhost:8000 npm start
+# the UI
+VITE_AUTH_URL=http://localhost:8000 npm run build
 ```
+
+The runner cannot mint: it holds public keys and nothing else, refuses to
+start if the old shared `GC_AUTH_SECRET` is still in its environment, and
+opens a socket only for a thirty-second single-use ticket bought with the
+token — never for a token in the URL. With auth on it also refuses to let the
+driven page reach loopback, private or link-local addresses, stops serving
+the bundled demo apps (`GC_DEMO=1` brings them back), and sends the security
+headers docs/AUTH.md §11 lists on every response.
 
 The origin allowlist and the vault stay entirely on the runner and are
 re-checked there, so the control plane can neither add an origin nor read a

@@ -82,9 +82,11 @@ services:
     restart: unless-stopped
     environment:
       PORT: 3000
-      # The gate. Unset means the runner is open, and it says so at boot —
-      # scripts/deploy.sh refuses to deploy without it.
-      GC_AUTH_SECRET: ${GC_AUTH_SECRET:?set GC_AUTH_SECRET in .env.prod}
+      # The gate. The PUBLIC half of the signing key, as {kid: pem}; the
+      # private half never reaches this container. Unset means the runner is
+      # open, and it says so at boot — scripts/deploy.sh refuses to deploy
+      # without it.
+      GC_AUTH_PUBLIC_KEYS: ${GC_AUTH_PUBLIC_KEYS:?set GC_AUTH_PUBLIC_KEYS in .env.prod}
       GC_WEB_ORIGIN: ${PUBLIC_URL:?set PUBLIC_URL in .env.prod}
       # Nobody is watching a replay on a remote host through a browser tab, so
       # the performance is wasted here. Drop it to 250 if you want to watch.
@@ -92,9 +94,8 @@ services:
       GC_TIMEOUT_MS: ${GC_TIMEOUT_MS:-8000}
       GC_SETTLE_MS: ${GC_SETTLE_MS:-250}
     volumes:
-      # Run history, the ORIGIN ALLOWLIST, the vault, the shared secret. Without
-      # this every deploy forgets which origins were allowed and regenerates the
-      # secret, which logs everyone out.
+      # Run history, the ORIGIN ALLOWLIST, the vault. Without this every
+      # deploy forgets which origins were allowed and every run ever made.
       - ghostclick-state:/app/.ghostclick
     # Chromium is told --disable-dev-shm-usage so it does not need a big /dev/shm,
     # but headroom here is cheap and a starved browser fails in confusing ways.
@@ -141,9 +142,10 @@ services:
       # spliced into these URLs unescaped.
       DATABASE_URL: postgres://ghostclick:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.prod}@postgres:5432/ghostclick
       GC_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.prod}@redis:6379/0
-      # The same key the runner verifies with. If these two ever differ, every
-      # token is a "bad signature" and it reads as a broken login.
-      GC_AUTH_SECRET: ${GC_AUTH_SECRET:?set GC_AUTH_SECRET in .env.prod}
+      # The PRIVATE half of the signing key — this container and nowhere
+      # else. The runner holds the public half; if the two were not made
+      # together every token is a "bad signature" and reads as a broken login.
+      GC_SIGNING_KEY: ${GC_SIGNING_KEY:?set GC_SIGNING_KEY in .env.prod}
       GC_TOKEN_TTL: ${GC_TOKEN_TTL:-600}
       # Mail. SMTP unless a backend is named; the settings module refuses SMTP
       # with no host rather than let the first password reset find out.

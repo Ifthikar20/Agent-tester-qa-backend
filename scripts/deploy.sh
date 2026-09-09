@@ -113,30 +113,47 @@ CMD="$CMD"; BRANCH="$BRANCH"; TARGET_SHA="$TARGET_SHA"
 
 if grep -q \$'\r' .env.prod; then
   echo "  .env.prod has CRLF line endings. The last character of every value"
-  echo "  would be a carriage return, so the two signing keys would not match."
+  echo "  would be a carriage return, and neither key would parse."
   exit 1
 fi
 dupes=\$(grep -oE '^[A-Z_]+' .env.prod | sort | uniq -d)
 [ -z "\$dupes" ] || { echo "  .env.prod sets these twice — the last one silently wins: \$dupes"; exit 1; }
 
-# GC_AUTH_SECRET: without it the runner starts OPEN. It says so in its own
-# banner, but nobody reads a banner on a host they just deployed to.
-grep -qE '^GC_AUTH_SECRET=.{32,}' .env.prod || {
-  echo "  .env.prod has no GC_AUTH_SECRET of at least 32 characters."
+# The signing keypair. Without the public set the runner starts OPEN — it
+# says so in its own banner, but nobody reads a banner on a host they just
+# deployed to. Without the private key the control plane refuses to start.
+# Both come from one 'manage.py signing_key --new', and each is checked for
+# the marker that says it is the right half in the right place.
+grep -qE "^GC_SIGNING_KEY='?-----BEGIN PRIVATE KEY-----" .env.prod || {
+  echo "  .env.prod has no GC_SIGNING_KEY that looks like a PEM private key."
+  echo "  'cd auth && python manage.py signing_key --new' prints it. Refusing to deploy."; exit 1; }
+grep -qE "^GC_AUTH_PUBLIC_KEYS='?\{.*BEGIN PUBLIC KEY" .env.prod || {
+  echo "  .env.prod has no GC_AUTH_PUBLIC_KEYS holding a public key."
   echo "  The runner would start unauthenticated. Refusing to deploy."; exit 1; }
+grep -qE '^GC_AUTH_PUBLIC_KEYS=.*PRIVATE KEY' .env.prod && {
+  echo "  GC_AUTH_PUBLIC_KEYS contains a PRIVATE key. The runner must never hold one."; exit 1; }
+
+# The shared HMAC secret is gone. A line for it is not ignored: the runner
+# refuses to boot with it in the environment, and a value still in this file
+# is a signing key still on the box.
+grep -qE '^GC_AUTH_SECRET=' .env.prod && {
+  echo "  .env.prod still sets GC_AUTH_SECRET. Tokens are signed with GC_SIGNING_KEY now"
+  echo "  and the runner refuses to start with the old shared secret present. Remove the line."
+  exit 1; }
 
 # The placeholder check is the one that catches a copied example file. A
 # literal CHANGE_ME is long enough to pass every length test above.
-grep -qE '^(GC_AUTH_SECRET|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' .env.prod && {
+grep -qE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' .env.prod && {
   echo "  .env.prod still has CHANGE_ME placeholders. Fill them in first:"
-  grep -nE '^(GC_AUTH_SECRET|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' .env.prod | sed 's/^/    /'
+  grep -nE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' .env.prod | sed 's/^/    /'
   exit 1; }
 
 # A '\$(' in the file is command substitution that never ran. Compose reads
 # .env.prod as data — it does no substitution — so the literal text becomes the
-# signing key. It is long, it is identical on both services, every token
-# verifies, and the deploy is completely healthy with a key published in the
-# runbook that told you to write it.
+# value. With the old shared secret that was a deploy that was completely
+# healthy with a key published in the runbook that told you to write it; with
+# a PEM it is a control plane that refuses to start, which is better, but the
+# refusal here is still the one with the message that says what happened.
 grep -qE '^[A-Z_]+=.*\\\$\(' .env.prod && {
   echo "  .env.prod contains \\\$( ... ) — that is a command, not a value."
   echo "  Nothing expands it. Run the command yourself and paste its OUTPUT."

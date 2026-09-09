@@ -18,6 +18,15 @@ from .models import AuthEvent
 # The session key under which the sign-in time is kept. Read by
 # accounts.middleware.AbsoluteSessionLifetime.
 LOGIN_AT = 'gc_login_at'
+# The session key under which the authentication events are kept: a list of
+# {method, at}, appended by the receivers below (docs/AUTH.md §5.3). The
+# token's amr, auth_time and su are computed from this list and from nothing
+# else — never from a flag a view set, because a flag is a thing a later view
+# can forget to clear [mfa-recovery-2].
+AUTH_EVENTS = 'gc_auth_events'
+# Enough to hold a working day of reauthentications; the token only ever
+# needs the most recent of each kind.
+MAX_EVENTS = 20
 
 
 def client_ip(request):
@@ -68,7 +77,31 @@ def started(sender, request, user, **kwargs):
     """
     if request is not None and hasattr(request, 'session'):
         request.session.setdefault(LOGIN_AT, int(time.time()))
+        # Every login path that exists today is a password. When allauth
+        # arrives, its own signals say which method was used (otp, recovery,
+        # webauthn, google) and the mfa flow appends those; this receiver
+        # stays the one that records a plain password sign-in.
+        note(request, 'password')
     record(AuthEvent.Kind.LOGIN, request, user=user)
+
+
+def note(request, method):
+    """Append one authentication event to the session, newest last."""
+    events = [e for e in request.session.get(AUTH_EVENTS, []) if isinstance(e, dict)]
+    events.append({'method': str(method), 'at': int(time.time())})
+    request.session[AUTH_EVENTS] = events[-MAX_EVENTS:]
+
+
+def auth_events(request):
+    """The session's authentication events, oldest first, as {method, at}."""
+    session = getattr(request, 'session', None)
+    if session is None:
+        return []
+    out = []
+    for e in session.get(AUTH_EVENTS, []):
+        if isinstance(e, dict) and e.get('method') and isinstance(e.get('at'), int):
+            out.append({'method': str(e['method']), 'at': e['at']})
+    return out
 
 
 @receiver(user_logged_out)

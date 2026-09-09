@@ -4,10 +4,10 @@
 # be upgraded by whoever runs pip next. Hashes (--require-hashes) are the ops
 # flow's job; exact versions are this one's.
 #
-# There is no JWT library here on purpose: minting an HS256 token is HMAC-SHA256
-# over two base64url segments (accounts/tokens.py), and the executor verifies it
-# with Node's stdlib for the same reason. Neither side gains a package for the
-# easy half of the problem.
+# There is no JWT library here on purpose: minting an EdDSA token is one
+# Ed25519 signature over two base64url segments (accounts/tokens.py), and the
+# executor verifies it with Node's stdlib for the same reason. Neither side
+# gains a package for the easy half of the problem.
 Django==5.2.17
 django-cors-headers==4.9.0
 # Argon2id for password hashes (PASSWORD_HASHERS).
@@ -19,3 +19,5 @@ redis==8.1.0
 # DATABASE_URL -> DATABASES, and the Postgres driver it names.
 dj-database-url==3.1.2
 psycopg[binary]==3.3.5
+# Ed25519 for the executor token: the one primitive the standard library lacks.
+cryptography==50.0.1

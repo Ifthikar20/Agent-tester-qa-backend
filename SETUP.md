@@ -16,9 +16,10 @@ those it skipped, because a setup script that works silently is one you cannot
 debug when it does not.
 
 Add `--auth` and it also sets up and starts the Django control plane in
-`auth/`: pip, the migration, a shared key generated once into
-`.ghostclick/auth-secret`, and the UI rebuilt knowing where to sign in. One
-Ctrl-C stops everything. It will not create an account for you — it tells you
+`auth/`: pip, the migration, a signing keypair generated once into
+`.ghostclick/signing-key.pem` (the private half, for the control plane) and
+`.ghostclick/auth-public-keys.json` (the public half, for the runner), and
+the UI rebuilt knowing where to sign in. One Ctrl-C stops everything. It will not create an account for you — it tells you
 to run `createsuperuser`, because a script that quietly makes an admin login
 with a password it chose has put a login on your machine that you do not know
 about.
@@ -65,7 +66,10 @@ Run, and `GC_PACE_MS` sets what this server does by default.
 There is also an `auth` line, and on a first run it says `OFF`. That is correct
 for one person on one laptop, and it is printed every time rather than left to
 be assumed — believing this is protected when it is not is worse than knowing it
-is open. `auth/README.md` covers turning it on.
+is open. When it is on it names the key ids it trusts. `auth/README.md` covers
+turning it on. The `reach` and `demo` lines beside it say whether the driven
+page may reach private addresses and whether the bundled apps are served —
+both are the laptop defaults here, and the opposite on a deployed runner.
 
 `driving` is where the runner's browser is pointed. On a first run it is
 nothing — run history is machine-local, so a fresh clone has none — and the

@@ -56,7 +56,7 @@ else bad('and the deploy refuses one on the host', 'nothing catches a hand-edite
  *     argument that decides whether the shipped UI has a sign-in at all, so an
  *     empty value ships a login-less app and a 401-free deploy looks fine.
  */
-for (const key of ['GC_AUTH_SECRET', 'DJANGO_SECRET_KEY', 'PUBLIC_URL', 'POSTGRES_PASSWORD', 'REDIS_PASSWORD']) {
+for (const key of ['GC_SIGNING_KEY', 'GC_AUTH_PUBLIC_KEYS', 'DJANGO_SECRET_KEY', 'PUBLIC_URL', 'POSTGRES_PASSWORD', 'REDIS_PASSWORD']) {
   const uses = [...compose.matchAll(new RegExp(`\\$\\{${key}([^}]*)\\}`, 'g'))].map((m) => m[1]);
   if (!uses.length) bad(`${key} is used by compose`, 'not referenced at all');
   else if (uses.every((u) => u.startsWith(':?'))) ok(`${key} is required, not defaulted`, `${uses.length} use${uses.length > 1 ? 's' : ''}`);
@@ -64,8 +64,29 @@ for (const key of ['GC_AUTH_SECRET', 'DJANGO_SECRET_KEY', 'PUBLIC_URL', 'POSTGRE
 }
 
 /**
- * 3 · A placeholder must be refused. CHANGE_ME_48_RANDOM_BYTES is 25
- *     characters of nothing, and every length check in the deploy passes it.
+ * 2b · The two halves of the signing key go to two different containers, and
+ *      never the other way round. A runner handed the private key is a runner
+ *      that can mint; a runner still handed GC_AUTH_SECRET is one that refuses
+ *      to boot — and the compose file is where both would be typed.
+ */
+const runnerEnv = /^  runner:\n([\s\S]*?)(?=^  [a-z]+:|^[a-z]+:)/m.exec(compose)?.[1] ?? '';
+const controlEnv = /^  control:\n([\s\S]*?)(?=^  [a-z]+:|^[a-z]+:)/m.exec(compose)?.[1] ?? '';
+if (/GC_AUTH_PUBLIC_KEYS:/.test(runnerEnv) && !/GC_SIGNING_KEY/.test(runnerEnv)) ok('the runner is given public keys and no private one');
+else bad('the runner is given public keys and no private one', 'a runner that can sign is a runner that can authorise itself');
+if (/GC_SIGNING_KEY:/.test(controlEnv)) ok('and the control plane is given the private key');
+else bad('and the control plane is given the private key');
+if (!/GC_AUTH_SECRET/.test(compose)) ok('and GC_AUTH_SECRET is gone from compose', 'the runner refuses to boot with it');
+else bad('and GC_AUTH_SECRET is gone from compose', 'the runner refuses to boot with it present');
+if (/GC_AUTH_SECRET=/.test(deploy) && /Remove the line/.test(deploy)) ok('and the deploy refuses a .env.prod that still sets it');
+else bad('and the deploy refuses a .env.prod that still sets it');
+if (/GC_AUTH_PUBLIC_KEYS=.*PRIVATE KEY/.test(deploy)) ok('and a private key in the public set');
+else bad('and a private key in the public set');
+if (!/GC_AUTH_SECRET/.test(example) && /^GC_SIGNING_KEY=/m.test(example) && /^GC_AUTH_PUBLIC_KEYS=/m.test(example)) ok('.env.prod.example names both halves and not the old secret');
+else bad('.env.prod.example names both halves and not the old secret');
+
+/**
+ * 3 · A placeholder must be refused. CHANGE_ME_PRIVATE_PEM_FROM_signing_key is
+ *     a line of nothing, and every marker check in the deploy passes it.
  */
 const placeholders = [...example.matchAll(/^([A-Z_]+)=CHANGE_ME/gm)].map((m) => m[1]);
 if (placeholders.length >= 3) ok('the example file uses CHANGE_ME placeholders', placeholders.join(', '));
@@ -279,7 +300,8 @@ else bad('.env.prod.example matches');
 console.log(failures
   ? `\n  ${failures} FAILED\n`
   : '\n  OK — no secret reaches an image layer, no placeholder or unexpanded\n'
-    + '       $( ) reaches a signing key, readiness means the browser and not\n'
+    + '       $( ) reaches a signing key, the private half reaches only the\n'
+    + '       control plane, readiness means the browser and not\n'
     + '       the port, every probe printed is a probe asserted, every command\n'
     + '       in the runbook is one that runs, the runner has no route to the\n'
     + '       control plane, and the edge keeps cookies, tickets and the admin\n'

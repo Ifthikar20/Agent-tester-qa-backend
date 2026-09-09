@@ -8,10 +8,10 @@
  *
  * There are three projects here now — the runner, the UI in web/, the Django
  * control plane in auth/ — and getting them up meant knowing about npm install,
- * a Playwright browser download, pip, a migration, a shared secret that has to
- * match on two sides, and a UI rebuild with the right variable baked in. Every
- * one of those is a step someone can forget, and most of them fail in a way
- * that looks like something else.
+ * a Playwright browser download, pip, a migration, a signing keypair whose two
+ * halves go to two different processes, and a UI rebuild with the right
+ * variable baked in. Every one of those is a step someone can forget, and
+ * most of them fail in a way that looks like something else.
  *
  * So this does them, skips the ones already done, and SAYS which is which. A
  * setup script that works silently is one you cannot debug when it does not.
@@ -22,7 +22,6 @@
  * know about on your machine.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -76,27 +75,46 @@ export function parseArgs(argv) {
 /**
  * The environment each process gets.
  *
- * Pure and exported because this is where the two halves agree: the same secret
- * has to reach the runner as GC_AUTH_SECRET and the control plane as its
- * signing key, and the UI has to be BUILT knowing where to sign in. Getting any
- * one of those wrong produces a login screen that cannot log in, which is a bad
- * afternoon to debug and a cheap thing to test.
+ * Pure and exported because this is where the two halves of the keypair go
+ * their separate ways: the PRIVATE key reaches the control plane as
+ * GC_SIGNING_KEY and nothing else, the PUBLIC set reaches the runner as
+ * GC_AUTH_PUBLIC_KEYS and nothing else, and the UI has to be BUILT knowing
+ * where to sign in. A runner handed the private key is a runner that can
+ * mint; a control plane handed nothing cannot; either produces a login screen
+ * that cannot log in, which is a bad afternoon to debug and a cheap thing to
+ * test.
+ *
+ * @param keys  { privatePem, publicKeys } from keypair(), or null without --auth
  */
-export function envFor(opts, secret, base = {}, root = ROOT) {
+export function envFor(opts, keys, base = {}, root = ROOT) {
   const authUrl = `http://localhost:${opts.authPort}`;
   const webOrigin = `http://localhost:${opts.port}`;
-  const shared = opts.auth ? { GC_AUTH_SECRET: secret, GC_WEB_ORIGIN: webOrigin } : {};
   return {
     runner: {
-      ...base, ...shared,
+      ...base,
       PORT: String(opts.port),
-      // Serve the machine-local build, leaving the committed one untouched.
-      ...(opts.auth ? { GC_WEB_DIR: authBuildDir(root) } : {}),
+      ...(opts.auth ? {
+        GC_AUTH_PUBLIC_KEYS: JSON.stringify(keys.publicKeys),
+        GC_WEB_ORIGIN: webOrigin,
+        // The control plane is on another port here, so the UI's CSP has to
+        // let it connect there; deployed, both sit behind one origin.
+        GC_AUTH_ORIGIN: authUrl,
+        // A laptop with a login is still a laptop: the bundled apps on this
+        // very port are what there is to drive, so the demo fixtures stay
+        // served and the private-address block that production turns on
+        // with the gate is turned off here, by name. Neither is set without
+        // --auth, where both are already the laptop defaults.
+        GC_DEMO: '1',
+        GC_BLOCK_PRIVATE: '0',
+        // Serve the machine-local build, leaving the committed one untouched.
+        GC_WEB_DIR: authBuildDir(root),
+      } : {}),
       ...(opts.fast ? { GC_PACE_MS: '0' } : {}),
       ...(opts.headed ? { HEADED: '1' } : {}),
     },
     control: {
-      ...base, ...shared,
+      ...base,
+      ...(opts.auth ? { GC_SIGNING_KEY: keys.privatePem, GC_WEB_ORIGIN: webOrigin } : {}),
       DJANGO_DEBUG: '1',
       DJANGO_ALLOWED_HOSTS: 'localhost,127.0.0.1,[::1]',
     },
@@ -125,25 +143,37 @@ export function choosePython(candidates) {
   return candidates.find((c) => c.ok)?.name ?? null;
 }
 
-// ---------------------------------------------------------------- the secret
-const SECRET_FILE = join(ROOT, '.ghostclick', 'auth-secret');
+// ---------------------------------------------------------------- the keypair
+const PRIVATE_FILE = join(ROOT, '.ghostclick', 'signing-key.pem');
+const PUBLIC_FILE = join(ROOT, '.ghostclick', 'auth-public-keys.json');
+const OLD_SECRET_FILE = join(ROOT, '.ghostclick', 'auth-secret');
 
 /**
- * The key the runner and the control plane share.
+ * The keypair executor tokens are signed with, made by the control plane's
+ * own command so the kid is derived the one way there is.
  *
  * Generated once and kept in .ghostclick/, which is gitignored — the same place
  * run history lives, for the same reason. Regenerating it on every start would
- * invalidate every session and look like a login that randomly stops working.
+ * invalidate every token in flight and look like a login that randomly stops
+ * working. The private key is 0600 and read by nothing but this script, which
+ * hands it to the control plane's process and to no other.
  */
-function sharedSecret() {
-  if (existsSync(SECRET_FILE)) {
-    const kept = readFileSync(SECRET_FILE, 'utf8').trim();
-    if (kept.length >= 32) return { secret: kept, made: false };
+function keypair(py) {
+  if (existsSync(PRIVATE_FILE) && existsSync(PUBLIC_FILE)) {
+    try {
+      const publicKeys = JSON.parse(readFileSync(PUBLIC_FILE, 'utf8'));
+      const privatePem = readFileSync(PRIVATE_FILE, 'utf8');
+      if (/PRIVATE KEY/.test(privatePem) && Object.keys(publicKeys).length) return { privatePem, publicKeys, made: false };
+    } catch { /* unreadable; make a new pair below */ }
   }
-  const secret = randomBytes(48).toString('base64url');
-  mkdirSync(dirname(SECRET_FILE), { recursive: true });
-  writeFileSync(SECRET_FILE, `${secret}\n`, { mode: 0o600 });
-  return { secret, made: true };
+  const r = quiet(py, ['manage.py', 'signing_key', '--new', '--json'],
+    { cwd: join(ROOT, 'auth'), env: { ...process.env, DJANGO_DEBUG: '1' } });
+  if (!r.ok) fail(`could not generate a signing key:\n${r.out}`);
+  const made = JSON.parse(r.out.trim().split(/\r?\n/).pop());
+  mkdirSync(dirname(PRIVATE_FILE), { recursive: true });
+  writeFileSync(PRIVATE_FILE, made.private_pem, { mode: 0o600 });
+  writeFileSync(PUBLIC_FILE, `${JSON.stringify(made.public_keys, null, 2)}\n`);
+  return { privatePem: made.private_pem, publicKeys: made.public_keys, made: true };
 }
 
 // ---------------------------------------------------------------- the steps
@@ -242,16 +272,26 @@ async function main(argv) {
   nodeModules();
   browser();
 
-  const { secret, made } = opts.auth ? sharedSecret() : { secret: '', made: false };
-  const env = envFor(opts, secret);
-
   let py = null;
+  let keys = null;
   if (opts.auth) {
+    // Django first: the keypair is made by its own management command, so
+    // that the kid is derived exactly the way the control plane derives it.
     py = python();
     django(py);
+    keys = keypair(py);
+  }
+  const env = envFor(opts, keys);
+
+  if (opts.auth) {
     migrate(py, env.control);
     accounts(py, env.control);
-    if (made) step('secret', 'generated, kept in .ghostclick/auth-secret');
+    step('signing key', keys.made
+      ? `generated, kept in .ghostclick/signing-key.pem (private) and auth-public-keys.json (${Object.keys(keys.publicKeys).join(', ')})`
+      : `kept — kid ${Object.keys(keys.publicKeys).join(', ')}`);
+    if (existsSync(OLD_SECRET_FILE)) {
+      step('', '.ghostclick/auth-secret is the old shared HMAC secret; nothing reads it now, delete it');
+    }
   }
   buildUi(env.build);
 
@@ -281,10 +321,11 @@ async function main(argv) {
     console.log(`\n  control plane  ->  http://localhost:${opts.authPort}/admin/  (sign-in at /auth)`);
   }
 
-  // The runner prints its own banner, which is the detailed one.
-  const { command, shell } = runner(process.execPath);
-  const app = spawn(command, [join(ROOT, 'scripts', 'start.js')], {
-    cwd: ROOT, stdio: 'inherit', shell, env: { ...process.env, ...env.runner },
+  // The runner prints its own banner, which is the detailed one. No shell
+  // here: node is an executable, not a batch file, and on Windows it usually
+  // lives under "Program Files" — a path a shell splits at the space.
+  const app = spawn(process.execPath, [join(ROOT, 'scripts', 'start.js')], {
+    cwd: ROOT, stdio: 'inherit', shell: false, env: { ...process.env, ...env.runner },
   });
   children.push(app);
   app.on('exit', (code) => { stopAll(); process.exit(code ?? 0); });

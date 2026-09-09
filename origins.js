@@ -13,8 +13,17 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEMO } from './mode.js';
 
 const STORE = fileURLToPath(new URL('./.ghostclick/origins.json', import.meta.url));
+
+/**
+ * This process's own origin, where the bundled demo apps live. Seeded as
+ * drivable in demo mode and never otherwise: a gated runner on a public
+ * address has nothing of its own to drive, and its own origin is exactly the
+ * one a page must not be pointed at (docs/AUTH.md §11).
+ */
+const own = () => `http://localhost:${process.env.PORT || 3000}`;
 
 /** Loopback and the private ranges, including where cloud metadata lives. */
 export const PRIVATE_HOST =
@@ -22,10 +31,9 @@ export const PRIVATE_HOST =
 
 const seed = () => {
   const fromEnv = (process.env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-  const own = `http://localhost:${process.env.PORT || 3000}`;
   let saved = [];
   try { saved = JSON.parse(readFileSync(STORE, 'utf8')).origins ?? []; } catch { /* first run */ }
-  return new Set([own, ...saved, ...fromEnv]);
+  return new Set([...(DEMO ? [own()] : []), ...saved, ...fromEnv]);
 };
 
 const allowed = seed();
@@ -68,8 +76,7 @@ export function add(input) {
 }
 
 export function remove(origin) {
-  const own = `http://localhost:${process.env.PORT || 3000}`;
-  if (origin === own) throw new Error('That is where the demo apps are served from');
+  if (DEMO && origin === own()) throw new Error('That is where the demo apps are served from');
   const gone = allowed.delete(origin);
   if (gone) persist();
   return gone;
