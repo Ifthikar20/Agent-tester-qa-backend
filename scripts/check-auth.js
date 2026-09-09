@@ -394,6 +394,18 @@ if (noOrigin.status !== 0 && /GC_WEB_ORIGIN/.test(noOrigin.stderr ?? '')) {
 } else {
   bad('auth on with no GC_WEB_ORIGIN refuses to start', `exit ${noOrigin.status}`);
 }
+// The extension list trusts its entries the way GC_WEB_ORIGIN is trusted; a
+// web origin in it is the wildcard back under another name (mode.js).
+const webInExt = spawnSync(process.execPath, [join(ROOT, 'scripts/start.js')], {
+  cwd: ROOT, timeout: 25000, encoding: 'utf8',
+  env: { ...process.env, PORT: '3405', GC_SKIP_BUILD: '1', GC_AUTH_PUBLIC_KEYS: JSON.stringify({ [KID]: PUBLIC_PEM }),
+         GC_WEB_ORIGIN: 'http://127.0.0.1:3405', GC_EXTENSION_ORIGINS: 'https://evil.example' },
+});
+if (webInExt.status !== 0 && /GC_EXTENSION_ORIGINS/.test(webInExt.stderr ?? '')) {
+  ok('a web origin in GC_EXTENSION_ORIGINS refuses to start', 'only chrome-extension://<id> is an extension');
+} else {
+  bad('a web origin in GC_EXTENSION_ORIGINS refuses to start', `exit ${webInExt.status}`);
+}
 
 // ---------------------------------------------------------------------------
 console.log('\n— the gate, on a running runner ———————————————————————');
@@ -401,11 +413,14 @@ console.log('\n— the gate, on a running runner ——————————�
 const PORT = Number(process.env.GC_AUTH_PORT) || 3404;
 const BASE = `http://127.0.0.1:${PORT}`;
 const ORIGIN = BASE;
+// The recorder's origin, the way a real install has one: an id, per install.
+const EXTENSION = 'chrome-extension://checkauthaaaaaaaaaaaaaaaaaaaaaaaa';
 const child = spawn(process.execPath, [join(ROOT, 'scripts/start.js')], {
   cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
   env: {
     ...process.env, PORT: String(PORT), GC_SKIP_BUILD: '1', HOME_URL: '',
     GC_AUTH_PUBLIC_KEYS: JSON.stringify({ [KID]: PUBLIC_PEM }), GC_WEB_ORIGIN: ORIGIN,
+    GC_EXTENSION_ORIGINS: EXTENSION,
   },
 });
 let out = '';
@@ -482,6 +497,20 @@ try {
     const corsOk = await fetch(`${BASE}/api/state`, { headers: { ...auth, origin: ORIGIN } });
     if (corsOk.headers.get('access-control-allow-origin') === ORIGIN) ok('and the app origin is echoed', ORIGIN);
     else bad('and the app origin is echoed', String(corsOk.headers.get('access-control-allow-origin')));
+
+    // The extension hand-off (docs/AUTH.md §11 [browser-side-2]) is answered
+    // for the listed extension origin and for no other extension, and its
+    // preflight — which carries no token by definition — before the gate.
+    // That it is gated at all is asserted with the fixtures below.
+    const recExt = await fetch(`${BASE}/api/recording`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json', origin: EXTENSION }, body: '{"flow":""}' });
+    if (recExt.headers.get('access-control-allow-origin') === EXTENSION) ok('the listed extension origin is echoed on /api/recording', EXTENSION.slice(0, 40));
+    else bad('the listed extension origin is echoed on /api/recording', `${recExt.status} allow-origin=${recExt.headers.get('access-control-allow-origin')}`);
+    const preflight = await fetch(`${BASE}/api/recording`, { method: 'OPTIONS', headers: { origin: EXTENSION, 'access-control-request-method': 'POST' } });
+    if (preflight.status === 204 && preflight.headers.get('access-control-allow-origin') === EXTENSION && /authorization/i.test(preflight.headers.get('access-control-allow-headers') ?? '')) ok('its preflight is answered before the gate', 'allow-headers includes authorization');
+    else bad('its preflight is answered before the gate', `${preflight.status} ${preflight.headers.get('access-control-allow-origin')}`);
+    const otherExt = await fetch(`${BASE}/api/recording`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json', origin: 'chrome-extension://someoneelseaaaaaaaaaaaaaaaaaaaaaa' }, body: '{"flow":""}' });
+    if (!otherExt.headers.get('access-control-allow-origin')) ok('and another extension gets no CORS answer', 'one id per install, listed by the operator');
+    else bad('and another extension gets no CORS answer', otherExt.headers.get('access-control-allow-origin'));
 
     // The socket. What rides in the URL is a ticket, and only a ticket.
     const { r: noTicket } = await socket('');

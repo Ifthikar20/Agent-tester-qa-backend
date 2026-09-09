@@ -35,6 +35,14 @@ const compose = read('../docker/docker-compose.prod.yml');
 const deploy  = read('../scripts/deploy.sh');
 const doc     = read('../docs/DEPLOY.md');
 const dockerignore = read('../.dockerignore');
+const runnerImage = read('../Dockerfile');
+const controlImage = read('../auth/Dockerfile');
+const requirements = read('../auth/requirements.txt');
+const workflow = read('../.github/workflows/check.yml');
+const awsUp = read('../scripts/aws-up.sh');
+const bootstrap = read('../scripts/bootstrap-ec2.sh');
+const gc = read('../scripts/gc');
+const caddy = read('../docker/Caddyfile');
 
 /**
  * 1 · No runbook anywhere may show command substitution as the CONTENT of an
@@ -101,6 +109,10 @@ if (/GOOGLE_CLIENT_SECRET:/.test(controlEnv) && !/GOOGLE_/.test(runnerEnv)) ok('
 else bad('the Google client reaches the control plane only', 'the runner has no business holding it');
 if (/^# GOOGLE_CLIENT_ID=/m.test(example) && /^# GOOGLE_CLIENT_SECRET=/m.test(example) && /accounts\/google\/login\/callback\//.test(example)) ok('.env.prod.example names both halves and the redirect URI');
 else bad('.env.prod.example names both halves and the redirect URI', 'an operator would have to guess the callback path');
+if (/GC_EXTENSION_ORIGINS:/.test(controlEnv) && /GC_EXTENSION_ORIGINS:/.test(runnerEnv)) ok('the extension origins reach both services', 'CSRF on the control plane, CORS on the runner, one line');
+else bad('the extension origins reach both services', 'the two would disagree about which extension is the operator’s');
+if (/^# GC_EXTENSION_ORIGINS=chrome-extension:\/\//m.test(example)) ok('.env.prod.example shows the shape', 'chrome-extension://<id>');
+else bad('.env.prod.example shows the shape');
 if (/GC_SIGNUP_MODE: \$\{GC_SIGNUP_MODE:-invite\}/.test(controlEnv)) ok('sign-up is by invitation unless .env.prod says otherwise');
 else bad('sign-up is by invitation unless .env.prod says otherwise', 'an open sign-up page on a public host by default');
 if (/probe \/_allauth\/browser\/v1\/auth\/session +401/.test(deploy)) ok('the smoke check reaches allauth through the edge');
@@ -141,14 +153,18 @@ else bad('and the deploy waits on browser:true', 'the wait proves only that the 
 
 /**
  * 5 · Everything the smoke table prints must also be asserted. An unasserted
- *     probe is decoration, and the /api/recording 403 is the only thing
- *     closing an endpoint server.js exempts from the bearer gate by design.
+ *     probe is decoration. POST /api/recording is under the runner's gate
+ *     (docs/AUTH.md §11): a 401 is the proof, a 200 is an open hand-off,
+ *     and a 403 would be the edge's old refusal back — which the extension,
+ *     now handed a token through the control plane, can never get past.
  */
 const probes = [...deploy.matchAll(/^probe (\S+)\s+(\d{3})/gm)].map((m) => `${m[1]} ${m[2]}`);
 if (probes.length >= 5) ok('all smoke probes are asserted', `${probes.length} of them`);
 else bad('all smoke probes are asserted', `only ${probes.length} — some are printed but not checked`);
-if (probes.some((p) => p.startsWith('/api/recording 403'))) ok('including the extension hand-off being shut');
-else bad('including the extension hand-off being shut', 'an nginx edit could reopen it and deploy green');
+if (probes.some((p) => p.startsWith('/api/recording 401'))) ok('including the extension hand-off being gated', '401 from the runner');
+else bad('including the extension hand-off being gated', 'a 200 is an open hand-off; a 403 is the edge shutting the extension out');
+if (/probe \/api\/recording 401/.test(awsUp)) ok('and aws-up.sh probes for the same', 'the two runbooks agree');
+else bad('and aws-up.sh probes for the same');
 if (probes.some((p) => p.startsWith('/api/state 401'))) ok('including the API being gated');
 else bad('including the API being gated');
 
@@ -196,7 +212,6 @@ else bad('and rollback is a subcommand', 'recovery is prose');
  *      admin allowlist, and a log that cannot hold a credential.
  */
 console.log('\n— the edge ————————————————————————————————————————————');
-const caddy = read('../docker/Caddyfile');
 if (!existsSync(new URL('../docker/nginx.conf', import.meta.url))) ok('nginx.conf is gone', 'one edge, not two');
 else bad('nginx.conf is gone', 'two edge configs is one that is not deployed');
 if (/^\{\$GC_PUBLIC_URL\} \{/m.test(caddy)) ok('the site address is {$GC_PUBLIC_URL}', 'https gets a certificate; http still works');
@@ -244,8 +259,8 @@ else bad('/admin/ is allowed only from GC_ADMIN_CIDRS', 'the refusal is not insi
 if (/\{\$GC_ADMIN_CIDRS:192\.0\.2\.1\/32\}/.test(caddy)) ok('and the default admits nobody', 'TEST-NET-1');
 else bad('and the default admits nobody', 'an operator who has not chosen has opened the admin');
 
-if (/respond \/api\/recording "[^"]*" 403/.test(runnerHandle)) ok('the extension hand-off is shut at the edge', 'refused inside the runner handle, ahead of its proxy');
-else bad('the extension hand-off is shut at the edge', 'the refusal is not inside the handle that proxies /api/');
+if (!/respond \/api\/recording/.test(caddy)) ok('the edge no longer refuses /api/recording', 'the runner gates it; the extension is handed a token');
+else bad('the edge no longer refuses /api/recording', 'the extension could never hand off through this edge');
 if (/\n\thandle \{\n[\s\S]*reverse_proxy runner:3000/.test(caddy)) ok('and the runner is the bare fallback handle', 'a handle with no matcher always sorts last');
 else bad('and the runner is the bare fallback handle');
 
@@ -293,7 +308,16 @@ if (/DATABASE_URL: postgres:\/\/ghostclick:\$\{POSTGRES_PASSWORD/.test(service('
 else bad('the control plane is given both stores by URL', 'it would fall back to SQLite and LocMemCache — and refuse to start');
 if (!/^\s+DJANGO_ALLOWED_HOSTS:/m.test(compose) && /GC_PUBLIC_URL: \$\{PUBLIC_URL:\?/.test(service('control'))) ok('hosts are derived from PUBLIC_URL, not set separately');
 else bad('hosts are derived from PUBLIC_URL, not set separately', 'two values that have to agree');
-if (/--forwarded-allow-ips", "\*"/.test(read('../auth/Dockerfile'))) ok('gunicorn trusts X-Forwarded-* from the edge', "--forwarded-allow-ips='*'; only the edge can reach it");
+// The schedule (docs/AUTH.md §12): a second container from the control
+// image running the housekeeping loop, with the control plane's
+// environment, on the data network only.
+if (/^  scheduler:\n/m.test(compose) && /"manage\.py", "housekeeping"/.test(service('scheduler')) && /image: ghostclick-control/.test(service('scheduler'))) ok('a scheduler runs manage.py housekeeping from the control image');
+else bad('a scheduler runs manage.py housekeeping from the control image', 'sessions, stale addresses and the audit log would only be purged by a deploy');
+if (/environment: \*control-env/.test(service('scheduler')) && /environment: &control-env/.test(service('control'))) ok('with the control plane’s own environment', 'one anchor, so the two cannot drift');
+else bad('with the control plane’s own environment');
+if (nets('scheduler').join() === 'data' && /cap_drop: \[ALL\]/.test(service('scheduler'))) ok('on the data network only, every capability dropped');
+else bad('on the data network only, every capability dropped', nets('scheduler').join(', '));
+if (/--forwarded-allow-ips", "\*"/.test(controlImage)) ok('gunicorn trusts X-Forwarded-* from the edge', "--forwarded-allow-ips='*'; only the edge can reach it");
 else bad('gunicorn trusts X-Forwarded-* from the edge', 'the scheme is stripped and every cookie is set insecure');
 if (/headers=\{'Host': urlsplit\(os\.environ\['GC_PUBLIC_URL'\]\)\.hostname\}/.test(service('control'))) ok('the control healthcheck sends the public Host', 'ALLOWED_HOSTS is exactly that host now');
 else bad('the control healthcheck sends the public Host', '"localhost" is a 400 and the service never becomes healthy');
@@ -318,6 +342,40 @@ const migrateAt = deploy.indexOf('manage.py migrate');
 const clearAt = deploy.indexOf('manage.py clearsessions');
 if (migrateAt > 0 && clearAt > migrateAt) ok('clearsessions runs after migrate');
 else bad('clearsessions runs after migrate', 'expired session rows are only removed by this');
+if (deploy.indexOf('manage.py purge_auth_events') > migrateAt) ok('and so does the audit-log purge');
+else bad('and so does the audit-log purge', 'rows past ninety days stay until the scheduler happens to run');
+// IMDSv2 with a hop limit of 1 (docs/AUTH.md §11): required by the deploy,
+// not only set by the bring-up script — a box made by hand, or one whose
+// options were changed since, would otherwise deploy green with a browser
+// one request away from instance credentials.
+if (/169\.254\.169\.254\/latest\/meta-data\//.test(deploy) && /IMDSv1 is ENABLED/.test(deploy) && /http-put-response-hop-limit 1/.test(deploy)) ok('the deploy refuses a box where IMDSv1 is still on');
+else bad('the deploy refuses a box where IMDSv1 is still on', 'aws-up.sh sets it; a box made by hand may not have it');
+const hopAt = deploy.indexOf('latest/api/token');
+if (hopAt > upAt && /THE RUNNER CAN REACH INSTANCE CREDENTIALS/.test(deploy) && /exec -T runner node -e/.test(deploy)) ok('and proves the hop limit from inside the runner', 'a PUT for a token must fail one NAT hop away');
+else bad('and proves the hop limit from inside the runner');
+if (/modify-instance-metadata-options --instance-id "\$ID"/.test(awsUp) && /http-put-response-hop-limit 1/.test(awsUp)) ok('aws-up.sh re-asserts it on a reused instance');
+else bad('aws-up.sh re-asserts it on a reused instance');
+// The deploy user, the docker group, and the root-owned key file
+// (docs/AUTH.md §12 [ops-supply-1]).
+if (/id -nG \| grep -qw docker/.test(deploy) && /gpasswd -d/.test(deploy)) ok('the deploy refuses a deploy user in the docker group');
+else bad('the deploy refuses a deploy user in the docker group', 'the group is root with no log');
+if (/stat -c '%U:%a' \.env\.prod/.test(deploy) && /root:600/.test(deploy)) ok('and a .env.prod that is not root:600');
+else bad('and a .env.prod that is not root:600', 'the signing key would be readable by whatever runs as the deploy user');
+if (!/\bgrep [^\n]*\.env\.prod\b/.test(deploy.slice(deploy.indexOf('# ---- the refusals'), deploy.indexOf('ok_disk=')))) ok('and reads the file through sudo -n cat, never directly', 'envfile(); values never leave the box');
+else bad('and reads the file through sudo -n cat, never directly', 'a root-owned file cannot be grepped by the deploy user');
+if (/exec sudo -n GC_GIT_SHA=/.test(gc) && /docker compose -f docker\/docker-compose\.prod\.yml --env-file \.env\.prod/.test(gc)) ok('scripts/gc runs compose as root through sudo', 'GC_GIT_SHA passed by name');
+else bad('scripts/gc runs compose as root through sudo');
+for (const [name, text] of [['bootstrap-ec2.sh', bootstrap], ['aws-up.sh', awsUp]]) {
+  if (/NOPASSWD:SETENV: \/opt\/ghostclick\/scripts\/gc/.test(text) && /NOPASSWD: \/usr\/bin\/cat \/opt\/ghostclick\/\.env\.prod/.test(text) && /visudo -cf/.test(text)) ok(`${name} writes the sudoers line and checks it`);
+  else bad(`${name} writes the sudoers line and checks it`);
+  // Code lines only: the comment that says "NOT usermod -aG docker" is the point.
+  if (!text.split('\n').some((l) => !/^\s*#/.test(l) && /usermod -aG docker/.test(l))) ok('and does not put the user in the docker group');
+  else bad('and does not put the user in the docker group', 'the group is root with no log');
+}
+if (/install -m 600 -o root -g root \.env\.prod\.new \.env\.prod/.test(awsUp) && !/\bsg docker\b/.test(awsUp)) ok('aws-up.sh installs .env.prod root-owned and runs the stack through gc');
+else bad('aws-up.sh installs .env.prod root-owned and runs the stack through gc');
+if (/HTTP_CIDR=\$\{HTTP_CIDR:-\}/.test(awsUp) && /set HTTP_CIDR to who may reach the app/.test(awsUp) && !/HTTP_CIDR:-0\.0\.0\.0\/0/.test(awsUp)) ok('aws-up.sh requires an explicit HTTP_CIDR', 'the internet is typed, never defaulted');
+else bad('aws-up.sh requires an explicit HTTP_CIDR', 'port 80 open to the world by omission');
 if (!/nginx -s reload/.test(deploy)) ok('and nothing reloads an edge that resolves per request');
 else bad('and nothing reloads an edge that resolves per request');
 if (/--resolve "\\?\$HOST:\\?\$PORT:127\.0\.0\.1"/.test(deploy) && !/http:\/\/localhost\/healthz/.test(deploy)) ok('every probe goes through the edge with the public host', 'localhost is an empty page from Caddy and a 400 from Django');
@@ -327,6 +385,45 @@ else bad('including the admin being behind the allowlist');
 if (!/^DJANGO_ALLOWED_HOSTS=/m.test(example) && /^POSTGRES_PASSWORD=CHANGE_ME/m.test(example) && /^REDIS_PASSWORD=CHANGE_ME/m.test(example)) ok('.env.prod.example matches', 'no hosts line; both passwords as placeholders');
 else bad('.env.prod.example matches');
 
+/**
+ * 13 · Supply chain (docs/AUTH.md §12 [ops-supply-3]): what the images are
+ *      built from is pinned to the byte, what they install is hashed, no
+ *      package's install hook runs as the build, and CI audits both sets
+ *      with a token that can only read.
+ */
+console.log('\n— the supply chain ————————————————————————————————————');
+const digest = /@sha256:[0-9a-f]{64}\b/;
+const froms = [...runnerImage.matchAll(/^FROM (\S+)/gm)].map((m) => m[1]);
+if (froms.length === 2 && froms.every((f) => digest.test(f))) ok('both runner stages are pinned by digest', froms.map((f) => f.split('@')[0]).join(', '));
+else bad('both runner stages are pinned by digest', froms.join(', '));
+const controlFrom = /^FROM (\S+)/m.exec(controlImage)?.[1] ?? '';
+if (digest.test(controlFrom)) ok('and the control image', controlFrom.split('@')[0]);
+else bad('and the control image', controlFrom);
+const pulled = [...compose.matchAll(/^    image: (\S+)/gm)].map((m) => m[1]).filter((i) => i !== 'ghostclick-control');
+if (pulled.length === 3 && pulled.every((i) => digest.test(i))) ok('and every image compose pulls', pulled.map((i) => i.split('@')[0]).join(', '));
+else bad('and every image compose pulls', pulled.join(', '));
+const playwrightDigest = froms.find((f) => f.startsWith('mcr.microsoft.com/playwright'))?.split('@')[1];
+if (playwrightDigest && workflow.includes(`mcr.microsoft.com/playwright:v1.63.0-noble@${playwrightDigest}`)) ok('CI runs inside the same playwright image, digest and all');
+else bad('CI runs inside the same playwright image, digest and all', 'the browser CI tests is not the browser production runs');
+if (/npm ci --omit=dev --ignore-scripts/.test(runnerImage) && /npm ci --ignore-scripts/.test(runnerImage)) ok('npm ci runs with --ignore-scripts in both stages', 'and --omit=dev for the runner');
+else bad('npm ci runs with --ignore-scripts in both stages', 'an install hook is registry code running as the build');
+if (/pip install [^\n]*--require-hashes -r requirements\.txt/.test(controlImage) && !/pip install [^\n]* gunicorn/.test(controlImage)) ok('pip installs with --require-hashes and nothing unhashed', 'gunicorn is pinned in requirements.in');
+else bad('pip installs with --require-hashes and nothing unhashed');
+const hashed = (requirements.match(/--hash=sha256:[0-9a-f]{64}/g) ?? []).length;
+const pins = (requirements.match(/^[a-zA-Z0-9_.\[\]-]+==\S+/gm) ?? []).length;
+if (hashed >= pins && pins >= 20 && /^gunicorn==/m.test(requirements)) ok('requirements.txt is pinned with hashes, gunicorn included', `${pins} packages, ${hashed} hashes`);
+else bad('requirements.txt is pinned with hashes, gunicorn included', `${pins} pins, ${hashed} hashes`);
+if (existsSync(new URL('../auth/requirements.in', import.meta.url)) && /GENERATED by pip-compile/.test(requirements)) ok('and is generated from requirements.in', 'the file a person edits');
+else bad('and is generated from requirements.in');
+if (/^permissions:\n  contents: read/m.test(workflow)) ok('the workflow token can only read', 'permissions: contents: read');
+else bad('the workflow token can only read', 'a compromised action could write to the repository');
+if (/pip-audit --require-hashes -r auth\/requirements\.txt/.test(workflow)) ok('CI audits the Python set', 'pip-audit, hashes required');
+else bad('CI audits the Python set');
+if (/npm run check:audit/.test(workflow) && /"check:audit": "npm audit --omit=dev --audit-level=high"/.test(read('../package.json'))) ok('and the production npm set', 'npm audit --omit=dev --audit-level=high');
+else bad('and the production npm set');
+if (/for image in ghostclick-runner:ci ghostclick-control:ci/.test(workflow) && /db\.sqlite3/.test(workflow) && /\.pem/.test(workflow)) ok('and asks both images for secrets they must not hold', 'env files, the vault, PEMs, the account database');
+else bad('and asks both images for secrets they must not hold', 'the control image was never asked');
+
 console.log(failures
   ? `\n  ${failures} FAILED\n`
   : '\n  OK — no secret reaches an image layer, no placeholder or unexpanded\n'
@@ -334,6 +431,8 @@ console.log(failures
     + '       control plane, readiness means the browser and not\n'
     + '       the port, every probe printed is a probe asserted, every command\n'
     + '       in the runbook is one that runs, the runner has no route to the\n'
-    + '       control plane, and the edge keeps cookies, tickets and the admin\n'
-    + '       where they belong.\n');
+    + '       control plane, the edge keeps cookies, tickets and the admin\n'
+    + '       where they belong, the key file is root’s and the daemon is\n'
+    + '       reached through sudo, the schedule runs, and every image and\n'
+    + '       package is pinned to the byte.\n');
 process.exit(failures ? 1 : 0);

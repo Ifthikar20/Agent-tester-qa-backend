@@ -100,7 +100,11 @@
     <details style="margin-top:10px">
       <summary class="dim" style="cursor:pointer;font-size:12px">Where ghostclick is running</summary>
       <input type="text" id="host" placeholder="http://localhost:3000" style="margin-top:8px">
+      <p class="sub" style="margin:0 0 4px">Where you sign in, if that is somewhere else (a laptop: <code>http://localhost:8000</code>)</p>
+      <input type="text" id="authHost" placeholder="same as above">
       <button id="saveHost">Save</button>
+      <p class="sub" style="margin:8px 0 0">With a login, the operator lists this extension in <code>GC_EXTENSION_ORIGINS</code>:</p>
+      <div class="target" id="origin" style="margin-top:4px"></div>
     </details>
   </div>
 

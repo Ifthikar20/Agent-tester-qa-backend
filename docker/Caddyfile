@@ -105,13 +105,12 @@
 	# test is still, and a 60-second read timeout would cut the socket every
 	# time someone stopped to think.
 	handle {
-		# The extension hand-off, closed. POST /api/recording is
-		# unauthenticated on the runner by design: the extension records on a
-		# page where it has no session and no way to be handed a token. It
-		# validates through the origin gate and never executes, but it is the
-		# one reachable unauthenticated endpoint and the extension is not part
-		# of this deployment. Closed here rather than argued about.
-		respond /api/recording "Not here." 403
+		# POST /api/recording used to be refused here, because the extension
+		# had no way to be handed a token. It has one now — its background
+		# worker asks the control plane with the person's session, and the
+		# runner gates the route like every other (docs/AUTH.md §11) — so
+		# the edge no longer has an opinion about it: the runner answers 401
+		# without a token, and scripts/deploy.sh probes for exactly that.
 
 		reverse_proxy runner:3000 {
 			# The runner never authenticates by cookie, so the runner never

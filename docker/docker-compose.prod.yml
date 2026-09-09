@@ -25,9 +25,14 @@ networks:
   data:
     internal: true
 
+# Every image that is not built here is pinned by digest as well as by tag
+# (docs/AUTH.md §12 [ops-supply-3]): a tag is a name the registry can point
+# somewhere else tomorrow, a digest is the image that was tested. To move,
+# `docker buildx imagetools inspect <image:tag>` prints the new one.
+
 services:
   caddy:
-    image: caddy:2.10-alpine
+    image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     restart: unless-stopped
     # Caddy resolves `runner` and `control` per request, so it would come up
     # fine before them — but a deploy should not put an edge on the internet
@@ -102,6 +107,11 @@ services:
       # Turnstile widget's host, and one line feeding both services is how
       # the policy and the page cannot disagree about whether it exists.
       GC_TURNSTILE_SITE_KEY: ${GC_TURNSTILE_SITE_KEY:-}
+      # The recorder extension's origins (docs/AUTH.md §11): the runner
+      # answers CORS for them on the gated POST /api/recording, and the
+      # control plane trusts the same list for CSRF when it hands the
+      # extension a token — one line, two readers, so they cannot differ.
+      GC_EXTENSION_ORIGINS: ${GC_EXTENSION_ORIGINS:-}
     volumes:
       # Run history, the ORIGIN ALLOWLIST, the vault — one directory per
       # organisation, .ghostclick/<org>/. Without this every deploy forgets
@@ -137,11 +147,14 @@ services:
     build:
       context: ../auth
       dockerfile: Dockerfile
+    # Named, so the scheduler below runs the SAME image rather than a second
+    # build of the same context.
+    image: ghostclick-control
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
-    environment:
+    environment: &control-env
       DJANGO_DEBUG: "0"
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env.prod}
       # Hosts, origins and cookie flags are all derived from this one value
@@ -184,6 +197,10 @@ services:
       # whether the button exists from GET /auth/config.
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # The recorder extension's origins, trusted for CSRF when the
+      # extension asks for a token with the person's session (docs/AUTH.md
+      # §11). The same line the runner reads for CORS.
+      GC_EXTENSION_ORIGINS: ${GC_EXTENSION_ORIGINS:-}
     volumes:
       - control-static:/app/staticfiles
     expose: ["8000"]
@@ -206,8 +223,32 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
+  # The schedule (docs/AUTH.md §12): the control-plane image again, running
+  # `manage.py housekeeping` — clearsessions and the audit-log purge daily,
+  # the stale-address purge every five minutes — with the same environment,
+  # so it needs no crontab and its output is `./scripts/gc logs scheduler`.
+  # Same networks, same dropped capabilities; it is the control plane doing
+  # its own chores, not a new kind of process.
+  scheduler:
+    image: ghostclick-control
+    command: ["python", "manage.py", "housekeeping"]
+    restart: unless-stopped
+    depends_on:
+      control: { condition: service_healthy }
+    environment: *control-env
+    networks: [data]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
     restart: unless-stopped
     # As the postgres user from the start, so the entrypoint never needs to
     # chown or drop privileges — which is what lets every capability go.
@@ -244,7 +285,7 @@ services:
       options: { max-size: "10m", max-file: "3" }
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     restart: unless-stopped
     user: redis
     # Counters only — rate limits, lockouts — so nothing is persisted: a

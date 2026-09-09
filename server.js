@@ -10,7 +10,7 @@ import { OPS, validate, PACE, paceOf } from './ops.js';
 import { normalizeUrl } from './origins.js';
 import { chooseHome } from './home.js';
 import { bearer, verify } from './auth.js';
-import { AUTH_ON, DEMO, PUBLIC_KEYS, KEY_ERROR, WEB_ORIGIN, TURNSTILE, csp } from './mode.js';
+import { AUTH_ON, DEMO, PUBLIC_KEYS, KEY_ERROR, WEB_ORIGIN, EXTENSION_ORIGINS, EXTENSION_ERROR, TURNSTILE, csp } from './mode.js';
 import * as tickets from './tickets.js';
 import * as tenancy from './tenancy.js';
 import { LOCAL } from './org.js';
@@ -67,6 +67,13 @@ if (AUTH_ON && !WEB_ORIGIN) {
     '\n  With auth on, a socket is accepted only from the origin the UI is served at,\n' +
     '  so the runner has to be told what that is — e.g. GC_WEB_ORIGIN=http://localhost:3000.\n'
   );
+  process.exit(1);
+}
+if (EXTENSION_ERROR) {
+  // A web origin in the extension list is the CORS wildcard by another
+  // name (mode.js); refused at boot, where the message names the variable,
+  // rather than honoured on every request.
+  console.error(`\n  ${EXTENSION_ERROR}\n`);
   process.exit(1);
 }
 /**
@@ -305,8 +312,11 @@ const fail = (res, err, code = 400) => {
 const sendOk = (res, body) => res.json({ ok: true, ...body });
 
 app.use('/api', (req, res, next) => {
-  if (WEB_ORIGIN && req.headers.origin === WEB_ORIGIN) {
-    res.set('Access-Control-Allow-Origin', WEB_ORIGIN);
+  // The app's origin, or one of the operator's extension origins (mode.js):
+  // each is echoed back exactly, never a pattern, and nothing else is.
+  const origin = req.headers.origin;
+  if (origin && ((WEB_ORIGIN && origin === WEB_ORIGIN) || EXTENSION_ORIGINS.includes(origin))) {
+    res.set('Access-Control-Allow-Origin', origin);
     res.set('Access-Control-Allow-Credentials', 'true');
     res.set('Vary', 'Origin');
   } else if (!AUTH_ON) {
@@ -330,10 +340,10 @@ app.use('/api', (req, res, next) => {
   /**
    * No exceptions. POST /api/recording used to be the one route left open
    * for the extension, which records on a page where it has no session. With
-   * auth on it is under the gate like everything else: the extension gets a
-   * token of its own through the control plane (docs/AUTH.md §11
-   * [browser-side-2]), which is the ops flow's to build, and until then the
-   * hand-off is a laptop feature.
+   * auth on it is under the gate like everything else: the extension's
+   * background worker asks the control plane for a token of its own with
+   * the person's session cookie (extension/background.js; docs/AUTH.md §11
+   * [browser-side-2]) and presents it here the way the UI does.
    */
   const token = bearer(req.headers.authorization);
   if (!token) return res.status(401).json({ ok: false, error: 'Not signed in' });
@@ -961,6 +971,9 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
               : `one workspace, "${LOCAL}" — .ghostclick/${LOCAL}/ and suites/${LOCAL}/`}` +
             `${migrated.length ? `\n  migrated    ->  ${migrated.join('; ')}` : ''}` +
             `${TURNSTILE ? '\n  turnstile   ->  the CSP admits challenges.cloudflare.com (GC_TURNSTILE_SITE_KEY is set)' : ''}` +
+            `${AUTH_ON ? `\n  extension   ->  ${EXTENSION_ORIGINS.length
+              ? `${EXTENSION_ORIGINS.join(', ')} may post a recording with a token (GC_EXTENSION_ORIGINS)`
+              : 'no origin listed in GC_EXTENSION_ORIGINS — the recorder cannot hand off to this runner'}` : ''}` +
             `\n  reach       ->  ${BLOCK_PRIVATE
               ? 'the driven page cannot reach loopback, private or link-local addresses'
               : 'unrestricted — the driven page may reach anything this host can (GC_BLOCK_PRIVATE=1 to close it)'}` +

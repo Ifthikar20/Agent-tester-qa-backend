@@ -20,7 +20,7 @@ npm run check:recording           # repeated links, scrolling, jump-to-top, time
 npm run check:longnames           # paragraph-long names, casing, sticky anchors
 npm run check:naming              # when the page and the browser disagree about an element
 npm run check:redirects           # redirect chains, statuses, the friendly 404
-npm run check:app                 # one command starts it all, with one shared key
+npm run check:app                 # one command starts it all, each half handed its half of the keypair
 npm run check:patience            # late vs never coming, and settling
 npm run check:pace                # a fast run reaches the same verdict as a watched one
 npm run check:console             # the canvas paints, and the wheel reaches the page
@@ -157,10 +157,17 @@ page instead. `GOOGLE_CLIENT_ID=… GOOGLE_CLIENT_SECRET=… npm run app --
 --auth` adds the Google button, for a client whose redirect URI is
 `http://localhost:8000/accounts/google/login/callback/`.
 
+The recorder extension is handed a token the same way, by its background
+worker with your session, when its `chrome-extension://<id>` is listed in
+`GC_EXTENSION_ORIGINS` on both services (the panel shows the id); nothing
+else can post a recording to a gated runner.
+
 Deployed, the same three services sit behind one Caddy on one URL
 (`PUBLIC_URL`), from which every host, origin and cookie rule is derived, with
-the runner on a network that has no route to the control plane or its stores.
-See [docs/DEPLOY.md](docs/DEPLOY.md).
+the runner on a network that has no route to the control plane or its stores,
+a scheduler that clears sessions and the audit log, hashed and digest-pinned
+dependencies, and a root-owned key file that the deploy user reaches only
+through `sudo`. See [docs/DEPLOY.md](docs/DEPLOY.md).
 
 It prints what it is running, and the sidebar shows the same thing:
 
@@ -427,7 +434,10 @@ still asking about a button that no longer exists.
 through the same gate as everything else and drops it in the script box. It is
 never run automatically: any page you visit can reach a localhost port, so an
 endpoint that executed what it was handed would be a remote-code path with
-extra steps.
+extra steps. With a login, the extension's background worker first asks the
+control plane for an executor token on the strength of your session — which
+it is given only when its origin is listed in `GC_EXTENSION_ORIGINS` — and
+presents that; see `extension/README.md`.
 
 `extension/lib/propose.js` — how an element gets named — is read off disk and
 injected by the server's teach mode as well, so the extension and the runner

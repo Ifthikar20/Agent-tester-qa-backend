@@ -172,7 +172,12 @@ has to be recorded in a browser that is already through it — yours.
 3. Open your app, click the ghostclick icon to open the side panel
 
 If the server runs anywhere but `http://localhost:3000`, set it under
-**Flow → Where ghostclick is running**.
+**Flow → Where ghostclick is running**. Running with `--auth`? The same
+panel shows this extension's origin (`chrome-extension://<id>`); start both
+halves with it listed — `GC_EXTENSION_ORIGINS=chrome-extension://<id> npm run
+app -- --auth` — set **Where you sign in** to `http://localhost:8000`, and
+sign in to the app in this Chrome profile. The hand-off is then made with a
+token minted on your session; without those, **Copy mermaid** still works.
 
 ## 5 · Record
 

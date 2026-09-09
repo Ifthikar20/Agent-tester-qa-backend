@@ -10,7 +10,32 @@
 # variables at all. That error reads like a broken config file, and it is the
 # first thing you hit after a deploy. This wrapper is the fix, and it is why
 # docs/DEPLOY.md never spells a compose command out longhand.
+#
+# It runs as root, through sudo, and that is the point rather than a
+# convenience (docs/AUTH.md §12 [ops-supply-1]): .env.prod holds the signing
+# key and is root-owned, 0600, so no process running as the deploy user can
+# read it; the deploy user is NOT in the docker group, because that group is
+# root by another name and nothing logs its use; and every command that
+# reaches the daemon goes through one sudoers line for this script, which
+# means every one of them is in auth.log with who ran it. bootstrap-ec2.sh
+# and aws-up.sh write that line:
+#
+#   ubuntu ALL=(root) NOPASSWD:SETENV: /opt/ghostclick/scripts/gc
+#
+# SETENV, so GC_GIT_SHA — the one variable the deploy sets in the shell for
+# compose to bake into the runner image — survives sudo's environment reset.
+# An operator who is root already, or who has put themselves in the docker
+# group on a laptop, is not asked twice.
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT"
 [ -f .env.prod ] || { echo "no .env.prod here ($PWD) — copy .env.prod.example and fill it in" >&2; exit 1; }
+if [ "$(id -u)" != 0 ] && ! docker info >/dev/null 2>&1; then
+  # -n: never prompt. A deploy is a script, and a script that stops at a
+  # password prompt inside an ssh session hangs rather than asks; the
+  # sudoers line above is what makes this succeed, and its absence is the
+  # message below.
+  exec sudo -n GC_GIT_SHA="${GC_GIT_SHA:-}" "$ROOT/scripts/gc" "$@" || {
+    echo "sudo -n $ROOT/scripts/gc failed: add the sudoers line at the top of this file" >&2; exit 1; }
+fi
 exec docker compose -f docker/docker-compose.prod.yml --env-file .env.prod "$@"

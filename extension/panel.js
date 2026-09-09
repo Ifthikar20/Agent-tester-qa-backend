@@ -3,6 +3,10 @@ import { toFlow } from './lib/flow.js';
 const $ = (id) => document.getElementById(id);
 const DEFAULT_HOST = 'http://localhost:3000';
 let host = DEFAULT_HOST;   // where the runner lives; remembered per install
+// Where the person signs in — the control plane. Deployed, it is the same
+// origin as the runner; on a laptop it is the Django port. Empty means
+// "the same as host".
+let authHost = '';
 
 let state = { on: false, steps: [] };
 let pick = null;
@@ -89,20 +93,20 @@ $('copy').onclick = async () => {
   $('sendNote').textContent = 'Copied. Paste it into the ghostclick script box.';
 };
 
+// The hand-off is the background worker's (background.js): with auth on it
+// has to be handed a token first, on the strength of your session, and the
+// worker is where that request carries this extension's origin.
 $('send').onclick = async () => {
   $('sendNote').textContent = 'Sending…';
-  try {
-    const res = await fetch(`${host}/api/recording`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ flow: $('flow').textContent }),
-    });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    $('sendNote').textContent = 'Sent — it is in the ghostclick script box.';
-  } catch (e) {
-    $('sendNote').innerHTML =
-      `<span class="warn">Could not reach ${host} (${e.message}). ` +
-      `Check it is running, or use Copy mermaid instead.</span>`;
+  const r = await send({ t: 'send', flow: $('flow').textContent, host, authHost });
+  if (r?.ok) {
+    $('sendNote').textContent = r.note;
+  } else {
+    $('sendNote').textContent = '';
+    const warn = document.createElement('span');
+    warn.className = 'warn';
+    warn.textContent = r?.note ?? 'The recorder did not answer.';
+    $('sendNote').append(warn);
   }
 };
 
@@ -118,14 +122,21 @@ chrome.runtime.onMessage.addListener((m) => {
 
 $('saveHost').onclick = async () => {
   host = ($('host').value.trim() || DEFAULT_HOST).replace(/\/+$/, '');
-  await chrome.storage.local.set({ host });
+  authHost = $('authHost').value.trim().replace(/\/+$/, '');
+  await chrome.storage.local.set({ host, authHost });
   $('host').value = host;
-  $('sendNote').textContent = `Will send to ${host}`;
+  $('authHost').value = authHost;
+  $('sendNote').textContent = `Will send to ${host}${authHost ? `, signed in at ${authHost}` : ''}`;
 };
 
-chrome.storage.local.get('host').then(({ host: saved }) => {
+chrome.storage.local.get(['host', 'authHost']).then(({ host: saved, authHost: savedAuth }) => {
   host = saved || DEFAULT_HOST;
+  authHost = savedAuth || '';
   $('host').value = host;
+  $('authHost').value = authHost;
 });
+// An unpacked extension's id is derived from its directory, so it differs
+// per machine; the operator lists this exact origin in GC_EXTENSION_ORIGINS.
+$('origin').textContent = `chrome-extension://${chrome.runtime.id}`;
 
 send({ t: 'get' }).then((r) => { if (r?.state) state = r.state; render(); });

@@ -131,8 +131,10 @@ Two things stay outside it deliberately:
 
 `POST /api/recording` used to be a third: the extension posts from whatever
 page you were recording on, with no session, so it was left open. With auth on
-it is now under the gate like everything else, and the extension gets a token
-of its own through the control plane (docs/AUTH.md §11) — the ops step's.
+it is now under the gate like everything else, and the extension's background
+worker gets a token of its own through the control plane with the person's
+session (docs/AUTH.md §11) — from an origin the operator listed in
+`GC_EXTENSION_ORIGINS`, which both services read from the same line.
 
 ## Splitting, when the time comes
 

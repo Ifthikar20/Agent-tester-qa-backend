@@ -41,6 +41,12 @@ Environment (see .env.example):
                       tokens cannot be minted and /auth/executor-token says so.
   GC_WEB_ORIGIN       laptop only: where the UI is served from, for CORS and
                       CSRF. In production the UI is the same origin as this.
+  GC_EXTENSION_ORIGINS
+                      the browser extension's origins, comma-separated
+                      (chrome-extension://<id>), trusted for CSRF and CORS so
+                      its background worker can be handed an executor token
+                      on the strength of the person's session. Unset, no
+                      extension can.
   GC_TOKEN_TTL        seconds an executor token is good for (default 600).
   GC_SIGNUP_MODE      who may sign up: invite (default), open, or domain.
   GC_SIGNUP_DOMAINS   for domain mode, the email domains allowed, comma-separated.
@@ -325,13 +331,32 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # answered with `*`, and Django refuses a POST from an origin it was not told
 # about.
 WEB_ORIGIN = os.environ.get('GC_WEB_ORIGIN', '').rstrip('/') or PUBLIC_URL
-CORS_ALLOWED_ORIGINS = [WEB_ORIGIN] if WEB_ORIGIN else []
+
+# The browser extension (docs/AUTH.md §11 [browser-side-2]). It records on
+# a page where it has no session, and the runner's POST /api/recording is
+# under the gate like everything else, so the extension's background worker
+# asks THIS service for an executor token with the person's own session
+# cookie — which means its origin has to pass CSRF, and CORS has to answer
+# it. An extension's origin is chrome-extension://<id>, one id per install,
+# so the list is the operator's to write; and only that shape is accepted:
+# an http(s) origin typed here would trust a web page for CSRF, which is the
+# one thing this list must never do.
+GC_EXTENSION_ORIGINS = [o.rstrip('/') for o in env_list('GC_EXTENSION_ORIGINS')]
+for _origin in GC_EXTENSION_ORIGINS:
+    _parts = urlsplit(_origin)
+    if _parts.scheme not in ('chrome-extension', 'moz-extension') or not _parts.netloc or _parts.path or _parts.query:
+        raise ImproperlyConfigured(
+            f'GC_EXTENSION_ORIGINS holds {_origin!r}: an extension origin is chrome-extension://<id> '
+            '(or moz-extension://<uuid>), nothing else, and never a web origin.'
+        )
+
+CORS_ALLOWED_ORIGINS = ([WEB_ORIGIN] if WEB_ORIGIN else []) + GC_EXTENSION_ORIGINS
 CORS_ALLOW_CREDENTIALS = True
 # The rotated CSRF token rides back in this header (accounts.middleware
 # .CsrfTokenHeader); cross-origin, a browser hides every header the server
 # did not expose by name.
 CORS_EXPOSE_HEADERS = ['X-CSRFToken']
-CSRF_TRUSTED_ORIGINS = [PUBLIC_URL] if PUBLIC_URL else ([WEB_ORIGIN] if WEB_ORIGIN else [])
+CSRF_TRUSTED_ORIGINS = ([PUBLIC_URL] if PUBLIC_URL else ([WEB_ORIGIN] if WEB_ORIGIN else [])) + GC_EXTENSION_ORIGINS
 # Where the SPA is: every link in an email, and every redirect allauth or
 # the admin would make, lands on one of its routes. Empty on a laptop with no
 # GC_WEB_ORIGIN at all, which is a laptop with no UI to sign in from.

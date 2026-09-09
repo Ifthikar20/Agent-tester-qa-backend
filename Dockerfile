@@ -10,11 +10,19 @@
 # VITE_AUTH_URL is read at BUILD time — it decides whether the app has a login
 # at all and where that login lives. That is why it is a build argument: a
 # runtime env var would arrive far too late, after the bundle was written.
-FROM node:22-slim AS ui
+#
+# Both base images are pinned by digest as well as by tag (docs/AUTH.md §12
+# [ops-supply-3]): a tag is a name the registry can point somewhere else
+# tomorrow, a digest is the image that was tested. To move, look the new one
+# up with `docker buildx imagetools inspect <image:tag>` and change both.
+FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS ui
 WORKDIR /app
 ARG VITE_AUTH_URL=""
 COPY package.json package-lock.json ./
-RUN npm ci
+# --ignore-scripts: nothing the build needs runs a lifecycle script, and a
+# package's install hook is arbitrary code from the registry running as the
+# build. The lockfile decides what is installed; the hooks do not get a say.
+RUN npm ci --ignore-scripts
 # web/ is self-contained on purpose (docs/BOUNDARY.md), so this is all it needs.
 COPY web ./web
 RUN VITE_AUTH_URL="$VITE_AUTH_URL" \
@@ -25,8 +33,9 @@ RUN VITE_AUTH_URL="$VITE_AUTH_URL" \
 # The Playwright image already contains the exact browser build this version
 # expects. The tag MUST match the playwright version in package.json — a
 # mismatch fails at launch with "Executable doesn't exist", which reads as a
-# broken deploy rather than a version skew.
-FROM mcr.microsoft.com/playwright:v1.63.0-noble
+# broken deploy rather than a version skew. The digest pins the exact image
+# behind that tag; .github/workflows/check.yml runs inside the same one.
+FROM mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
 WORKDIR /app
 ENV NODE_ENV=production
 
@@ -38,7 +47,10 @@ ARG GC_GIT_SHA=""
 ENV GC_GIT_SHA=$GC_GIT_SHA
 
 COPY --chown=pwuser:pwuser package.json package-lock.json ./
-RUN npm ci --omit=dev
+# --ignore-scripts here too. The browser is already in this image, so
+# playwright's install hook has nothing to do, and no other package's hook
+# has a reason to run as the build.
+RUN npm ci --omit=dev --ignore-scripts
 
 COPY --chown=pwuser:pwuser . .
 COPY --from=ui --chown=pwuser:pwuser /app/web/dist ./web/dist

@@ -13,6 +13,12 @@ on:
   push:
   pull_request:
 
+# The token this workflow is handed can read the repository and nothing
+# else. Nothing here writes to it, and a job that could — through a
+# compromised action, say — is the one thing a CI token is stolen for.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -21,10 +27,11 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # The exact tag Dockerfile pins. If they ever drift, the browser this job
-    # runs against is not the browser production runs against, and this job is
-    # the cheapest place to notice.
-    container: mcr.microsoft.com/playwright:v1.63.0-noble
+    # The exact image Dockerfile pins, digest included. If they ever drift,
+    # the browser this job runs against is not the browser production runs
+    # against, and this job is the cheapest place to notice —
+    # scripts/check-deploy.js asserts the two digests are the same.
+    container: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -47,15 +54,40 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
+      # The hashed file: pip turns hash-checking on by itself for a
+      # requirements file that carries hashes, so this is the same install
+      # the image does, and it fails the same way on a package that does
+      # not match.
       - run: pip install -r auth/requirements.txt
       - run: python manage.py test
         working-directory: auth
         env:
           DJANGO_SECRET_KEY: not-a-real-key-just-for-tests-0123456789
 
+  supply-chain:
+    # What the two dependency sets are known to carry (docs/AUTH.md §12
+    # [ops-supply-3]). A vulnerable pin fails the build; the fix is a new
+    # pin in requirements.in or package.json, never an exception here.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install pip-audit
+      # --require-hashes: audit the file exactly as the image installs it,
+      # and refuse to audit a file that has lost its hashes.
+      - run: pip-audit --require-hashes -r auth/requirements.txt
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      # Production dependencies only: the bundler and the Vue toolchain
+      # never reach the runner image, so an advisory there is not this
+      # deployment's. High and above, because that is the level at which a
+      # pin is changed on the day rather than at the next review.
+      - run: npm run check:audit
+
   images:
-    # Neither image has ever been through `docker build` — docs/DEPLOY.md says
-    # so in writing. This is what closes that.
+    # Both images through `docker build`, and neither carrying a secret.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -84,12 +116,23 @@ jobs:
           cache-to: type=gha,mode=max
       - name: the pinned tag really does carry the browser this build wants
         run: docker run --rm ghostclick-runner:ci node -e "console.log(require('playwright').chromium.executablePath())"
-      - name: and no secret rode in on the build context
+      - name: and no secret rode in on either build context
+        # The runner's context is the repository root — on the host, the
+        # directory holding .env.prod, the PEM and the vault. The control
+        # plane's is auth/, which holds the development account database
+        # and a .env. Each image is asked for every file the other might
+        # have picked up too, because a .dockerignore is one line from
+        # forgetting one.
         run: |
           set -e
-          for f in .env.prod .ghostclick/secrets.json auth/db.sqlite3; do
-            if docker run --rm --entrypoint sh ghostclick-runner:ci -c "test -e '/app/$f'"; then
-              echo "::error::$f is inside the image — check .dockerignore"; exit 1
-            fi
+          for image in ghostclick-runner:ci ghostclick-control:ci; do
+            for f in .env.prod .env .ghostclick/secrets.json auth/db.sqlite3 db.sqlite3 ghostclick-deploy.pem cansee-deploy.pem; do
+              if docker run --rm --entrypoint sh "$image" -c "test -e '/app/$f'"; then
+                echo "::error::$f is inside $image — check its .dockerignore"; exit 1
+              fi
+            done
+            # Nor any PEM or env file under any name.
+            found=$(docker run --rm --entrypoint sh "$image" -c "find /app -name '*.pem' -o -name '.env*' ! -name '.env.example' ! -name '.env.prod.example' 2>/dev/null" || true)
+            if [ -n "$found" ]; then echo "::error::$image carries: $found"; exit 1; fi
           done
-          echo "no .env.prod, no vault, no account database in the image"
+          echo "no .env.prod, no vault, no PEM, no account database in either image"

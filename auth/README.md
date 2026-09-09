@@ -36,7 +36,7 @@ one before the admin draws a page.
 ## Running it
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt       # pinned and hashed; pip checks every hash (see requirements.in)
 cp .env.example .env
 python manage.py signing_key --new    # prints GC_SIGNING_KEY for .env, and the runner's line
 python manage.py mfa_key              # prints GC_MFA_KEY for .env (optional on a laptop; see .env.example)
@@ -127,7 +127,11 @@ sign-in time into the session **once** (`setdefault`, so a reauthentication
 or a later Google connect cannot restart it), and
 `accounts.middleware.AbsoluteSessionLifetime` flushes the session and answers
 `401 {"error": "session_expired"}` past it. `manage.py clearsessions` removes
-the expired rows; the deploy runs it after every migrate.
+the expired rows; the deploy runs it after every migrate, and `manage.py
+housekeeping` — the loop the compose `scheduler` service runs — every day,
+beside `purge_auth_events` (audit rows past ninety days, daily) and
+`purge_unverified_emails` (every five minutes). `housekeeping --once` runs
+all three now and exits, for a host cron; `--list` prints the schedule.
 
 ## The audit log
 
@@ -584,6 +588,14 @@ value is ignored rather than merely hidden `[authz-tenancy-6]`.
    browser ──Bearer token────► the runner    ~10 minutes, held in memory only
 ```
 
+The recorder extension takes the same two steps from its background worker
+— `GET /auth/csrf`, `POST /auth/executor-token` with the cookie — from its
+own origin, `chrome-extension://<id>`, which passes CSRF here (and CORS on
+the runner) only when the operator listed it in `GC_EXTENSION_ORIGINS`; the
+settings module refuses any value in that list that is not an extension
+origin, because the list is trusted for CSRF and a web origin in it would let
+a page there forge every POST.
+
 The runner is never given the session cookie — in production the edge strips
 the `Cookie` header from everything it routes to the runner. It is a different
 service reached over a WebSocket, and a WebSocket cannot carry headers — so
@@ -635,7 +647,7 @@ nothing else.
 ## Tests
 
 ```bash
-python manage.py test          # 352 tests, one module per concern in accounts/tests/ and tenants/tests/
+python manage.py test          # 379 tests, one module per concern in accounts/tests/ and tenants/tests/
 ```
 
 They never touch the network: `accounts/testing.py` is the test runner, and it
@@ -662,10 +674,11 @@ Python or Django is missing, because this directory is optional.
 - **Plans in the UI.** An organisation's plan is set in the admin; the app
   shows the plan and the runner's usage under Organisation and offers no
   way to change it. Billing is not a thing this project has.
-- **A purge of anything.** `AuthEvent` rows past 90 days, expired
-  invitations, previous addresses past their week, and the stale-address
-  purge on a schedule are the ops step's; the commands that exist are
-  idempotent and nothing runs them yet.
+- **A purge of expired invitations and previous addresses.** Both expire by
+  date — `Invitation.live()` and `PreviousEmail.users_for()` filter on it —
+  so nothing depends on the rows going, and nothing removes them. The audit
+  log, sessions and stale address claims ARE purged, on the schedule
+  `manage.py housekeeping` keeps.
 - **A runner pool.** The runner holds one browser and one run lock, now
   partitioned by organisation: one organisation drives at a time and the
   others are told it is busy. A login says *who*, not *which runner*; two

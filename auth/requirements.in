@@ -1,0 +1,46 @@
+# The control plane's direct dependencies, and the only file a person edits.
+#
+# requirements.txt is GENERATED from this with every transitive package pinned
+# and hashed, and the image installs it with --require-hashes (docs/AUTH.md
+# §12 [ops-supply-3]): a package that does not match the hash recorded here
+# does not install, so a registry that hands out a different file for the same
+# version — or a name that was quietly taken over — fails the build instead of
+# reaching production. To change a version, edit it here and regenerate:
+#
+#   cd auth && python -m piptools compile --generate-hashes --no-strip-extras -o requirements.txt requirements.in
+#
+# Pinned to the versions that were tested, because "Django>=5" is a request to
+# be upgraded by whoever runs pip next.
+#
+# There is no JWT library here on purpose: minting an EdDSA token is one
+# Ed25519 signature over two base64url segments (accounts/tokens.py), and the
+# executor verifies it with Node's stdlib for the same reason. Neither side
+# gains a package for the easy half of the problem.
+Django==5.2.17
+django-cors-headers==4.9.0
+# Sign-up, sign-in, verification by code, reset, the email and password
+# changes, Google and MFA — through its headless JSON API. The extras bring
+# the passkey library and the QR code an authenticator app is enrolled from.
+django-allauth[headless,mfa,socialaccount]==65.19.2
+# Argon2id for password hashes (PASSWORD_HASHERS).
+argon2-cffi==25.1.0
+# Have I Been Pwned, by k-anonymity, as a password validator.
+pwned-passwords-django==5.2.0
+# The shared cache the rate limits count in.
+redis==8.1.0
+# DATABASE_URL -> DATABASES, and the Postgres driver it names.
+dj-database-url==3.1.2
+psycopg[binary]==3.3.5
+# Ed25519 for the executor token: the one primitive the standard library
+# lacks — and Fernet, which encrypts the second factor's secrets at rest.
+cryptography==50.0.1
+# Passkeys (allauth.mfa's WebAuthn), and the QR code an authenticator app
+# is enrolled from. Named here as well as through allauth's extras so their
+# versions are this file's decision and not the extras'.
+fido2==2.2.1
+qrcode==8.2
+# The WSGI server the image runs. It is a deployment concern rather than a
+# dependency of the app, but the hash-checked install is all-or-nothing —
+# pip refuses to mix a hashed requirements file with an unhashed extra — so
+# it is pinned here with everything else.
+gunicorn==23.0.0

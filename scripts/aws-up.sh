@@ -108,7 +108,21 @@ fi
 MY_IP=$(curl -s -m 10 https://checkip.amazonaws.com || true)
 [ -n "$MY_IP" ] || die "could not determine your public IP (needed for the SSH rule)"
 SSH_CIDR=${SSH_CIDR:-$MY_IP/32}
-HTTP_CIDR=${HTTP_CIDR:-0.0.0.0/0}
+# Who may reach the app is not defaulted, because the default that used to be
+# here was the internet, and a browser that fetches URLs on your behalf from
+# inside your VPC is not a thing to publish by omission. Your own machine is
+# the usual answer; 0.0.0.0/0 is accepted when typed on purpose.
+HTTP_CIDR=${HTTP_CIDR:-}
+[ -n "$HTTP_CIDR" ] || die "set HTTP_CIDR to who may reach the app on 80 and 443:
+
+    HTTP_CIDR=$MY_IP/32 bash scripts/aws-up.sh      just this machine
+    HTTP_CIDR=203.0.113.0/24 bash scripts/aws-up.sh   an office
+    HTTP_CIDR=0.0.0.0/0 bash scripts/aws-up.sh        the internet, on purpose"
+case "$HTTP_CIDR" in
+  *[!0-9./]*|*/) die "HTTP_CIDR=$HTTP_CIDR does not look like an IPv4 CIDR (a.b.c.d/n)" ;;
+  */*) ;;
+  *) die "HTTP_CIDR=$HTTP_CIDR has no /prefix — a single machine is $HTTP_CIDR/32" ;;
+esac
 
 step "account $ACCT in $REGION"
 ok "ssh  from $SSH_CIDR"
@@ -121,10 +135,9 @@ if [ "$HTTP_CIDR" = "0.0.0.0/0" ]; then
 
       - The app IS gated. /api/* answers 401 without a token, and the token
         comes from a Django login. An anonymous visitor gets a sign-in page.
-      - There is NO TLS on a bare IP. The session cookie and the executor
-        token (which rides in the WebSocket query string, because a browser
-        cannot set headers on a WebSocket) cross the network in cleartext.
-        Anyone on the path can read them and drive your browser.
+      - There is NO TLS on a bare IP. The session cookie, the executor
+        token and the ticket that opens the socket cross the network in
+        cleartext. Anyone on the path can read them and drive your browser.
       - So: fine for a demo you are watching. Not fine for anything real, and
         not fine to leave running. Take it down with scripts/aws-down.sh —
         or give it a hostname, set PUBLIC_URL=https://it, and redeploy: the
@@ -191,6 +204,11 @@ EXISTING=$(aws_ ec2 describe-instances \
 if [ "$EXISTING" != "None" ] && [ -n "$EXISTING" ]; then
   ID=$EXISTING
   step "reusing running instance $ID"
+  # Re-asserted on every run, because the deploy refuses a box where it is
+  # not so (scripts/deploy.sh) and a box made by hand may never have had it.
+  aws_ ec2 modify-instance-metadata-options --instance-id "$ID" \
+    --http-tokens required --http-put-response-hop-limit 1 --http-endpoint enabled >/dev/null
+  ok "IMDSv2 required, hop limit 1"
 else
   # Asked of EC2, not SSM. The published SSM parameter is the tidier lookup,
   # but it needs ssm:GetParameters — a permission an EC2 deploy user has no
@@ -276,8 +294,18 @@ if ! command -v docker >/dev/null; then
     | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
   sudo apt-get update -qq
   sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null
-  sudo usermod -aG docker ubuntu
 fi
+
+# Not the docker group — it is root by another name and nothing logs its use.
+# One sudoers line runs the stack's own wrapper as root (logged, in
+# auth.log), and a second lets the deploy read .env.prod's key NAMES; the
+# file itself is root-owned below (docs/AUTH.md §12 [ops-supply-1]). A box
+# from before this rule has ubuntu in the group; it is taken out.
+if id -nG ubuntu | grep -qw docker; then sudo gpasswd -d ubuntu docker >/dev/null; fi
+printf 'ubuntu ALL=(root) NOPASSWD:SETENV: /opt/ghostclick/scripts/gc\nubuntu ALL=(root) NOPASSWD: /usr/bin/cat /opt/ghostclick/.env.prod\n' \
+  | sudo tee /etc/sudoers.d/ghostclick >/dev/null
+sudo chmod 440 /etc/sudoers.d/ghostclick
+sudo visudo -cf /etc/sudoers.d/ghostclick >/dev/null
 
 # 4 GB is enough to RUN the stack and tight to BUILD it. Swap is what stops the
 # OOM killer taking Chromium during the first image build.
@@ -299,7 +327,10 @@ cd /opt/ghostclick
 
 if [ ! -f .env.prod ]; then
   echo "  generating secrets (on this host only — they are never printed or sent back)"
-  cp .env.prod.example .env.prod
+  # Assembled under a name nothing reads, 0600 from the first byte, and
+  # installed root-owned at the end.
+  umask 077
+  cp .env.prod.example .env.prod.new
   gen() { head -c 48 /dev/urandom | base64 | tr -d '=+/\n' | cut -c1-64; }
   # The token signing keypair, made with openssl because there is no Python
   # with `cryptography` on the box yet. The kid is the RFC 7638 thumbprint of
@@ -316,29 +347,35 @@ if [ ! -f .env.prod ]; then
   rm -f /tmp/gc-signing.pem
   # Not sed for these two: sed reads a backslash-n in a replacement as a
   # newline, and the whole point of the one-line PEM is that it has none.
-  grep -vE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS)=' .env.prod > .env.prod.tmp
+  grep -vE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS)=' .env.prod.new > .env.prod.tmp
   printf "GC_SIGNING_KEY='%s'\n" "$private_line" >> .env.prod.tmp
   printf "GC_AUTH_PUBLIC_KEYS='{\"%s\": \"%s\"}'\n" "$kid" "$public_line" >> .env.prod.tmp
-  mv .env.prod.tmp .env.prod
+  mv .env.prod.tmp .env.prod.new
   # The second-factor key: 32 random bytes as url-safe base64, which is what
   # a Fernet key is (44 characters, ending in '=').
   mfa_key=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '\n')
-  sed -i "s|^GC_MFA_KEY=.*|GC_MFA_KEY=$mfa_key|"              .env.prod
+  sed -i "s|^GC_MFA_KEY=.*|GC_MFA_KEY=$mfa_key|"              .env.prod.new
   # sed with a | delimiter: base64 can contain / but never |.
-  sed -i "s|^DJANGO_SECRET_KEY=.*|DJANGO_SECRET_KEY=$(gen)|"  .env.prod
-  sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(gen)|"  .env.prod
-  sed -i "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=$(gen)|"        .env.prod
-  sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=http://$PUBLIC_IP|"     .env.prod
+  sed -i "s|^DJANGO_SECRET_KEY=.*|DJANGO_SECRET_KEY=$(gen)|"  .env.prod.new
+  sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(gen)|"  .env.prod.new
+  sed -i "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=$(gen)|"        .env.prod.new
+  sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=http://$PUBLIC_IP|"     .env.prod.new
   # The admin, from the same address the ssh rule admits.
-  sed -i "s|^# GC_ADMIN_CIDRS=.*|GC_ADMIN_CIDRS=$ADMIN_CIDR|"  .env.prod
-  chmod 600 .env.prod
+  sed -i "s|^# GC_ADMIN_CIDRS=.*|GC_ADMIN_CIDRS=$ADMIN_CIDR|"  .env.prod.new
+  sudo install -m 600 -o root -g root .env.prod.new .env.prod
+  rm -f .env.prod.new
+  umask 022
 fi
+# A file from an earlier run was ubuntu-owned; the deploy refuses that now.
+sudo chown root:root .env.prod && sudo chmod 600 .env.prod
 
 export GC_GIT_SHA=$(git rev-parse --short HEAD)
-sg docker -c './scripts/gc up -d --build'
-sg docker -c './scripts/gc exec -T control python manage.py migrate --noinput'
-sg docker -c './scripts/gc exec -T control python manage.py collectstatic --noinput' >/dev/null
-sg docker -c './scripts/gc exec -T control python manage.py clearsessions'
+# scripts/gc goes through the sudoers line above; GC_GIT_SHA rides with it.
+./scripts/gc up -d --build
+./scripts/gc exec -T control python manage.py migrate --noinput
+./scripts/gc exec -T control python manage.py collectstatic --noinput >/dev/null
+./scripts/gc exec -T control python manage.py clearsessions
+./scripts/gc exec -T control python manage.py purge_auth_events
 
 echo "  waiting for the browser"
 for i in $(seq 1 90); do
@@ -346,7 +383,7 @@ for i in $(seq 1 90); do
   case "$(curl -s -m 5 -H "Host: $PUBLIC_IP" http://localhost/healthz || true)" in
     *'"browser":true'*) break ;;
   esac
-  [ "$i" = 90 ] && { echo "  the browser never came up:"; sg docker -c './scripts/gc logs --tail=40 runner'; exit 1; }
+  [ "$i" = 90 ] && { echo "  the browser never came up:"; ./scripts/gc logs --tail=40 runner; exit 1; }
   sleep 2
 done
 REMOTE
@@ -369,7 +406,7 @@ probe /app/          200 "the UI loads"
 probe /api/state     401 "the API is gated"
 probe /auth/csrf     200 "the control plane answers"
 probe /healthz       200 "the browser is up"
-probe /api/recording 403 "the extension hand-off is shut" POST
+probe /api/recording 401 "the extension hand-off is gated" POST
 [ "$FAIL" = 0 ] || die "the box is up but not healthy — EC2_HOST=$IP PEM=$KEY_FILE bash scripts/deploy.sh logs runner"
 
 step "up at  http://$IP/app/"

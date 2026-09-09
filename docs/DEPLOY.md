@@ -34,13 +34,15 @@ endpoint — and that assertion is a load-bearing part of this deployment, not a
 curiosity. **Also set IMDSv2 to required on the instance**, so that even a hole
 in the allowlist does not hand out instance credentials.
 
-**3 · `POST /api/recording` is under the gate, and closed at the edge too.**
+**3 · `POST /api/recording` is under the gate like everything else.**
 The browser extension posts a recording from whatever page you were recording
-on, and until the ops step gives it a token of its own through the control
-plane it has none to present — so with auth on the runner answers 401, and the
-edge answers 403 before that, because the extension is not part of what we are
-demonstrating. It validates through the same origin gate and never executes
-anything — a human presses Run.
+on, where it has no session — so its background worker asks the control plane
+for a ten-minute executor token on the strength of the person's own session
+and presents that to the runner (docs/AUTH.md §11). Only an extension whose
+origin is listed in `GC_EXTENSION_ORIGINS` is handed one; with the variable
+unset the recorder can only copy the flow to the clipboard. The runner answers
+401 to anything else, validates what it is handed through the same origin gate
+as the UI, and never executes it — a human presses Run.
 
 **4 · The driven page cannot reach inward.** With auth on, every request the
 browser makes is checked against the address it resolves to, and one bound for
@@ -63,14 +65,22 @@ change first for real multi-user use.
 From a laptop with the AWS CLI logged in:
 
 ```bash
-bash scripts/aws-up.sh
+HTTP_CIDR=<your-ip>/32 bash scripts/aws-up.sh
 ```
 
+`HTTP_CIDR` is who may reach the app on 80 and 443, and it has no default:
+the default used to be the internet, and a browser that fetches URLs on your
+behalf from inside your VPC is not something to publish by omission. Your own
+address is the usual answer; `HTTP_CIDR=0.0.0.0/0` is accepted when typed on
+purpose, and the script says what that means before it continues.
+
 It creates the key pair, security group, a t3.medium with an encrypted volume
-and IMDSv2 required, and an Elastic IP; installs Docker; clones this repo;
-generates every secret **on the box**, where they stay; builds; and does not
-report success until five checks pass from outside the instance. It prints the
-URL. Roughly ten minutes, almost all of it the first image build.
+and IMDSv2 required (hop limit 1), and an Elastic IP; installs Docker; writes
+the sudoers line the deploy user runs the stack through; clones this repo;
+generates every secret **on the box**, into a root-owned `.env.prod`, where
+they stay; builds; and does not report success until five checks pass from
+outside the instance. It prints the URL. Roughly ten minutes, almost all of
+it the first image build.
 
 Then make yourself an account and sign in:
 
@@ -94,9 +104,9 @@ EC2_HOST=<ip> bash scripts/adduser.sh qa@example.com
 no hostname yet and a certificate needs one. The app is gated — anonymous
 requests to `/api/*` get 401 — but over http the session cookie and the
 executor token cross the network in cleartext, and the deploy script says so
-every time it runs. Pass `HTTP_CIDR=<ip>/32` to narrow it to one machine, and
-read "Giving it a hostname" below: with DNS pointing at the box, changing
-`PUBLIC_URL` to `https://that` is the whole of the TLS setup.
+every time it runs. Read "Giving it a hostname" below: with DNS pointing at
+the box, changing `PUBLIC_URL` to `https://that` is the whole of the TLS
+setup.
 
 Everything below is what that script does, in case you want to do it by hand or
 change a piece of it.
@@ -141,9 +151,17 @@ browser other people drive cannot reach the process that decides who they are.
 | **Orchestration** | `docker/docker-compose.prod.yml` |
 | **Edge** | `caddy:2.10-alpine`, configured by `docker/Caddyfile` from `PUBLIC_URL` |
 | **Runner image** | `mcr.microsoft.com/playwright:v1.63.0-noble` — the browser is already in it, and the tag must match the Playwright version in `package.json` |
-| **Control plane** | `python:3.12-slim` + Django, behind gunicorn |
+| **Control plane** | `python:3.12-slim` + Django, behind gunicorn; every package installed with `--require-hashes` from `auth/requirements.txt` |
+| **Scheduler** | the control image again, running `manage.py housekeeping`: `clearsessions` and `purge_auth_events` daily, `purge_unverified_emails` every five minutes |
 | **Stores** | `postgres:17-alpine` (scram-sha-256), `redis:7-alpine` (requirepass, nothing persisted) |
-| **Env file** | `/opt/ghostclick/.env.prod` (never committed) |
+| **Env file** | `/opt/ghostclick/.env.prod` (never committed; root-owned, 0600, read by compose under `sudo`) |
+
+Every image that is pulled rather than built is pinned by **digest** as well
+as by tag, in both Dockerfiles and the compose file: a tag is a name the
+registry can point somewhere else tomorrow, a digest is the image that was
+tested. To move one, `docker buildx imagetools inspect <image:tag>` prints the
+new digest; `npm run check:deploy` fails on an unpinned one, and asserts that
+CI runs inside the same Playwright image the runner is built from.
 
 Every container drops every Linux capability (`cap_drop: ALL`) and runs with
 `no-new-privileges`. Caddy adds back the one it needs to bind 80 and 443.
@@ -267,16 +285,34 @@ scp -i cansee-deploy.pem scripts/bootstrap-ec2.sh ubuntu@<ip>:/tmp/
 ssh -i cansee-deploy.pem ubuntu@<ip> 'bash /tmp/bootstrap-ec2.sh'
 ```
 
-That installs Docker, adds the swapfile, creates `/opt/ghostclick`, and stops.
+That installs Docker, adds the swapfile, creates `/opt/ghostclick`, writes
+`/etc/sudoers.d/ghostclick`, and stops. It does **not** put you in the docker
+group, on purpose (docs/AUTH.md §12): that group is root by another name and
+nothing logs its use. Instead the sudoers file lets you run exactly
+`scripts/gc` — the stack's own compose wrapper — as root, so every command
+that reaches the daemon is in `auth.log` with who ran it, and lets the deploy
+script read `.env.prod`'s key *names* through `sudo cat`:
+
+```
+ubuntu ALL=(root) NOPASSWD:SETENV: /opt/ghostclick/scripts/gc
+ubuntu ALL=(root) NOPASSWD: /usr/bin/cat /opt/ghostclick/.env.prod
+```
+
 Then:
 
 ```bash
 ssh -i cansee-deploy.pem ubuntu@<ip>
 git clone <repo-url> /opt/ghostclick
 cd /opt/ghostclick
-cp .env.prod.example .env.prod
-nano .env.prod          # see below — the URL, the keypair and three secrets
+sudo install -m 600 -o root -g root .env.prod.example .env.prod
+sudoedit .env.prod      # see below — the URL, the keypair and three secrets
 ```
+
+`.env.prod` is **root-owned and 0600**: it holds the signing key, compose reads
+it as root (through `scripts/gc`), and nothing that runs as `ubuntu` — a shell,
+a script, anything a mistake starts — can read it. The deploy refuses a file
+owned by anyone else, and refuses to run at all from a user in the docker
+group.
 
 `.env.prod` needs seven values. The signing keypair and the second-factor
 key come from two commands, run on your laptop in `auth/` (they need Django
@@ -293,8 +329,8 @@ not paste the commands themselves:
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"   # DJANGO_SECRET_KEY
-python3 -c "import secrets; print(secrets.token_urlsafe(24))"                     # POSTGRES_PASSWORD
-python3 -c "import secrets; print(secrets.token_urlsafe(24))"                     # REDIS_PASSWORD
+python -c "import secrets; print(secrets.token_urlsafe(24))"                      # POSTGRES_PASSWORD
+python -c "import secrets; print(secrets.token_urlsafe(24))"                      # REDIS_PASSWORD
 ```
 
 so that the file ends up holding literal values:
@@ -404,9 +440,12 @@ way and connect Google from Security. No Google tokens are stored. An account
 made through Google has no password, and `/auth/me` says `mfa.required` for
 it; the MFA step turns that into a demand to enrol.
 
-Every few minutes, `manage.py purge_unverified_emails` removes unverified
-secondary addresses older than fifteen minutes — a claim on an address that
-was never proven. Nothing schedules it yet (see "Deliberately not done").
+Every five minutes the `scheduler` service runs `manage.py
+purge_unverified_emails`, which removes unverified secondary addresses older
+than fifteen minutes — a claim on an address that was never proven — and once
+a day it runs `clearsessions` and `purge_auth_events` (audit rows older than
+ninety days). All three are `manage.py housekeeping`'s; see "Housekeeping"
+below.
 
 Every account gets a personal organisation on the `free` plan the moment it
 is made, and `migrate` gave one to every account that existed before the
@@ -426,29 +465,43 @@ EC2_HOST=<elastic-ip> bash scripts/deploy.sh
 
 It SSHes in itself. What it does, in order:
 
-1. **Refuses** a `.env.prod` that only looks filled in: a placeholder, an
-   unexpanded `$(`, CRLF line endings, a duplicate key, no PEM in
-   `GC_SIGNING_KEY`, no public key in `GC_AUTH_PUBLIC_KEYS` (or a private one
-   there), a leftover `GC_AUTH_SECRET` line, a `DJANGO_ALLOWED_HOSTS` line
-   (nothing reads it; `'*'` in particular), a `GC_TOKEN_TTL` outside 60–600,
-   or a store password that is not URL-safe
-2. **Warns**, loudly, when `PUBLIC_URL` is `http://`
-3. Fetches and resets to the target commit
-4. `docker compose up -d --build`
-5. `manage.py migrate`, `collectstatic`, and `clearsessions` on the control
-   plane — sessions are database rows, and expired ones are only ever removed
-   by that command
-6. Waits for the **browser**, not the port
-7. Smoke-checks, through the edge with the public host: `/app/` is 200,
+1. **Refuses** to run from a deploy user in the docker group, or with a
+   `.env.prod` that is not `root:600` — and then a `.env.prod` that only
+   looks filled in: a placeholder, an unexpanded `$(`, CRLF line endings, a
+   duplicate key, no PEM in `GC_SIGNING_KEY`, no public key in
+   `GC_AUTH_PUBLIC_KEYS` (or a private one there), a leftover
+   `GC_AUTH_SECRET` line, a `DJANGO_ALLOWED_HOSTS` line (nothing reads it;
+   `'*'` in particular), a `GC_TOKEN_TTL` outside 60–600, or a store password
+   that is not URL-safe. It reads the file's *shape* through `sudo cat`;
+   no value leaves the box.
+2. **Refuses** a box where IMDSv1 is still enabled (an untokened GET of the
+   metadata service answering 200); off EC2 there is no metadata service
+   and the check says so and moves on
+3. **Warns**, loudly, when `PUBLIC_URL` is `http://`
+4. Fetches and resets to the target commit
+5. `docker compose up -d --build`, through `scripts/gc` and so under `sudo`
+6. **Proves the IMDS hop limit** from inside the runner container: a `PUT`
+   for a metadata token must fail one NAT hop away. If it succeeds, the driven
+   Chromium can read instance credentials, and the script takes the stack
+   down rather than leave it up
+7. `manage.py migrate`, `collectstatic`, `clearsessions` and
+   `purge_auth_events` on the control plane — the scheduler runs the last two
+   daily, and after a deploy is the one moment guaranteed to come round
+8. Waits for the **browser**, not the port
+9. Smoke-checks, through the edge with the public host: `/app/` is 200,
    `/api/state` is **401**, `/auth/csrf` is 200, `/healthz` is 200,
-   `POST /api/recording` is 403, and `/admin/` is **403** from the box itself
+   `POST /api/recording` is **401**, and `/admin/` is **403** from the box
+   itself
 
-That 401 is the interesting assertion. On this deploy a 401 from `/api/state`
-is the **success** condition: it proves the gate is on. A 200 there would mean
-the runner came up unauthenticated, and the script takes the stack down rather
-than leave it up. The 403 on `/admin/` proves the allowlist is being applied —
-the docker bridge is in nobody's `GC_ADMIN_CIDRS` — which is also why
-`0.0.0.0/0` is not a value that variable takes.
+The 401s are the interesting assertions. On this deploy a 401 from
+`/api/state` is the **success** condition: it proves the gate is on. A 200
+there would mean the runner came up unauthenticated, and the script takes the
+stack down rather than leave it up. The 401 on `POST /api/recording` proves
+the extension hand-off is behind the same gate (a 403 would be the edge's old
+refusal back, which the extension can never get past). The 403 on `/admin/`
+proves the allowlist is being applied — the docker bridge is in nobody's
+`GC_ADMIN_CIDRS` — which is also why `0.0.0.0/0` is not a value that variable
+takes.
 
 ---
 
@@ -463,7 +516,7 @@ curl -sI  https://<host>/app/            | head -1     # 200 — the UI loads
 curl -s   https://<host>/api/state       -o /dev/null -w '%{http_code}\n'   # 401 — gated
 curl -s   https://<host>/auth/csrf       | head -c 60                        # {"csrfToken": …
 curl -s   https://<host>/_allauth/browser/v1/auth/session | head -c 60      # {"status": 401, … — allauth is mounted
-curl -sI  https://<host>/api/recording -X POST | head -1                     # 403 — closed at the edge
+curl -sI  https://<host>/api/recording -X POST | head -1                     # 401 — gated by the runner
 curl -sI  https://<host>/admin/          | head -1     # 403 unless you are in GC_ADMIN_CIDRS
 curl -sI  https://<host>/ | grep -i strict-transport   # HSTS, on an https URL only
 ```
@@ -484,6 +537,7 @@ else:
 ```
   serving     ->  /app/web/dist
   auth        ->  on — an EdDSA token from the control plane is required; keys: <kid>
+  extension   ->  no origin listed in GC_EXTENSION_ORIGINS — the recorder cannot hand off to this runner
   reach       ->  the driven page cannot reach loopback, private or link-local addresses
   demo        ->  not served — GC_DEMO=1 serves them behind the gate
 ```
@@ -555,9 +609,28 @@ is not is worse than one that admits the gap.
 - The deploy script's refusals were run against good and bad `.env.prod`
   files, and the Django suite, `check:deploy`, `check:boundary` and
   `check:auth`'s runner half are green on this commit.
+- `auth/requirements.txt` — every package pinned and hashed — resolves for
+  the image's platform: `pip install --dry-run --require-hashes` against
+  `manylinux`/`cp312` accepts every file it names. The digests in both
+  Dockerfiles and the compose file are the ones the registries answered for
+  those tags on the day.
 
 **Not verified, because there is no working Docker daemon in the environment
 this was written in:**
+
+- **Neither image has been built with the hashed install and the digest
+  pins**; CI's `images` job is what does that on every push, and its
+  `supply-chain` job runs `pip-audit` and `npm audit` against the same sets.
+- **The sudoers path has not been walked on a real host**: `scripts/gc`
+  re-executing itself under `sudo -n` with `GC_GIT_SHA` carried through
+  `SETENV`, and the deploy reading a root-owned `.env.prod` through `sudo
+  cat`. Both are written against sudo's documented behaviour and checked as
+  text; the first deploy on a fresh box is the test, and every refusal names
+  what to fix.
+- **The IMDS hop-limit proof** (a `PUT` for a metadata token from inside the
+  runner container) has been reasoned through, not run: a container on a
+  bridge network is one NAT hop from the host, and a response with a hop
+  limit of 1 does not survive it.
 
 - **The Caddyfile has not been through `caddy validate` here.** It is written
   against Caddy's documented syntax, but the first thing the deploy does after
@@ -609,6 +682,11 @@ nothing to open for them and nothing to close.
 
 Also, on the instance: **IMDSv2 required**, with a hop limit of 1 so that a
 container — the runner's Chromium in particular — cannot reach it at all.
+`aws-up.sh` sets it at launch and re-asserts it on a reused instance, and
+`scripts/deploy.sh` **refuses** a box where it is not so: an untokened GET of
+the metadata service answering 200 stops the deploy before the build, and a
+`PUT` for a token that succeeds from inside the runner container takes the
+stack down after it. For a box made by hand:
 
 ```bash
 aws ec2 modify-instance-metadata-options --instance-id <id> \
@@ -636,11 +714,100 @@ From `/opt/ghostclick` on the host.
 | Which old address may still reset which account this week | `/admin/` → Previous emails |
 | Let an address sign up | the owner or admin of an organisation invites it from the app; or `GC_SIGNUP_MODE=open` / `domain` in `.env.prod` |
 | Which Google identity opens which account | `/admin/` → Social accounts, from an allowed address |
-| Remove stale unverified address claims (run it on a schedule) | `... exec -T control python manage.py purge_unverified_emails` |
-| Which origins are allowed | `docker run --rm -v ghostclick_ghostclick-state:/s alpine cat /s/origins.json` |
+| What the scheduler has been doing | `./scripts/gc logs -f scheduler` |
+| Run every housekeeping task now | `... exec -T control python manage.py housekeeping --once` |
+| Remove stale unverified address claims by hand | `... exec -T control python manage.py purge_unverified_emails` |
+| Remove audit rows older than ninety days by hand | `... exec -T control python manage.py purge_auth_events [--dry-run]` |
+| Which origins an organisation allows | `sudo docker run --rm -v ghostclick_ghostclick-state:/s alpine cat /s/<org>/origins.json` |
 | A database shell | `... exec postgres psql -U ghostclick` |
 | Container status | `./scripts/gc ps` |
-| Memory, when it feels slow | `docker stats --no-stream` |
+| Memory, when it feels slow | `sudo docker stats --no-stream` |
+
+`...` is `./scripts/gc`, which runs compose as root through the sudoers line;
+the two `docker` commands above go through `sudo` for the same reason, since
+the deploy user is not in the docker group.
+
+## Housekeeping
+
+Three things decay unless a command runs (docs/AUTH.md §1, §6.6, §12):
+expired sessions are rows that only `clearsessions` removes, an unverified
+address claim is stale after fifteen minutes, and audit rows past ninety days
+are a liability rather than a record. The `scheduler` service in the compose
+file is the control image running `manage.py housekeeping`, which does
+
+| task | every |
+|---|---|
+| `purge_unverified_emails` | 5 minutes |
+| `clearsessions` | 24 hours |
+| `purge_auth_events` (rows older than 90 days) | 24 hours |
+
+with the control plane's own environment, on the `data` network only, and
+logs each run to `./scripts/gc logs scheduler`. A task that fails — the
+database restarting, say — is logged and tried again at its next period; one
+bad tick never stops the others. The deploy also runs `clearsessions` and
+`purge_auth_events` after every migrate, so a box that is redeployed often
+never waits on the loop.
+
+Would you rather use the host's cron? Every task is idempotent, so run them
+all every five minutes and let the loop's periods go:
+
+```
+*/5 * * * * cd /opt/ghostclick && ./scripts/gc exec -T control python manage.py housekeeping --once >> /var/log/ghostclick-housekeeping.log 2>&1
+```
+
+— in **root's** crontab (`sudo crontab -e`), since `scripts/gc` needs the
+daemon. Then remove the `scheduler` service, or leave it; the two do not
+conflict.
+
+## Backups
+
+The volumes are on one EBS volume with no snapshot schedule; take an EBS
+snapshot before anything you care about. For a backup that can be restored
+somewhere else, three things, and one of them is deliberately not a table:
+
+1. **The database, minus the sessions.** A session table in a backup is a set
+   of live credentials in a backup [ops-supply-2]. Skip both session tables'
+   data — the schema stays, so a restore does not need them recreated:
+
+   ```bash
+   ./scripts/gc exec -T postgres pg_dump -U ghostclick -d ghostclick \
+       --exclude-table-data=django_session \
+       --exclude-table-data=usersessions_usersession \
+     | gzip | age -r <your-age-recipient> > ghostclick-$(date +%F).sql.gz.age
+   ```
+
+   Encrypted before it touches disk: the dump holds password hashes, the
+   audit log with every address, and the authenticator table. That last one
+   is safe to keep *because* its secrets are ciphertext under `GC_MFA_KEY` —
+   which is why the next item exists. `age` (`apt install age`) or `gpg
+   --symmetric` both do; a dump with neither is a dump that must not leave
+   the box. Restore with `age -d … | gunzip | ./scripts/gc exec -T postgres
+   psql -U ghostclick -d ghostclick` into an empty database, then run
+   `manage.py migrate` and, if the dump predates organisations,
+   `personal_orgs`.
+
+2. **`.env.prod`, separately, and to somewhere else.** It holds
+   `GC_SIGNING_KEY`, `GC_MFA_KEY` and `DJANGO_SECRET_KEY`. Losing the MFA key
+   makes every enrolled second factor unreadable (people re-enrol; nothing
+   else breaks); losing the signing key means `signing_key --new` and a
+   runner restart. Copy it with `sudo cat .env.prod | age -r … > env.age` —
+   it is root-owned — and keep it apart from the database dump, because the
+   whole point of a separate key is that the two are two things to steal.
+
+3. **The runner's state**, one directory per organisation: the origin
+   allowlists, the vaults, the run history.
+
+   ```bash
+   sudo docker run --rm -v ghostclick_ghostclick-state:/s alpine tar czf - -C /s . \
+     | age -r … > ghostclick-state-$(date +%F).tgz.age
+   ```
+
+   Encrypted for the same reason: `<org>/secrets.json` is every vault value
+   in the clear.
+
+Suites are in git and need nothing. Certificates (`caddy-data`) are
+re-requested on a fresh box; keep the volume if you can, because Let's
+Encrypt rate-limits asking.
 
 ## Rolling back
 
@@ -672,14 +839,9 @@ fine until a migration ever changes a column — none does today.
   balancer would give two people two different runners and a screencast that
   follows whichever they happened to land on. The fix is a runner pool with a
   session-affinity router, and it is a real project.
-- **Backups.** The volumes are on one EBS volume with no snapshot schedule.
-  Fine for a demo; take an EBS snapshot before anything you care about. When a
-  backup does exist it should skip `django_session` and
-  `usersessions_usersession`: a session table in a backup is a set of live
-  credentials in a backup. The authenticator table can be backed up: its
-  secrets are ciphertext under `GC_MFA_KEY`, which lives in `.env.prod` and
-  not in the database — so back up `.env.prod` separately or lose every
-  second factor with the box (people re-enrol; nothing else breaks).
+- **A backup schedule.** The commands are under "Backups" above; nothing
+  runs them for you, and the volumes are on one EBS volume with no snapshot
+  schedule.
 - **Passkeys on an `http://ip` demo.** WebAuthn needs a secure origin, and
   fido2 refuses an http origin other than localhost, so passkeys work only
   once `PUBLIC_URL` is `https://`. The authenticator app and recovery codes
@@ -691,12 +853,6 @@ fine until a migration ever changes a column — none does today.
 - **Turnstile by default.** The keys are optional because a demo has no
   Cloudflare account; with `GC_SIGNUP_MODE=open` on a public host they are
   not optional in any sense that matters.
-- **Scheduling `purge_unverified_emails`.** docs/AUTH.md §6.6 wants it every
-  few minutes; the command exists and is idempotent, and a cron line (or a
-  compose sidecar) for it, `clearsessions` and the audit-log purge is the ops
-  step's. Until then unverified secondary addresses linger, which blocks
-  nothing that matters: a Google sign-in never links to an unverified
-  address anyway.
 - **Verifying the Google console side.** The flow is tested end to end with
   Google stubbed at the token exchange; the redirect URI registered in the
   console has to be the exact path above, with the trailing slash, and the
@@ -712,9 +868,11 @@ fine until a migration ever changes a column — none does today.
 - [ ] `npm run check:all` green locally — exit code 0
 - [ ] A **new** t3.medium instance, not the Cansee host
 - [ ] Launched with the `cansee-deploy` key pair
-- [ ] Security group: 22 to **your IP only**; 80 and 443 to your audience
-- [ ] IMDSv2 required, hop limit 1
-- [ ] `.env.prod` has real values for all seven — the keypair from `signing_key --new`, `GC_MFA_KEY` from `mfa_key`, 48 random bytes for the rest
+- [ ] Security group: 22 to **your IP only**; 80 and 443 to your audience (`HTTP_CIDR`, typed, never defaulted)
+- [ ] IMDSv2 required, hop limit 1 — the deploy refuses otherwise
+- [ ] `/etc/sudoers.d/ghostclick` written (bootstrap-ec2.sh or aws-up.sh), and the deploy user **not** in the docker group
+- [ ] `.env.prod` is `root:600`, and has real values for all seven — the keypair from `signing_key --new`, `GC_MFA_KEY` from `mfa_key`, 48 random bytes for the rest
+- [ ] If the recorder extension will hand off to this box: its `chrome-extension://<id>` in `GC_EXTENSION_ORIGINS`
 - [ ] The first staff sign-in will be sent to enrol an authenticator before `/admin/` opens; have a phone with a TOTP app to hand
 - [ ] `GC_AUTH_PUBLIC_KEYS` holds the public key and `GC_SIGNING_KEY` the private one, not the other way round
 - [ ] `PUBLIC_URL` matches how you will actually reach the box

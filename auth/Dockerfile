@@ -1,12 +1,22 @@
 # The control plane: Django, and nothing else.
-FROM python:3.12-slim
+#
+# The base image is pinned by digest as well as by tag (docs/AUTH.md §12
+# [ops-supply-3]): a tag is a name the registry can point somewhere else
+# tomorrow, a digest is the image that was tested. To move, look the new
+# one up with `docker buildx imagetools inspect python:3.12-slim` and change
+# both halves.
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
 COPY requirements.txt ./
-# gunicorn is a deployment concern, not a dependency of the app, so it is
-# installed here rather than added to requirements.txt.
-RUN pip install --no-cache-dir -r requirements.txt gunicorn
+# --require-hashes: every package, gunicorn included, is pinned in
+# requirements.txt with the sha256 of the files PyPI publishes for it, and a
+# file that does not match does not install, whatever version it claims.
+# Nothing is added on this line: the hash-checked install is all-or-nothing,
+# so gunicorn is pinned in requirements.in with everything else rather than
+# appended here unpinned.
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 COPY . .
 

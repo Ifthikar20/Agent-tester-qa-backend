@@ -33,6 +33,34 @@ recorded as assertions on their own, so the flow checks itself.
 `http://localhost:3000/api/recording`, which validates it and drops it in the
 script box — it is never run automatically. A human presses Run.
 
+## Sending to a ghostclick with a login
+
+With auth on, `POST /api/recording` is under the runner's gate like every
+other route, and the runner never sees a cookie. So the hand-off does what
+the app does (docs/AUTH.md §11): the extension's background worker asks the
+control plane for a ten-minute executor token on the strength of **your**
+session — `GET /auth/csrf`, then `POST /auth/executor-token` with the cookie
+and the CSRF token — and presents it to the runner as a Bearer. Nothing is
+stored; the token is dropped after the one post.
+
+That request arrives from this extension's own origin,
+`chrome-extension://<id>`, so two things have to be true:
+
+1. You are signed in to ghostclick in this Chrome profile.
+2. The operator has listed that origin in `GC_EXTENSION_ORIGINS` — the same
+   line feeds the control plane (which trusts it for CSRF) and the runner
+   (which answers CORS for it). The panel shows the exact value to paste
+   under **Where ghostclick is running**; an unpacked extension's id is
+   derived from its directory, so it differs per machine.
+
+Deployed, the runner and the sign-in are one origin and the panel needs only
+the first address. On a laptop (`npm run app -- --auth`) the control plane is
+on another port, so set **Where you sign in** to `http://localhost:8000` and
+start both with `GC_EXTENSION_ORIGINS=chrome-extension://<id> npm run app --
+--auth`. Every refusal — not signed in, not listed, an authenticator or
+password change demanded first, the runner busy with another organisation —
+is said in the panel with what to do about it.
+
 ## Why the click is held
 
 Arm the picker, click a sidebar link, and the page would navigate away while
@@ -70,5 +98,7 @@ live credentials to another process, so it is not in this PoC.
 
 - One tab, one frame. No iframes, no popups.
 - Records click and fill. No select, drag, hover, or keyboard-only navigation.
-- `Send to ghostclick` allows any origin, because an extension's origin is
-  install-specific. The endpoint validates and stores; it never executes.
+- With no login (`npm run app`), `Send to ghostclick` is open to any origin,
+  because an extension's origin is install-specific and there is nobody to
+  refuse. With a login it is gated, and only a listed extension is answered.
+  Either way the endpoint validates and stores; it never executes.

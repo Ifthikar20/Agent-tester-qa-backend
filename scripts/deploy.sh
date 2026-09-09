@@ -38,7 +38,12 @@ remote() { ssh -i "$PEM" -o StrictHostKeyChecking=accept-new "$EC2_USER@$EC2_HOS
 # Caddy and a 400 from Django, both of which read as "down" when it is not.
 # Shared with the remote script below as text, hence the single quotes.
 read -r -d '' EDGE <<'EDGE' || true
-PUBLIC_URL=$(grep -E '^PUBLIC_URL=' .env.prod | cut -d= -f2- | tr -d '\r' | sed 's#/*$##')
+# .env.prod is root-owned and 0600 (docs/AUTH.md §12): nothing running as the
+# deploy user can read the signing key in it. This script needs the file's
+# shape — which keys, is the URL http — never a value, and reads it through
+# the one sudoers line that allows exactly `cat` of exactly this file.
+envfile() { if [ -r .env.prod ]; then cat .env.prod; else sudo -n cat .env.prod 2>/dev/null || true; fi; }
+PUBLIC_URL=$(envfile | grep -E '^PUBLIC_URL=' | cut -d= -f2- | tr -d '\r' | sed 's#/*$##')
 SCHEME=${PUBLIC_URL%%://*}
 HOSTPORT=${PUBLIC_URL#*://}
 HOST=${HOSTPORT%%:*}
@@ -83,7 +88,7 @@ REMOTE
   inspect-env)
     # NAMES only. There is deliberately no mode that prints values: the whole
     # point of the vault is that secrets do not travel back over this link.
-    remote "cd $REMOTE_DIR && grep -oE '^[A-Z_]+' .env.prod | sort"
+    remote "cd $REMOTE_DIR && { cat .env.prod 2>/dev/null || sudo -n cat .env.prod; } | grep -oE '^[A-Z_]+' | sort"
     exit 0 ;;
 
   deploy|rollback) : ;;
@@ -111,12 +116,39 @@ CMD="$CMD"; BRANCH="$BRANCH"; TARGET_SHA="$TARGET_SHA"
 # refusals and not warnings, and why none of them has a --force.
 [ -f .env.prod ] || { echo "  no .env.prod — copy .env.prod.example and fill it in"; exit 1; }
 
-if grep -q \$'\r' .env.prod; then
+# Who may run the daemon, and who may read the key (docs/AUTH.md §12
+# [ops-supply-1]). The docker group is root by another name and nothing logs
+# its use; scripts/gc goes through sudo instead, and .env.prod is readable by
+# root alone. Both are refusals rather than warnings because each produces a
+# deployment that is entirely healthy and quietly wider than it looks.
+if id -nG | grep -qw docker; then
+  echo "  \$(id -un) is in the docker group. The stack is run through sudo (scripts/gc,"
+  echo "  one sudoers line, logged); the group is root with no log. Remove it:"
+  echo "    sudo gpasswd -d \$(id -un) docker      (then log out and back in)"
+  exit 1
+fi
+owner=\$(stat -c '%U:%a' .env.prod)
+case "\$owner" in
+  root:600|root:400) ;;
+  *)
+    echo "  .env.prod is \$owner; it holds the signing key and must be root:600."
+    echo "    sudo chown root:root .env.prod && sudo chmod 600 .env.prod"
+    echo "  (scripts/gc reads it as root; this script reads its key NAMES through"
+    echo "  the sudoers line bootstrap-ec2.sh wrote — see docs/DEPLOY.md.)"
+    exit 1 ;;
+esac
+$EDGE
+ENVTXT=\$(envfile)
+[ -n "\$ENVTXT" ] || { echo "  cannot read .env.prod: it is root-owned and 'sudo -n cat .env.prod' is refused."
+  echo "  Add the sudoers line from scripts/bootstrap-ec2.sh (docs/DEPLOY.md)."; exit 1; }
+envgrep() { printf '%s\n' "\$ENVTXT" | grep "\$@"; }
+
+if envgrep -q \$'\r'; then
   echo "  .env.prod has CRLF line endings. The last character of every value"
   echo "  would be a carriage return, and neither key would parse."
   exit 1
 fi
-dupes=\$(grep -oE '^[A-Z_]+' .env.prod | sort | uniq -d)
+dupes=\$(envgrep -oE '^[A-Z_]+' | sort | uniq -d)
 [ -z "\$dupes" ] || { echo "  .env.prod sets these twice — the last one silently wins: \$dupes"; exit 1; }
 
 # The signing keypair. Without the public set the runner starts OPEN — it
@@ -124,36 +156,36 @@ dupes=\$(grep -oE '^[A-Z_]+' .env.prod | sort | uniq -d)
 # deployed to. Without the private key the control plane refuses to start.
 # Both come from one 'manage.py signing_key --new', and each is checked for
 # the marker that says it is the right half in the right place.
-grep -qE "^GC_SIGNING_KEY='?-----BEGIN PRIVATE KEY-----" .env.prod || {
+envgrep -qE "^GC_SIGNING_KEY='?-----BEGIN PRIVATE KEY-----" || {
   echo "  .env.prod has no GC_SIGNING_KEY that looks like a PEM private key."
   echo "  'cd auth && python manage.py signing_key --new' prints it. Refusing to deploy."; exit 1; }
-grep -qE "^GC_AUTH_PUBLIC_KEYS='?\{.*BEGIN PUBLIC KEY" .env.prod || {
+envgrep -qE "^GC_AUTH_PUBLIC_KEYS='?\{.*BEGIN PUBLIC KEY" || {
   echo "  .env.prod has no GC_AUTH_PUBLIC_KEYS holding a public key."
   echo "  The runner would start unauthenticated. Refusing to deploy."; exit 1; }
-grep -qE '^GC_AUTH_PUBLIC_KEYS=.*PRIVATE KEY' .env.prod && {
+envgrep -qE '^GC_AUTH_PUBLIC_KEYS=.*PRIVATE KEY' && {
   echo "  GC_AUTH_PUBLIC_KEYS contains a PRIVATE key. The runner must never hold one."; exit 1; }
 
 # The key second factors are encrypted with. A Fernet key is 44 characters
 # of url-safe base64 ending in '='; the control plane refuses to start
 # without one, and a deploy that then comes up unhealthy is a worse place
 # to learn it than here.
-grep -qE "^GC_MFA_KEY='?[A-Za-z0-9_-]{43}=" .env.prod || {
+envgrep -qE "^GC_MFA_KEY='?[A-Za-z0-9_-]{43}=" || {
   echo "  .env.prod has no GC_MFA_KEY that looks like a Fernet key."
   echo "  'cd auth && python manage.py mfa_key' prints one. Refusing to deploy."; exit 1; }
 
 # The shared HMAC secret is gone. A line for it is not ignored: the runner
 # refuses to boot with it in the environment, and a value still in this file
 # is a signing key still on the box.
-grep -qE '^GC_AUTH_SECRET=' .env.prod && {
+envgrep -qE '^GC_AUTH_SECRET=' && {
   echo "  .env.prod still sets GC_AUTH_SECRET. Tokens are signed with GC_SIGNING_KEY now"
   echo "  and the runner refuses to start with the old shared secret present. Remove the line."
   exit 1; }
 
 # The placeholder check is the one that catches a copied example file. A
 # literal CHANGE_ME is long enough to pass every length test above.
-grep -qE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|GC_MFA_KEY|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' .env.prod && {
+envgrep -qE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|GC_MFA_KEY|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' && {
   echo "  .env.prod still has CHANGE_ME placeholders. Fill them in first:"
-  grep -nE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|GC_MFA_KEY|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' .env.prod | sed 's/^/    /'
+  envgrep -nE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|GC_MFA_KEY|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' | sed 's/^/    /'
   exit 1; }
 
 # A '\$(' in the file is command substitution that never ran. Compose reads
@@ -162,24 +194,24 @@ grep -qE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|GC_MFA_KEY|DJANGO_SECRET_KEY|PUBL
 # healthy with a key published in the runbook that told you to write it; with
 # a PEM it is a control plane that refuses to start, which is better, but the
 # refusal here is still the one with the message that says what happened.
-grep -qE '^[A-Z_]+=.*\\\$\(' .env.prod && {
+envgrep -qE '^[A-Z_]+=.*\\\$\(' && {
   echo "  .env.prod contains \\\$( ... ) — that is a command, not a value."
   echo "  Nothing expands it. Run the command yourself and paste its OUTPUT."
-  grep -nE '^[A-Z_]+=.*\\\$\(' .env.prod | cut -c1-60 | sed 's/^/    /'
+  envgrep -nE '^[A-Z_]+=.*\\\$\(' | cut -c1-60 | sed 's/^/    /'
   exit 1; }
 
-grep -qE '^PUBLIC_URL=https?://.+' .env.prod || {
+envgrep -qE '^PUBLIC_URL=https?://.+' || {
   echo "  .env.prod has no usable PUBLIC_URL (want https://<host>, or http://<ip> for a demo)."
   echo "  It is a BUILD argument: empty ships a UI with no sign-in at all."; exit 1; }
 
-grep -qE '^DJANGO_SECRET_KEY=.{32,}' .env.prod || {
+envgrep -qE '^DJANGO_SECRET_KEY=.{32,}' || {
   echo "  .env.prod has no DJANGO_SECRET_KEY of at least 32 characters."; exit 1; }
 
 # The two store passwords are spliced into URLs (postgres://user:PASS@…), so
 # they must be URL-safe as well as long. A '@' or '/' in one would be parsed
 # as part of the address and read as "the database is unreachable".
 for var in POSTGRES_PASSWORD REDIS_PASSWORD; do
-  grep -qE "^\$var=[A-Za-z0-9_-]{16,}\$" .env.prod || {
+  envgrep -qE "^\$var=[A-Za-z0-9_-]{16,}\$" || {
     echo "  .env.prod has no \$var of at least 16 URL-safe characters (letters, digits, - and _)."
     exit 1; }
 done
@@ -187,20 +219,18 @@ done
 # Hosts are derived from PUBLIC_URL now; this variable is not read at all.
 # It is refused rather than ignored because someone who wrote '*' here meant
 # it to do something, and what it used to do was accept any Host header.
-grep -qE '^DJANGO_ALLOWED_HOSTS=' .env.prod && {
+envgrep -qE '^DJANGO_ALLOWED_HOSTS=' && {
   echo "  .env.prod sets DJANGO_ALLOWED_HOSTS. Nothing reads it any more: the host is"
   echo "  derived from PUBLIC_URL. Remove the line — '*' in particular is refused."
   exit 1; }
 
 # Ten minutes is the ceiling on what a leaked token is worth. The control
 # plane clamps it too; refusing here is what keeps the .env.prod honest.
-ttl=\$(grep -E '^GC_TOKEN_TTL=' .env.prod | cut -d= -f2- || true)
+ttl=\$(envgrep -E '^GC_TOKEN_TTL=' | cut -d= -f2- || true)
 if [ -n "\$ttl" ] && { ! [ "\$ttl" -eq "\$ttl" ] 2>/dev/null || [ "\$ttl" -gt 600 ] || [ "\$ttl" -lt 60 ]; }; then
   echo "  GC_TOKEN_TTL=\$ttl — an executor token lives 60 to 600 seconds, no longer."
   exit 1
 fi
-
-$EDGE
 
 if [ "\$SCHEME" = http ]; then
   echo
@@ -213,6 +243,22 @@ if [ "\$SCHEME" = http ]; then
   echo "  !   Give it a hostname, set PUBLIC_URL=https://that, and Caddy does the rest."
   echo
 fi
+
+# The instance metadata service (docs/AUTH.md §11). A GET with no token is
+# 401 when IMDSv2 is required and 200 when v1 is still on — and v1 is what a
+# page in the driven browser could read credentials from through one hole
+# in the allowlist. Off EC2 there is no answer at all, and nothing to check.
+imds=\$(curl -s -o /dev/null -w '%{http_code}' -m 2 http://169.254.169.254/latest/meta-data/ 2>/dev/null || echo 000)
+case "\$imds" in
+  000) echo "  no metadata service answered — not EC2, or IMDS is off; skipping the IMDSv2 checks" ;;
+  401) echo "  IMDSv2 is required on this instance" ;;
+  *)
+    echo "  IMDSv1 is ENABLED (an untokened GET of the metadata service answered \$imds)."
+    echo "  Require v2 with a hop limit of 1 and deploy again:"
+    echo "    aws ec2 modify-instance-metadata-options --instance-id <id> \\\\"
+    echo "      --http-tokens required --http-put-response-hop-limit 1 --http-endpoint enabled"
+    exit 1 ;;
+esac
 
 ok_disk=\$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
 if [ "\${ok_disk:-99}" -lt 8 ]; then
@@ -260,12 +306,32 @@ $GC run --rm --no-deps -T caddy caddy validate --config /etc/caddy/Caddyfile >/d
 echo "  building and starting (\$GC_GIT_SHA)"
 $GC up -d --build
 
+# The hop limit, proven rather than assumed: the runner sits on a bridge
+# network one NAT hop from the host, so with HttpPutResponseHopLimit=1 the
+# token a PUT would return never reaches it. A token that DOES come back
+# means the driven Chromium can read instance credentials, and that stack
+# is taken down rather than left up.
+if [ "\$imds" != 000 ]; then
+  hop=\$($GC exec -T runner node -e "fetch('http://169.254.169.254/latest/api/token',{method:'PUT',headers:{'X-aws-ec2-metadata-token-ttl-seconds':'60'},signal:AbortSignal.timeout(3000)}).then(r=>console.log(r.status)).catch(()=>console.log('unreachable'))" 2>/dev/null | tr -d '\r' || echo unreachable)
+  case "\$hop" in
+    200)
+      echo "  THE RUNNER CAN REACH INSTANCE CREDENTIALS: the IMDS hop limit is not 1. Taking it down."
+      echo "    aws ec2 modify-instance-metadata-options --instance-id <id> \\\\"
+      echo "      --http-tokens required --http-put-response-hop-limit 1 --http-endpoint enabled"
+      $GC down; exit 1 ;;
+    *) echo "  IMDS is out of the runner's reach (hop limit 1): \${hop:-unreachable}" ;;
+  esac
+fi
+
 echo "  migrating"
 $GC exec -T control python manage.py migrate --noinput
 $GC exec -T control python manage.py collectstatic --noinput >/dev/null
 # Sessions are rows. Expired ones are never removed by being expired, only by
-# this; after a deploy is the one moment guaranteed to come round.
+# this; and audit rows past ninety days go the same way. The scheduler
+# service runs both daily; after a deploy is the one moment guaranteed to
+# come round even if it has not.
 $GC exec -T control python manage.py clearsessions
+$GC exec -T control python manage.py purge_auth_events
 
 # No edge reload: Caddy resolves runner and control per request, so the
 # new containers' addresses are picked up on the next one.
@@ -312,10 +378,10 @@ probe /auth/csrf       200 "the control plane answers"
 # answer that proves the JSON API is mounted and reachable through the edge.
 probe /_allauth/browser/v1/auth/session 401 "sign-in is allauth's"
 probe /healthz         200 "the browser is up"
-# The edge is the only thing closing this one — server.js exempts it from the
-# bearer gate by design, so an edit that drops the respond line is a real
-# regression and must not deploy green.
-probe /api/recording   403 "the extension hand-off is shut" POST
+# The extension hand-off is under the runner's gate (docs/AUTH.md §11): a
+# 401 proves it. A 200 would be an open POST to the runner; a 403 would mean
+# the edge's old refusal is back and the extension can never hand off.
+probe /api/recording   401 "the extension hand-off is gated" POST
 # From this box the admin is reachable only if GC_ADMIN_CIDRS says so, and
 # the docker bridge is not in anyone's list. A 200 or 302 here means the
 # allowlist is not being applied.

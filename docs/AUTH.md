@@ -139,12 +139,18 @@ ACCOUNT_RATE_LIMITS = {
     'change_password': '5/m/user',
     'manage_email': '10/m/user',
 }
-ACCOUNT_LOGIN_ATTEMPTS_LIMIT = 5
-ACCOUNT_LOGIN_ATTEMPTS_TIMEOUT = 300
 MFA_TOTP_TOLERANCE = 0
 GC_MINT_RATE = '12/10m'      # per session key, on POST /auth/executor-token [token-5]
 GC_ACCEPT_RATE = '10/m/ip'   # invitation acceptance
 ```
+
+Two departures in the built settings, each explained beside the value in
+`auth/config/settings.py`: the per-account lockout is `login_failed`'s
+`5/5m/key` rather than the `ACCOUNT_LOGIN_ATTEMPTS_*` pair, which allauth 65
+retired in its favour; and `signup` is `'10/h/ip'` alone, because allauth
+applies that limit before the form is read and a `/key` part raises at
+request time — the per-address limit on the code a sign-up then needs is
+`confirm_email`.
 
 Per-IP limits key on the client address as the edge reports it
 (`ALLAUTH_TRUSTED_PROXY_COUNT = 1`). A test sends `X-Forwarded-For: 1.2.3.4`
@@ -474,7 +480,13 @@ fetches, and the page runs inside the runner's network namespace
 - `POST /api/recording` requires a Bearer token whenever auth is on. The
   extension obtains one through the control plane with the user's session
   (extension origins listed in `GC_EXTENSION_ORIGINS` are trusted for CSRF and
-  CORS) `[browser-side-2]`.
+  CORS) `[browser-side-2]`. As built: the extension's background worker does
+  `GET /auth/csrf` then `POST /auth/executor-token` with `credentials:
+  'include'` and the CSRF token echoed, and posts the recording with the
+  Bearer; the one `.env.prod` line feeds both services, only
+  `chrome-extension://<id>` (or `moz-extension://`) values are accepted by
+  either, and the edge no longer refuses the route — the runner's 401 is
+  what the deploy probes for.
 - The demo fixtures and `/go/*` redirects are served only when auth is off or
   `GC_DEMO=1`; `/go/r` accepts relative paths only `[browser-side-6]`.
 - Runner responses carry `Content-Security-Policy: default-src 'self';
@@ -504,6 +516,36 @@ fetches, and the page runs inside the runner's network namespace
 - `AuthEvent` rows older than 90 days are purged; sessions are cleared daily.
 - `adduser --staff/--superuser` prints that `/admin/` will demand MFA enrolment
   at first sign-in.
+
+As built (docs/DEPLOY.md has the operator's view of each):
+
+- `manage.py purge_auth_events` (90 days, `--days`, `--dry-run`) and
+  `manage.py housekeeping`, a loop that runs it and `clearsessions` daily and
+  `purge_unverified_emails` every five minutes; the compose `scheduler`
+  service is the control image running that loop with the control plane's
+  environment on the `data` network, and `housekeeping --once` is the line for
+  a host cron. The deploy also runs `clearsessions` and `purge_auth_events`
+  after every migrate.
+- `scripts/gc` re-executes itself under `sudo -n` (one sudoers line, `SETENV`
+  for `GC_GIT_SHA`), `.env.prod` is `root:600`, and `scripts/deploy.sh`
+  refuses a deploy user in the docker group, a `.env.prod` owned by anyone
+  else, a box where an untokened IMDS GET answers 200, and — after the build,
+  from inside the runner container — a metadata token `PUT` that succeeds
+  (hop limit not 1: the stack is taken down). `bootstrap-ec2.sh` and
+  `aws-up.sh` write the sudoers file and never `usermod -aG docker`;
+  `aws-up.sh` requires an explicit `HTTP_CIDR`.
+- `auth/requirements.txt` is generated from `auth/requirements.in` by
+  `pip-compile --generate-hashes` (gunicorn pinned with the rest, since a
+  hash-checked install admits nothing unhashed) and installed with
+  `--require-hashes`; both Dockerfiles and every pulled image in compose are
+  pinned by digest; `npm ci` runs `--ignore-scripts` in both stages;
+  `.github/workflows/check.yml` runs with `permissions: contents: read`,
+  `pip-audit --require-hashes`, `npm audit --omit=dev --audit-level=high`
+  (`npm run check:audit`), and asks both images for the secrets they must not
+  hold. `npm run check:deploy` asserts all of it as text.
+- Backups: `pg_dump --exclude-table-data` for `django_session` and
+  `usersessions_usersession`, encrypted before it touches disk, with
+  `.env.prod` kept apart from the dump (docs/DEPLOY.md "Backups").
 
 ---
 

@@ -48,6 +48,29 @@ export const WEB_ORIGIN = (process.env.GC_WEB_ORIGIN ?? '').replace(/\/+$/, '');
 export const AUTH_ORIGIN = (process.env.GC_AUTH_ORIGIN ?? '').replace(/\/+$/, '');
 
 /**
+ * The browser extension's origins (docs/AUTH.md §11 [browser-side-2]).
+ *
+ * With auth on, POST /api/recording is under the gate like every other
+ * route, and the extension presents an executor token the control plane
+ * handed it on the strength of the person's session. Its fetch arrives from
+ * chrome-extension://<id>, one id per install, and the CORS answer names
+ * only the origins the operator listed — the same list the control plane
+ * trusts for CSRF, from the same .env.prod line, so the two services cannot
+ * disagree about which extension is the operator's.
+ *
+ * Only an extension origin is accepted. A web origin typed here would let a
+ * page there read the API with a token it somehow holds, which is the
+ * wildcard this list exists to replace; EXTENSION_ERROR says so and the
+ * runner refuses to start rather than trust it.
+ */
+export const EXTENSION_ORIGINS = (process.env.GC_EXTENSION_ORIGINS ?? '')
+  .split(',').map((o) => o.trim().replace(/\/+$/, '')).filter(Boolean);
+export const EXTENSION_ERROR = EXTENSION_ORIGINS
+  .filter((o) => !/^(chrome|moz)-extension:\/\/[A-Za-z0-9-]+$/.test(o))
+  .map((o) => `GC_EXTENSION_ORIGINS holds ${JSON.stringify(o)}: an extension origin is chrome-extension://<id> `
+    + '(or moz-extension://<uuid>), nothing else, and never a web origin.')[0] ?? null;
+
+/**
  * Cloudflare Turnstile, when the control plane asks for it (docs/AUTH.md
  * §3, §4). The widget is a script and an iframe from one host, and the
  * UI's CSP names no host but its own — so the site key's presence here is
