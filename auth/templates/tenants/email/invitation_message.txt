@@ -1,0 +1,13 @@
+{% extends "account/email/base_message.txt" %}
+
+{% block content %}{% autoescape off %}{{ inviter }} has invited {{ email }} to join {{ org_name }} on ghostclick as {{ role }}.
+
+If you already have an account under this address, sign in and open this link to accept:
+
+{{ accept_url }}
+
+If you do not, sign up with this address — the invitation is bound to it, and it becomes a membership the moment the address is verified:
+
+{{ signup_url }}
+
+The invitation is good for {{ days }} days and for one use. If you were not expecting it, ignore this mail; nothing happens without you.{% endautoescape %}{% endblock content %}

@@ -338,7 +338,28 @@ printf '%s' "$PASS" | ./scripts/gc exec -T control \
 
 A chosen password has to be at least 15 characters, at most 128, not something
 Have I Been Pwned has seen, and not your own email address. There are no
-composition rules; a passphrase with spaces is fine.
+composition rules; a passphrase with spaces is fine. Have I Been Pwned is
+asked again at every sign-in: a password that has been breached since it was
+set gets one page — change it — and nothing else until it does.
+
+Everyone else arrives through sign-up (docs/AUTH.md §4), and who may is
+`.env.prod`'s decision:
+
+| `GC_SIGNUP_MODE` | who gets an account |
+|---|---|
+| `invite` (unset) | an address holding a live invitation, issued from the app by an organisation's owner or admin and mailed to the invitee; the membership appears the moment the address is verified |
+| `open` | anyone — put `GC_TURNSTILE_SITE_KEY` / `GC_TURNSTILE_SECRET` in front of it |
+| `domain` | exactly the domains in `GC_SIGNUP_DOMAINS` |
+
+Every sign-up verifies its address with a six-digit code before it can do
+anything, which means the mail backend has to deliver: with the console
+backend the codes are in `./scripts/gc logs control`, which is a demo and
+not a product. The same goes for password resets and the notices every
+change sends — set `EMAIL_HOST` before anyone but you signs in.
+
+`/admin/` has no login form of its own any more: it sends you to the app's
+sign-in and comes back once you are a staff session, so staff go through the
+same rate limits and verification as everyone else.
 
 Every account gets a personal organisation on the `free` plan the moment it
 is made, and `migrate` gave one to every account that existed before the
@@ -394,6 +415,7 @@ Three layers, cheapest first.
 curl -sI  https://<host>/app/            | head -1     # 200 — the UI loads
 curl -s   https://<host>/api/state       -o /dev/null -w '%{http_code}\n'   # 401 — gated
 curl -s   https://<host>/auth/csrf       | head -c 60                        # {"csrfToken": …
+curl -s   https://<host>/_allauth/browser/v1/auth/session | head -c 60      # {"status": 401, … — allauth is mounted
 curl -sI  https://<host>/api/recording -X POST | head -1                     # 403 — closed at the edge
 curl -sI  https://<host>/admin/          | head -1     # 403 unless you are in GC_ADMIN_CIDRS
 curl -sI  https://<host>/ | grep -i strict-transport   # HSTS, on an https URL only
@@ -430,7 +452,11 @@ screencast, the socket and the gate together.
 
 1. Open the app at `PUBLIC_URL/app/` → you should be sent to the **sign-in
    screen**. (If you land on the console instead, auth is off.)
-2. Sign in with the superuser you made.
+2. Sign in with the superuser you made. The first sign-in of an account made
+   with `createsuperuser` asks for a six-digit code, because the address has
+   not been proven yet; on the console mail backend the code is in
+   `./scripts/gc logs control`. An `adduser` account skips this — an operator
+   typing the address is the proof.
 3. You land on **Test suites**. Go to **Console**.
 4. Paste `https://example.com` into the URL box and press **Open**.
 5. It will refuse: `example.com is not allowed yet`, with an **Allow** button.
@@ -559,7 +585,9 @@ From `/opt/ghostclick` on the host.
 | Who has an account | `... exec -T control python manage.py adduser --list` |
 | An account with no personal organisation (restored from an old dump) | `... exec -T control python manage.py personal_orgs` |
 | Plans, organisations, members, invitations | `/admin/` → Organisations, from an allowed address |
-| Who signed in, from where | `/admin/` → Auth events, from an allowed address |
+| Who signed in, from where, who signed up, what changed | `/admin/` → Auth events, from an allowed address |
+| Which old address may still reset which account this week | `/admin/` → Previous emails |
+| Let an address sign up | the owner or admin of an organisation invites it from the app; or `GC_SIGNUP_MODE=open` / `domain` in `.env.prod` |
 | Which origins are allowed | `docker run --rm -v ghostclick_ghostclick-state:/s alpine cat /s/origins.json` |
 | A database shell | `... exec postgres psql -U ghostclick` |
 | Container status | `./scripts/gc ps` |
@@ -600,8 +628,12 @@ fine until a migration ever changes a column — none does today.
   backup does exist it should skip `django_session`: a session table in a
   backup is a set of live credentials in a backup.
 - **Mail.** `.env.prod.example` names the console backend, so verification
-  codes and reset links go to the control plane's log until an `EMAIL_HOST`
-  is set. Nothing sends mail yet; the moment something does, set the host.
+  codes, invitations, reset links and change notices go to the control
+  plane's log until an `EMAIL_HOST` is set. Everything that makes or changes
+  an account sends mail now, so that is a demo setting and nothing more.
+- **Turnstile by default.** The keys are optional because a demo has no
+  Cloudflare account; with `GC_SIGNUP_MODE=open` on a public host they are
+  not optional in any sense that matters.
 - **Key rotation on a schedule.** `signing_key --new`, add the new public key
   to `GC_AUTH_PUBLIC_KEYS` beside the old one, restart the runner, switch
   `GC_SIGNING_KEY`, restart the control plane, and drop the old public key
@@ -619,4 +651,6 @@ fine until a migration ever changes a column — none does today.
 - [ ] `GC_AUTH_PUBLIC_KEYS` holds the public key and `GC_SIGNING_KEY` the private one, not the other way round
 - [ ] `PUBLIC_URL` matches how you will actually reach the box
 - [ ] `GC_ADMIN_CIDRS` is your address, or you accept that `/admin/` is closed
+- [ ] `GC_SIGNUP_MODE` is what you mean — unset is invitation-only — and open mode has Turnstile keys
+- [ ] `EMAIL_HOST` is set, or you accept reading sign-up codes out of the control plane's log
 - [ ] All four volumes declared in the compose file before the first `up`

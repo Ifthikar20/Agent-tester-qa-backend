@@ -86,15 +86,30 @@ headers docs/AUTH.md §11 lists on every response.
 
 The origin allowlist and the vault stay entirely on the runner and are
 re-checked there, so the control plane can neither add an origin nor read a
-secret. Passwords are Argon2id-hashed, at least 15 characters, and checked
-against Have I Been Pwned; every sign-in, sign-out and refused password is a
-row in an audit log; a session ends after 12 idle hours or 7 days, whichever
-comes first. Every account has a personal organisation, and organisations
-have owners, admins and members, invitations, and a plan that says what they
-may do — the token the runner sees carries which organisation you are acting
+secret. Signing up, in and out, the verification code, the reset link and
+the password and email changes are django-allauth's, reached by the UI over
+JSON: sign-up is by invitation unless `GC_SIGNUP_MODE` says `open` or
+`domain`, an address is proven by a six-digit code before it can do
+anything, and Cloudflare Turnstile stands in front of open sign-up and of
+any address that has tripped the failed-sign-in limit when a key is set.
+Passwords are Argon2id-hashed, at least 15 characters, and checked against
+Have I Been Pwned when set and again at every sign-in; every sign-in,
+sign-out, refused password, sign-up, verification and change is a row in an
+audit log; a session ends after 12 idle hours or 7 days, whichever comes
+first, and a password change or reset ends every session the account has.
+Every account has a personal organisation, and organisations have owners,
+admins and members, invitations (mailed to the invitee, and consumed the
+moment the invited address is verified), and a plan that says what they may
+do — the token the runner sees carries which organisation you are acting
 for, your role and the plan's limits, and the runner will enforce them once
 it is partitioned by organisation. See [auth/README.md](auth/README.md), and
 [docs/AUTH.md](docs/AUTH.md) for where this is going.
+
+On a laptop the control plane's mail is printed to the terminal `npm run app
+-- --auth` runs in, codes and links included; `bash scripts/adduser.sh
+you@example.com` makes an account whose address counts as verified, and
+`GC_SIGNUP_MODE=open npm run app -- --auth` lets you sign up through the
+page instead.
 
 Deployed, the same three services sit behind one Caddy on one URL
 (`PUBLIC_URL`), from which every host, origin and cookie rule is derived, with

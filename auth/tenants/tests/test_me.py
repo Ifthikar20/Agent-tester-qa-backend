@@ -35,10 +35,12 @@ class MeShapeTests(TestCase):
         self.assertNotIn('is_staff', body)
         self.assertNotIn('staff', body)
 
-    def test_login_answers_with_the_same_shape(self):
+    def test_login_says_nothing_about_staff_either(self):
+        # allauth's sign-in answer is its own shape; the SPA asks /auth/me
+        # for the organisation. Neither says staff.
         r = Api().login('ada@acme.example').json()
-        self.assertEqual(set(r), {'ok', 'csrfToken', 'user', 'org', 'orgs', 'entitlements', 'mfa', 'flags'})
-        self.assertNotIn('isStaff', r['user'])
+        self.assertEqual(r['data']['user']['email'], 'ada@acme.example')
+        self.assertNotIn('staff', str(r).lower())
 
     def test_the_personal_organisation_is_selected_first(self):
         self.assertEqual(self.api.get('/auth/me').json()['org']['personal'], True)

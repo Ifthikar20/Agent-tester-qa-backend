@@ -71,7 +71,7 @@ class SeatTests(TestCase):
     def test_a_revoked_invitation_frees_its_seat(self):
         acme = org('acme', plan='team', entitlement_overrides={'members.max': 2})
         owner = member(acme, user('owner@acme.example'), Role.OWNER)
-        first, _ = invitations.issue(owner, 'bob@acme.example', Role.MEMBER)
+        first = invitations.issue(owner, 'bob@acme.example', Role.MEMBER)
         invitations.revoke(first)
         invitations.issue(owner, 'carol@acme.example', Role.MEMBER)
 

@@ -9,21 +9,25 @@ services with an opinion about the same rule is how a hard gate quietly becomes
 advisory, and the gate here decides where a real browser is pointed.
 
 The design it is being built towards is [docs/AUTH.md](../docs/AUTH.md). This
-directory is at the **token-runner** step of that document's build order: the
+directory is at the **accounts** step of that document's build order: the
 foundation (settings profile, hashing, the audit log, the session clocks, the
 stores and edge), organisations, roles, invitations and entitlements (the
-control-plane half of §10), and now the Ed25519 executor token, its claims and
-its audit row (§8). The runner verifies with public keys only, opens its
-socket for a ticket rather than a token, and enforces step-up on allowing an
-origin; it does not partition its state by organisation yet — that is the
-runner-tenancy step.
+control-plane half of §10), the Ed25519 executor token (§8), and now
+django-allauth for sign-up, sign-in, verification, recovery and the account
+changes (§4, §5 and §7, the password parts). Google sign-in and MFA are the
+next two steps; the runner does not partition its state by organisation yet —
+that is the runner-tenancy step.
 
 ## Why Django
 
-SSO. Everything below is ordinary email-and-password today, but `django-allauth`
-slots in behind the same endpoints without a line changing on the runner side.
-Plus the admin, which is why adding a colleague is a form rather than a script
-someone has to write.
+SSO. Sign-up, sign-in, the verification code, the reset link and the password
+and email changes are `django-allauth`'s, reached by the SPA through its
+headless JSON API under `/_allauth/`; Google and MFA slot in behind the same
+prefix without a line changing on the runner side. Plus the admin, which is
+why adding a colleague is a form rather than a script someone has to write —
+and whose login form is gone: `/admin/` sends you to the app's sign-in and
+takes you back as a staff session, so staff meet the same rate limits,
+verification and (soon) MFA as everyone else.
 
 ## Running it
 
@@ -50,7 +54,9 @@ VITE_AUTH_URL=http://localhost:8000 npm run build
 ```
 
 `npm run app -- --auth` from the repository root does all of that, keeping
-the keypair in `.ghostclick/`.
+the keypair in `.ghostclick/`, and prints the control plane's mail — every
+sign-up code, invitation and reset link — into the same terminal, because on
+a laptop the mail backend is the console.
 
 Leave `VITE_AUTH_URL` unset and the UI runs with no login at all, against a
 runner that is also unauthenticated. That is the laptop case and it stays
@@ -95,8 +101,17 @@ still verify and are rehashed on the next successful sign-in. Validators:
 - not similar to your own email or name
 
 No composition rules — a passphrase with spaces is fine. The same list runs for
-the admin form and for `adduser --password-stdin`, so there is one definition
-of an acceptable password rather than three.
+sign-up, the reset, the change, the admin form and `adduser --password-stdin`,
+so there is one definition of an acceptable password rather than five.
+
+Have I Been Pwned is asked again at every successful sign-in, with the
+password that was just presented: a password that was clean when set and has
+been breached since marks the session, and `accounts.middleware
+.PasswordChangeRequired` then answers `403 {"error": "password_change_required"}`
+to everything but the change itself, `/auth/me`, the session endpoints and
+reauthentication `[credentials-1]`. The change ends the session, and the next
+sign-in is checked afresh. An outage marks nothing, the same way the
+validator lets a sign-up through on one.
 
 ## Sessions: two clocks
 
@@ -112,23 +127,40 @@ the expired rows; the deploy runs it after every migrate.
 ## The audit log
 
 `AuthEvent` is one row per sign-in, sign-out, refused password, expired
-session and **minted token** (with the token's `jti`, so a token that never
-appears here was not minted here), written by receivers on Django's own
-`user_logged_in`, `user_logged_out` and `user_login_failed` signals and by
-the mint view — so a view that signs someone in cannot forget to log it. Each row has the address **as the edge
-reports it** (`accounts.events.client_ip`, the same arithmetic allauth uses
-for its rate limits, with `ALLAUTH_TRUSTED_PROXY_COUNT = 1` behind Caddy and
-`0` on a laptop), the user agent, and for a refusal the email as typed. It is
-readable in `/admin/` and not editable there.
+session, **minted token** (with the token's `jti`, so a token that never
+appears here was not minted here), sign-up, refused sign-up, verification,
+reauthentication, password change, reset request and reset, email change,
+breached password, new device and Turnstile demand — written by receivers on
+Django's own `user_logged_in`, `user_logged_out` and `user_login_failed`
+signals, on allauth's account signals, and by the mint view — so a view that
+signs someone in or changes something cannot forget to log it. Each row has
+the address **as the edge reports it** (`accounts.events.client_ip`, the same
+arithmetic allauth uses for its rate limits, with `ALLAUTH_TRUSTED_PROXY_COUNT
+= 1` behind Caddy and `0` on a laptop), the user agent, and for a refusal the
+email as typed. It is readable in `/admin/` and not editable there.
+
+The same receivers keep `request.session['gc_auth_events']`, the list of
+`{method, at}` the executor token's `amr`, `auth_time` and `su` are computed
+from: allauth's `authentication_step_completed` fires for a sign-in and for a
+reauthentication alike, and its method is written in the token's vocabulary
+(`password`, and `otp`, `recovery`, `webauthn`, `google` once those steps
+exist) `[mfa-recovery-2]`.
 
 ## Making an account
 
-Two ways, and the difference is who chooses the password.
+Three ways. People sign up (below); operators make accounts, and the
+difference between the two operator commands is who chooses the password.
 
 ```bash
 python manage.py createsuperuser              # it asks; use this for a person
 python manage.py adduser qa@example.com       # it generates one and prints it once
 ```
+
+An address has to be proven before it can act. `adduser` marks it verified —
+an operator typing it at a terminal is the proof, and a test account has no
+mailbox to receive a code. `createsuperuser` does not, so the first sign-in
+of that account asks for the six-digit code the console backend printed,
+which is the right thing for a person.
 
 `createsuperuser` prompts, and a prompt needs a terminal — so it cannot run over
 `ssh host '<command>'`, which is where making a test account usually happens. It
@@ -150,27 +182,100 @@ bash scripts/adduser.sh qa@example.com                 # local
 EC2_HOST=<ip> bash scripts/adduser.sh qa@example.com   # the box
 ```
 
+## Sign-up, sign-in, recovery
+
+docs/AUTH.md §4, §5 and §7, on django-allauth's headless API. Who may sign
+up is decided in one place, `accounts/policy.py`, which the account adapter
+asks and the social adapter will ask too, so a Google sign-up cannot answer
+differently from a password one `[oauth-5]`:
+
+| `GC_SIGNUP_MODE` | rule |
+|---|---|
+| `invite` (the default) | the address holds a live `Invitation` |
+| `open` | anyone; Turnstile in front when configured |
+| `domain` | the address's domain — for Google, the id_token's `hd` — is in `GC_SIGNUP_DOMAINS` |
+
+A sign-up creates the account row and sends a six-digit code; until the code
+is entered there is no session, the address is unverified, an invitation is
+untouched and no membership exists `[credentials-6]`. Three wrong codes end the
+attempt. When the address is verified the session begins, the personal
+organisation is already there (every account row gets one), and every live
+invitation bound to that address becomes a membership in the same moment.
+
+Nothing the sign-up page answers says whether an address exists. An address
+that already has an account, and — in invite mode — an address nobody
+invited, get the same `401 verify_email` a fresh address gets; the truth goes
+to the mailbox ("you already have an account", "sign-up is by invitation").
+The existing-address branch also pays an Argon2id hash so the two cannot be
+told apart by the clock, and a test asserts the medians are within ten
+milliseconds `[credentials-3]`. A domain-mode refusal is said out loud, because
+"sign up with your @acme.example address" is policy, not a secret.
+
+Sign-in is one answer for a wrong password and an unknown address; allauth's
+limits (`ACCOUNT_RATE_LIMITS`: 30 a minute per address, 10 failures a minute
+per address, 5 per five minutes per account) count in Redis, keyed on the
+client address the edge reports, and a test sends a forged `X-Forwarded-For`
+and asserts the bucket did not move `[credentials-2]`. Once an address has
+tripped the per-IP failure limit it must present a Cloudflare Turnstile
+token with every sign-in for an hour (`accounts/turnstile.py`; only when
+`GC_TURNSTILE_SECRET` and `GC_TURNSTILE_SITE_KEY` are set, and the SPA reads
+the site key from `GET /auth/config`). A sign-in from an (address, user
+agent) pair the account has not seen before is mailed about, except the
+first sign-in ever.
+
+Recovery: a reset link is good for an hour and — because the token is
+derived from the password hash — for one use; it does not sign you in; and
+the reset ends every session the account has (`accounts/sessions.py`), as
+does a password change, which also asks for the current password. Changing
+the address is: add the new one, enter the code sent to it, and the old one
+is replaced and told. For seven days the old address is still a valid
+identifier for a reset (`accounts.PreviousEmail`), so a change the owner did
+not make can be undone from the mailbox they still have; the reset mail says
+which address the account signs in with now `[mfa-recovery-3]`. Every
+reauthentication is appended to the session's events and to the log.
+
 ## The surface
+
+Ours, under `/auth`:
 
 | | |
 |---|---|
 | `GET /auth/csrf` | a CSRF token the SPA echoes in `X-CSRFToken` |
-| `POST /auth/login` | email + password → a session cookie, and the rotated CSRF token |
-| `POST /auth/logout` | |
+| `GET /auth/config` | `{signup, domains, turnstile}` — what the sign-up page needs before anyone types |
 | `GET /auth/me` | who am I, and for which organisation |
 | `POST /auth/org` | `{org}` — act for another organisation this session, after a membership check |
 | `GET /auth/invitations` | the selected organisation's invitations (owner or admin) |
-| `POST /auth/invitations` | `{email, role}` — issue one; the token is in the answer, once |
+| `POST /auth/invitations` | `{email, role}` — issue one; the token is mailed to the invitee and appears in no answer |
 | `DELETE /auth/invitations/<id>` | revoke one |
-| `POST /auth/invitations/accept` | `{token}` — become a member, signed in as the invited address |
+| `POST /auth/invitations/accept` | `{token}` — become a member, signed in as the invited, verified address |
 | `POST /auth/executor-token` | a short-lived signed token the **runner** will accept; 12 per 10 minutes per session |
 | `GET /auth/jwks` | the public key the tokens verify with, for humans and tooling — the runner never fetches it |
-| `/admin/` | Django's admin — where accounts, plans and organisations are managed; the edge admits it only from `GC_ADMIN_CIDRS` |
+| `/admin/` | Django's admin — where accounts, plans and organisations are managed; the edge admits it only from `GC_ADMIN_CIDRS`; its login is the app's |
 
-`/auth/login` returns a new `csrfToken` because Django rotates it on sign-in.
-Without handing the new one back, the SPA's very next POST is a 403 — sign-in
-appears to work and everything after it fails. It also returns everything
-`/auth/me` would, so the SPA does not need a second round trip:
+allauth's, under `/_allauth/browser/v1/` (the SPA's `stores/session.js` is
+the client; `HEADLESS_ONLY` means there is no HTML view of any of them):
+
+| | |
+|---|---|
+| `POST auth/signup` | `{email, password[, turnstile]}` → `401` with `verify_email` pending, always |
+| `POST auth/email/verify`, `POST auth/email/verify/resend` | `{key}` — the six-digit code; also the code of an email change |
+| `POST auth/login` | `{email, password[, turnstile]}` → `200` and the session, or `401` with what is pending |
+| `GET/DELETE auth/session` | who is signed in / sign out |
+| `POST auth/reauthenticate` | `{password}` — a fresh proof, for the changes that want one |
+| `POST auth/password/request`, `POST auth/password/reset` | `{email}` → the link; `{key, password}` → done, not signed in |
+| `POST account/password/change` | `{current_password, new_password}` → every session ended |
+| `GET/POST/PUT/DELETE account/email` | the address, and changing it |
+
+Three of those — login, signup, password/request — are this project's
+subclasses (`accounts/headless.py`), mounted at the same paths ahead of
+allauth's own: the Turnstile field, the invite-mode branch, and the
+previous-address lookup are the only additions.
+
+Django rotates the CSRF token on sign-in and sign-out, and allauth's JSON
+says nothing about it, so every answer from this service carries the fresh
+value in an `X-CSRFToken` response header (`accounts.middleware
+.CsrfTokenHeader`, exposed through CORS for the laptop's other origin). The
+SPA echoes whatever it last saw. `/auth/me` is the shape it draws from:
 
 ```json
 { "user": {"id": 1, "email": "ada@acme.example", "name": "Ada"},
@@ -215,14 +320,21 @@ an owner's hand.
 
 **Invitations** are `token_urlsafe(32)`, stored as a SHA-256 and looked up
 by it, bound to an email, good for seven days, single-use, and consumed only
-by a signed-in user holding that address. An invitation therefore never
-creates an account or a session; it turns an existing identity into a
-membership `[credentials-6]`. Acceptance is rate limited per client address
+by a signed-in user holding that address **verified** — either by presenting
+the token (`POST /auth/invitations/accept`, an existing account) or by
+verifying the invited address at sign-up, at which moment every live
+invitation bound to it becomes a membership. An invitation therefore never
+creates an account or a session; it turns an existing, proven identity into
+a membership `[credentials-6]`. Acceptance is rate limited per client address
 (`GC_ACCEPT_RATE`, in `accounts/ratelimit.py`, counting in the same Redis the
 production profile insists on), every attempt is an `AuthEvent` with the
 real reason, and the client sees one sentence for every refusal — "wrong
 email" versus "no such token" is a way to learn who was invited. The raw
-token is returned once to the inviter; mailing it is the accounts step's.
+token is mailed to the invitee, once, with a link to the app's `/invite`
+page, and appears in no response: an inviter who could read it back could
+sign up as the invitee and accept it themselves. The same person presenting
+a token they already used — the mailed link opened after verification
+consumed it — is a double click, not an attack, and gets the membership.
 
 **Entitlements** resolve as `{**plan.entitlements, **org.entitlement_overrides}`
 over the keys in `tenants/plans.py`. Three plans are seeded:
@@ -306,14 +418,18 @@ nothing else.
 ## Tests
 
 ```bash
-python manage.py test          # 187 tests, one module per concern in accounts/tests/ and tenants/tests/
+python manage.py test          # 273 tests, one module per concern in accounts/tests/ and tenants/tests/
 ```
 
 They never touch the network: `accounts/testing.py` is the test runner, and it
 stubs the Have I Been Pwned client so a test can say "three breaches" or "the
-API is down" and assert what happens. The production-profile tests import the
+API is down" and assert what happens; the Turnstile verifier is patched the
+same way, and mail goes to Django's in-memory outbox, where the tests read
+the codes and links back out. The production-profile tests import the
 settings module in a subprocess with a chosen environment, because the rules
-they check are the ones that raise at import.
+they check are the ones that raise at import. `accounts/tests/support.py`
+holds the client every signed-in test uses: it speaks allauth's JSON and
+echoes the CSRF header the way the SPA does.
 
 They also run as part of `npm run check:all` from the repository root, so
 "everything is green" means one thing rather than two. They skip loudly if
@@ -329,14 +445,15 @@ Python or Django is missing, because this directory is optional.
   shared browser and its one set of state. Partitioning `.ghostclick/` and
   `suites/` by organisation, the driving-org lock and the `402 entitlement`
   refusals are the runner-tenancy step of docs/AUTH.md.
-- **Mailing an invitation.** `POST /auth/invitations` hands the token back to
-  the inviter once; the accounts step, which brings the mail templates and the
-  invite-mode sign-up, sends it. Until allauth's `EmailAddress` table exists,
-  "signed in as the invited address" is the check and "verified" is taken on
-  the operator's word, because every account was made by one.
-- **Rate limiting on `/auth/login`.** The cache it needs is here (Redis, and a
-  refusal to run without one), and so are the numbers (`ACCOUNT_RATE_LIMITS`);
-  the thing that reads them is allauth, which the accounts step installs.
+- **Google sign-in and MFA.** The next two steps of docs/AUTH.md. Until MFA
+  lands, `/auth/me` reports `mfa: {required: false, enrolled: false}` for
+  everyone, the reauthentication that gates a change is the password, and
+  "the strongest factor the account has" is the password. The settings those
+  steps pin (`MFA_TRUST_ENABLED = False`, `MFA_TOTP_TOLERANCE = 0`) are
+  already set so they are not forgotten.
+- **A sessions page.** A password change or reset ends every session by
+  walking the session table (`accounts/sessions.py`); listing them, and
+  ending one, is allauth's usersessions app and comes with MFA.
 - **Multi-tenancy on the runner.** The runner holds one browser and one run
   lock. Two people signed in still share it — a login says *who*, not *which
   runner*.

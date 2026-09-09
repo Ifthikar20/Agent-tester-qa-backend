@@ -3,29 +3,23 @@ The absolute session lifetime (docs/AUTH.md §1).
 
 Seven days from the FIRST sign-in of a session, whatever happens in between.
 """
-import json
 import time
 
-from django.contrib.auth import get_user_model
-from django.test import Client, TestCase, override_settings
+from django.test import TestCase, override_settings
 
 from ..events import LOGIN_AT
 from ..models import AuthEvent
-
-User = get_user_model()
-PASSWORD = 'a-long-test-password'
+from .support import Api, make_user
 
 
 class AbsoluteLifetimeTests(TestCase):
     def setUp(self):
-        self.user = User.objects.create_user(email='qa@example.com', password=PASSWORD)
-        self.c = Client(enforce_csrf_checks=True)
+        self.user = make_user('qa@example.com')
+        self.api = Api()
+        self.c = self.api.c
 
     def login(self):
-        tok = self.c.get('/auth/csrf').json()['csrfToken']
-        r = self.c.post('/auth/login', data=json.dumps({'email': 'qa@example.com', 'password': PASSWORD}),
-                        content_type='application/json', HTTP_X_CSRFTOKEN=tok)
-        self.assertEqual(r.status_code, 200)
+        self.api.login('qa@example.com')
 
     def backdate(self, seconds):
         s = self.c.session
@@ -38,13 +32,16 @@ class AbsoluteLifetimeTests(TestCase):
         self.assertGreaterEqual(self.c.session[LOGIN_AT], before)
 
     def test_signing_in_again_does_not_restart_the_clock(self):
-        # A reauthentication or a Google "connect" fires the same signal. If
-        # it reset the stamp, "absolute" would mean "until you next prove who
-        # you are", which is the sliding clock again.
+        # A reauthentication proves the password again inside the same
+        # session, and a Google "connect" fires user_logged_in again. If
+        # either reset the stamp, "absolute" would mean "until you next prove
+        # who you are", which is the sliding clock again.
         self.login()
         self.backdate(1000)
         was = self.c.session[LOGIN_AT]
-        self.login()
+        self.assertEqual(self.api.reauthenticate().status_code, 200)
+        self.assertEqual(self.c.session[LOGIN_AT], was)
+        self.c.force_login(self.user)     # user_logged_in once more, same session
         self.assertEqual(self.c.session[LOGIN_AT], was)
 
     def test_a_session_within_the_lifetime_keeps_working(self):

@@ -31,6 +31,11 @@ KEYS = [
     'SECURE_REFERRER_POLICY', 'SECURE_HSTS_SECONDS', 'SECURE_SSL_REDIRECT',
     'ALLAUTH_TRUSTED_PROXY_COUNT', 'EMAIL_BACKEND', 'EMAIL_HOST', 'PASSWORD_HASHERS', 'MFA_TOTP_TOLERANCE',
     'GC_TOKEN_TTL', 'GC_SIGNING_KEY',
+    'GC_APP_URL', 'LOGIN_URL', 'HEADLESS_ONLY', 'HEADLESS_FRONTEND_URLS', 'HEADLESS_CLIENTS',
+    'ACCOUNT_EMAIL_VERIFICATION', 'ACCOUNT_EMAIL_VERIFICATION_BY_CODE_ENABLED', 'ACCOUNT_PREVENT_ENUMERATION',
+    'ACCOUNT_LOGOUT_ON_PASSWORD_CHANGE', 'ACCOUNT_LOGIN_ON_PASSWORD_RESET', 'PASSWORD_RESET_TIMEOUT',
+    'ACCOUNT_REAUTHENTICATION_TIMEOUT', 'MFA_TRUST_ENABLED', 'GC_SIGNUP_MODE', 'GC_SIGNUP_DOMAINS',
+    'GC_TURNSTILE_SECRET', 'GC_TURNSTILE_SITE_KEY', 'AUTHENTICATION_BACKENDS',
 ]
 
 PRODUCTION = {
@@ -85,6 +90,37 @@ class ProductionProfileTests(SimpleTestCase):
         self.assertEqual(got['ALLAUTH_TRUSTED_PROXY_COUNT'], 1)
         self.assertTrue(got['EMAIL_BACKEND'].endswith('smtp.EmailBackend'))
         self.assertEqual(got['MFA_TOTP_TOLERANCE'], 0)
+
+    def test_the_spa_s_routes_derive_from_the_public_url_too(self):
+        # Every link in a mail, and the admin's redirect, land on the SPA at
+        # the one origin there is.
+        got = json.loads(load(PRODUCTION).stdout)
+        self.assertEqual(got['GC_APP_URL'], 'https://app.example.com/app')
+        self.assertEqual(got['LOGIN_URL'], 'https://app.example.com/app/login')
+        self.assertEqual(got['HEADLESS_FRONTEND_URLS']['account_reset_password_from_key'],
+                         'https://app.example.com/app/reset-password/{key}')
+        self.assertTrue(got['HEADLESS_ONLY'])
+        self.assertEqual(got['HEADLESS_CLIENTS'], ['browser'])
+
+    def test_the_account_rules_are_the_spec_s(self):
+        got = json.loads(load(PRODUCTION).stdout)
+        self.assertEqual(got['ACCOUNT_EMAIL_VERIFICATION'], 'mandatory')
+        self.assertTrue(got['ACCOUNT_EMAIL_VERIFICATION_BY_CODE_ENABLED'])
+        self.assertTrue(got['ACCOUNT_PREVENT_ENUMERATION'])
+        self.assertTrue(got['ACCOUNT_LOGOUT_ON_PASSWORD_CHANGE'])
+        self.assertFalse(got['ACCOUNT_LOGIN_ON_PASSWORD_RESET'])
+        self.assertEqual(got['PASSWORD_RESET_TIMEOUT'], 3600)
+        self.assertEqual(got['ACCOUNT_REAUTHENTICATION_TIMEOUT'], 300)
+        self.assertFalse(got['MFA_TRUST_ENABLED'])
+        self.assertEqual(got['GC_SIGNUP_MODE'], 'invite')
+        self.assertEqual(got['AUTHENTICATION_BACKENDS'], ['allauth.account.auth_backends.AuthenticationBackend'])
+
+    def test_the_sign_up_mode_is_configuration(self):
+        got = json.loads(load({**PRODUCTION, 'GC_SIGNUP_MODE': 'domain', 'GC_SIGNUP_DOMAINS': 'Acme.example, @globex.example'}).stdout)
+        self.assertEqual(got['GC_SIGNUP_MODE'], 'domain')
+        self.assertEqual(got['GC_SIGNUP_DOMAINS'], ['acme.example', 'globex.example'])
+        got = json.loads(load({**PRODUCTION, 'GC_TURNSTILE_SECRET': 's', 'GC_TURNSTILE_SITE_KEY': 'k'}).stdout)
+        self.assertEqual((got['GC_TURNSTILE_SECRET'], got['GC_TURNSTILE_SITE_KEY']), ('s', 'k'))
 
     def test_hsts_is_the_edge_s_job(self):
         # TLS ends at Caddy, which emits HSTS. A second copy here would be a
@@ -156,6 +192,20 @@ class RefusalTests(SimpleTestCase):
 
     def test_something_that_is_not_a_pem_is_refused_even_on_a_laptop(self):
         self.refuses({'DJANGO_DEBUG': '1', 'GC_SIGNING_KEY': 'not-a-real-secret-just-for-tests'}, 'GC_SIGNING_KEY')
+
+    def test_a_sign_up_mode_that_is_not_one_of_the_three_is_refused(self):
+        self.refuses({**PRODUCTION, 'GC_SIGNUP_MODE': 'anyone'}, 'GC_SIGNUP_MODE')
+
+    def test_domain_mode_without_domains_is_refused(self):
+        # It would admit nobody and look like a working sign-up page.
+        self.refuses({**PRODUCTION, 'GC_SIGNUP_MODE': 'domain'}, 'GC_SIGNUP_DOMAINS')
+
+    def test_half_a_turnstile_is_refused(self):
+        # A secret with no site key asks every visitor for a token the page
+        # cannot render; a site key with no secret renders a widget nothing
+        # checks.
+        self.refuses({**PRODUCTION, 'GC_TURNSTILE_SECRET': 's'}, 'GC_TURNSTILE_SITE_KEY')
+        self.refuses({**PRODUCTION, 'GC_TURNSTILE_SITE_KEY': 'k'}, 'GC_TURNSTILE_SECRET')
 
     def test_the_token_lifetime_is_clamped(self):
         # Ten minutes is the ceiling on what a leaked token is worth; the

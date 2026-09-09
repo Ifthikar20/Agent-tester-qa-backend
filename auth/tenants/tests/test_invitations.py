@@ -4,6 +4,7 @@ logged [credentials-6].
 """
 from datetime import timedelta
 
+from django.core import mail
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -12,7 +13,13 @@ from accounts.models import AuthEvent
 
 from .. import invitations
 from ..models import Invitation, Membership, Role, hash_token
-from .support import PASSWORD, Api, member, org, user
+from .support import PASSWORD, Api, member, org, token_from_mail, user
+
+
+def issue(inviter, email, role):
+    """Issue, and read the raw token back the only way there is: from the mail."""
+    invitation = invitations.issue(inviter, email, role)
+    return invitation, token_from_mail()
 
 
 class IssueTests(TestCase):
@@ -21,7 +28,7 @@ class IssueTests(TestCase):
         self.owner = member(self.acme, user('owner@acme.example'), Role.OWNER)
 
     def test_the_token_is_stored_hashed_and_found_by_token(self):
-        inv, raw = invitations.issue(self.owner, 'bob@acme.example', Role.MEMBER)
+        inv, raw = issue(self.owner, 'bob@acme.example', Role.MEMBER)
         self.assertNotIn(raw, inv.token_hash)
         self.assertEqual(inv.token_hash, hash_token(raw))
         self.assertEqual(Invitation.by_token(raw), inv)
@@ -29,11 +36,20 @@ class IssueTests(TestCase):
         self.assertGreaterEqual(len(raw), 40)
 
     def test_it_lasts_seven_days(self):
-        inv, _ = invitations.issue(self.owner, 'bob@acme.example', Role.MEMBER)
+        inv, _ = issue(self.owner, 'bob@acme.example', Role.MEMBER)
         self.assertAlmostEqual(inv.expires_at, timezone.now() + timedelta(days=7), delta=timedelta(minutes=1))
 
+    def test_it_is_mailed_to_the_invitee_and_only_there(self):
+        inv, raw = issue(self.owner, 'bob@acme.example', Role.MEMBER)
+        [msg] = mail.outbox
+        self.assertEqual(msg.to, ['bob@acme.example'])
+        self.assertIn('/app/invite?token=' + raw, msg.body)
+        self.assertIn('/app/signup', msg.body)
+        self.assertIn('Acme', msg.body)
+        self.assertEqual(Invitation.by_token(raw), inv)
+
     def test_it_is_logged(self):
-        inv, _ = invitations.issue(self.owner, 'bob@acme.example', Role.MEMBER)
+        inv, _ = issue(self.owner, 'bob@acme.example', Role.MEMBER)
         ev = AuthEvent.objects.get(kind=AuthEvent.Kind.INVITATION_SENT)
         self.assertEqual(ev.user, self.owner.user)
         self.assertEqual(ev.detail['invitee'], 'bob@acme.example')
@@ -46,7 +62,7 @@ class AcceptTests(TestCase):
         self.acme = org('acme', plan='team')
         self.owner = member(self.acme, user('owner@acme.example'), Role.OWNER)
         self.bob = user('bob@acme.example')
-        self.inv, self.raw = invitations.issue(self.owner, 'bob@acme.example', Role.ADMIN)
+        self.inv, self.raw = issue(self.owner, 'bob@acme.example', Role.ADMIN)
 
     def refused(self, raw, who, reason):
         with self.assertRaises(invitations.Refused) as caught:
@@ -64,8 +80,20 @@ class AcceptTests(TestCase):
 
     def test_it_is_single_use(self):
         invitations.accept(self.raw, self.bob)
-        self.refused(self.raw, self.bob, 'already used')
+        # The same person again is a double click (the mailed link opened
+        # after verification already consumed it) and gets the membership
+        # it made; anyone else is refused.
+        self.assertEqual(invitations.accept(self.raw, self.bob).user, self.bob)
         self.assertEqual(Membership.objects.filter(user=self.bob, organization=self.acme).count(), 1)
+        carol = user('carol@acme.example')
+        self.refused(self.raw, carol, 'already used')
+
+    def test_an_unverified_address_is_refused(self):
+        # The address is the whole credential, so an address nobody proved
+        # is no credential [credentials-6].
+        eve = user('eve@acme.example', verified=False)
+        _, raw = issue(self.owner, 'eve@acme.example', Role.MEMBER)
+        self.refused(raw, eve, 'address not verified')
 
     def test_the_email_must_match(self):
         carol = user('carol@acme.example')
@@ -76,7 +104,7 @@ class AcceptTests(TestCase):
 
     def test_the_email_match_ignores_case(self):
         dave = user('Dave@acme.example')
-        _, raw = invitations.issue(self.owner, 'dave@ACME.example', Role.MEMBER)
+        _, raw = issue(self.owner, 'dave@ACME.example', Role.MEMBER)
         invitations.accept(raw, dave)
 
     def test_expired_is_refused(self):
@@ -112,7 +140,7 @@ class AcceptEndpointTests(TestCase):
         self.acme = org('acme', plan='team')
         self.owner = member(self.acme, user('owner@acme.example'), Role.OWNER)
         self.bob = user('bob@acme.example')
-        self.inv, self.raw = invitations.issue(self.owner, 'bob@acme.example', Role.MEMBER)
+        self.inv, self.raw = issue(self.owner, 'bob@acme.example', Role.MEMBER)
 
     def test_accepting_needs_a_session(self):
         r = Api().post('/auth/invitations/accept', {'token': self.raw})
@@ -172,13 +200,17 @@ class ManageEndpointTests(TestCase):
         self.assertEqual(api.post('/auth/org', {'org': 'acme'}).status_code, 200)
         return api
 
-    def test_an_owner_issues_and_gets_the_token_once(self):
+    def test_an_owner_issues_and_the_token_goes_to_the_invitee(self):
         r = self.as_('owner@acme.example').post('/auth/invitations', {'email': 'bob@acme.example', 'role': 'admin'})
         self.assertEqual(r.status_code, 201, r.content)
         body = r.json()
         self.assertEqual(body['invitation']['role'], 'admin')
-        self.assertEqual(Invitation.by_token(body['token']).pk, body['invitation']['id'])
-        # The token is not in the list, or anywhere else, afterwards.
+        # Not in the answer: an inviter who could read the token back could
+        # sign up as the invitee and accept it themselves.
+        self.assertNotIn('token', body)
+        self.assertEqual(Invitation.by_token(token_from_mail()).pk, body['invitation']['id'])
+        self.assertEqual(mail.outbox[-1].to, ['bob@acme.example'])
+        # Nor in the list afterwards.
         listed = self.as_('owner@acme.example').get('/auth/invitations').json()
         self.assertNotIn('token', str(listed))
         self.assertEqual(listed['invitations'][0]['state'], 'pending')
@@ -208,7 +240,7 @@ class ManageEndpointTests(TestCase):
         self.assertEqual(r.json(), {'error': 'entitlement', 'limit': 'members.max', 'plan': 'team'})
 
     def test_revoking_is_scoped_to_the_selected_organisation(self):
-        inv, _ = invitations.issue(self.owner, 'bob@acme.example', Role.MEMBER)
+        inv, _ = issue(self.owner, 'bob@acme.example', Role.MEMBER)
         globex = org('globex', plan='team')
         other = member(globex, user('owner@globex.example'), Role.OWNER)
         stranger = Api()

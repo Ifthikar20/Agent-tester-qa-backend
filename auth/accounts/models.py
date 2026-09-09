@@ -90,6 +90,19 @@ class AuthEvent(models.Model):
         # never appears here was not minted here [token-5].
         MINT = 'mint', 'executor token minted'
         MINT_REFUSED = 'mint_refused', 'executor token refused'
+        # The account's own life (docs/AUTH.md §4 and §7): every sign-up,
+        # verification and refusal, and every change to what signs it in.
+        SIGNUP = 'signup', 'signed up'
+        SIGNUP_REFUSED = 'signup_refused', 'sign-up refused'
+        EMAIL_VERIFIED = 'email_verified', 'email address verified'
+        REAUTHENTICATION = 'reauthentication', 'reauthenticated'
+        PASSWORD_CHANGED = 'password_changed', 'password changed'
+        PASSWORD_RESET_REQUESTED = 'password_reset_requested', 'password reset requested'
+        PASSWORD_RESET = 'password_reset', 'password reset'
+        PASSWORD_PWNED = 'password_pwned', 'password known to Have I Been Pwned'
+        EMAIL_CHANGED = 'email_changed', 'email address changed'
+        NEW_DEVICE = 'new_device', 'signed in from an unseen device'
+        TURNSTILE_DEMANDED = 'turnstile_demanded', 'address must now solve Turnstile'
 
     at = models.DateTimeField(default=timezone.now, db_index=True)
     # A CharField with choices rather than an enum column: later flows add
@@ -110,3 +123,37 @@ class AuthEvent(models.Model):
     def __str__(self):
         who = self.user.email if self.user_id else (self.email or '-')
         return f'{self.at:%Y-%m-%d %H:%M:%S} {self.kind} {who}'
+
+
+class PreviousEmail(models.Model):
+    """
+    An address an account used to sign in with, kept for a week.
+
+    The attack this closes [mfa-recovery-3]: someone holding a session
+    changes the account's email to their own, and the real owner — who still
+    has the old mailbox — can no longer ask for a password reset because the
+    account no longer answers to that address. For seven days it still does:
+    a reset requested for a previous address goes to that address and resets
+    the same account, so the owner can take it back. After `until` the row
+    is ignored, and it is only ever read by the reset request.
+    """
+    GRACE_DAYS = 7
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='previous_emails')
+    email = models.EmailField(db_index=True)
+    replaced_by = models.EmailField()
+    replaced_at = models.DateTimeField(default=timezone.now)
+    until = models.DateTimeField(db_index=True)
+
+    class Meta:
+        ordering = ['-replaced_at']
+
+    def __str__(self):
+        return f'{self.email} was {self.user_id} until {self.until:%Y-%m-%d}'
+
+    @classmethod
+    def users_for(cls, email):
+        """The users `email` may still reset a password for, newest change first."""
+        now = timezone.now()
+        rows = cls.objects.filter(email__iexact=email, until__gt=now).select_related('user')
+        return [r.user for r in rows if r.user.is_active]

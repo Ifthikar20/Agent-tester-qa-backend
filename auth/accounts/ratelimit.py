@@ -1,12 +1,13 @@
 """
 A counter in the shared cache, which is what a rate limit is.
 
-Written here because django-allauth, whose limiter the accounts flow will
-use for its own endpoints, is not installed yet and the invitation endpoint
-needs one now. The rate syntax is allauth's — '10/m/ip', '12/10m' — so the
-numbers in settings read the same whichever limiter enforces them. The
-scope suffix ('ip', 'key') is documentation for the caller, who chooses the
-key; nothing here reads it.
+django-allauth's own limiter guards allauth's endpoints; this one guards
+ours (minting, invitation acceptance) and the Turnstile failure count, and
+it stays small on purpose — allauth's needs a request marked as headless to
+answer a 429 in the right shape, and ours are plain JSON views. The rate
+syntax is allauth's — '10/m/ip', '12/10m' — so the numbers in settings read
+the same whichever limiter enforces them. The scope suffix ('ip', 'key') is
+documentation for the caller, who chooses the key; nothing here reads it.
 
 It counts in CACHES['default'], which in production is Redis and refused to
 be anything else (config/settings.py): a per-process counter is a rate limit

@@ -46,3 +46,28 @@ export const WEB_ORIGIN = (process.env.GC_WEB_ORIGIN ?? '').replace(/\/+$/, '');
  * calls this address itself.
  */
 export const AUTH_ORIGIN = (process.env.GC_AUTH_ORIGIN ?? '').replace(/\/+$/, '');
+
+/**
+ * Cloudflare Turnstile, when the control plane asks for it (docs/AUTH.md
+ * §3, §4). The widget is a script and an iframe from one host, and the
+ * UI's CSP names no host but its own — so the site key's presence here is
+ * what lets that host in. The runner never reads the key's value; deployed,
+ * the same .env.prod line feeds both services, so the two cannot disagree
+ * about whether the widget exists.
+ */
+export const TURNSTILE_HOST = 'https://challenges.cloudflare.com';
+export const TURNSTILE = Boolean((process.env.GC_TURNSTILE_SITE_KEY ?? '').trim());
+
+/**
+ * The Content-Security-Policy every response carries (docs/AUTH.md §11
+ * [browser-side-3] [browser-side-4]), built from the mode rather than
+ * written out, so a check can build it for each mode without starting a
+ * server. No inline script, nothing from another origin except what the
+ * mode names, and no framing at all.
+ */
+export function csp({ authOrigin = AUTH_ORIGIN, turnstile = TURNSTILE } = {}) {
+  const connect = ['\'self\'', 'wss:', 'https:', ...(authOrigin ? [authOrigin] : [])].join(' ');
+  const script = turnstile ? `; script-src 'self' ${TURNSTILE_HOST}; frame-src ${TURNSTILE_HOST}` : '';
+  return `default-src 'self'; connect-src ${connect}${script}; img-src 'self' data: blob:; `
+    + 'style-src \'self\' \'unsafe-inline\'; frame-ancestors \'none\'';
+}

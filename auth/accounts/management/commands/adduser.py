@@ -31,6 +31,7 @@ that you did not choose and do not know about is worse than no login at all.
 import secrets
 import sys
 
+from allauth.account.models import EmailAddress
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
@@ -89,8 +90,21 @@ class Command(BaseCommand):
                     extra['is_staff'] = True
                 user = User.objects.create_user(email=email, password=password, **extra)
             made = 'created'
+        self.mark_verified(user)
 
         self.report(made, user, password, generated)
+
+    def mark_verified(self, user):
+        # An operator typing an address at a terminal is the proof of it;
+        # a sign-up has to prove it with a code. Without this row allauth
+        # would treat the first sign-in as an unverified address and ask for
+        # a code the operator's test account has no mailbox to receive.
+        # `createsuperuser` does not do this, so a person made that way
+        # verifies by code at first sign-in, which is the right thing for a
+        # person.
+        EmailAddress.objects.update_or_create(
+            user=user, email=user.email.lower(), defaults={'primary': True, 'verified': True},
+        )
 
     # -- the parts ------------------------------------------------------------
 
@@ -147,7 +161,14 @@ class Command(BaseCommand):
             self.stdout.write('               shown once - only a hash is stored, so nothing can print it again')
         else:
             self.stdout.write('    password   the one you piped in')
-        self.stdout.write(f'    admin      {"yes - /admin/ is open to it" if user.is_staff else "no"}')
+        if user.is_staff:
+            # docs/AUTH.md §12: staff meets the MFA policy the moment the mfa
+            # step lands, and the person should hear it from the command
+            # that made them staff rather than from a 403.
+            self.stdout.write('    admin      yes - /admin/ is open to it, and will demand an authenticator at first sign-in')
+        else:
+            self.stdout.write('    admin      no')
+        self.stdout.write("    email      marked verified - no code is asked for at first sign-in")
         self.stdout.write("    sign in    with that email on the app's login page")
         self.stdout.write('')
 

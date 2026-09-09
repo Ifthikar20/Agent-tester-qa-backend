@@ -1,5 +1,5 @@
 """
-The five endpoints, the token, and `adduser`.
+The endpoints, the token, and `adduser`.
 
     python manage.py test
 
@@ -14,13 +14,15 @@ import json
 import re
 import sys
 
+from allauth.account.models import EmailAddress
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.test import Client, TestCase, override_settings
+from django.test import TestCase, override_settings
 
 from ..tokens import ALGORITHM, AUDIENCE, ISSUER, NoSigningKey, kid_of, load_private, mint
 from . import keys
+from .support import HEADLESS, PASSWORD, Api, make_user
 
 User = get_user_model()
 
@@ -110,81 +112,144 @@ class TokenTests(TestCase):
 @override_settings(GC_SIGNING_KEY=keys.PRIVATE_PEM, GC_TOKEN_TTL=600)
 class EndpointTests(TestCase):
     def setUp(self):
-        self.user = User.objects.create_user(email='qa@example.com', password='a-long-test-password', name='QA')
+        self.user = make_user('qa@example.com', name='QA')
         # The real middleware, not the test client's lenient default — CSRF is
         # a thing this API depends on and skipping it here would mean the
         # browser hits a rule no test ever exercised.
-        self.c = Client(enforce_csrf_checks=True)
-
-    def csrf(self):
-        return self.c.get('/auth/csrf').json()['csrfToken']
-
-    def login(self):
-        r = self.c.post('/auth/login', data=json.dumps({'email': 'qa@example.com', 'password': 'a-long-test-password'}),
-                        content_type='application/json', HTTP_X_CSRFTOKEN=self.csrf())
-        self.assertEqual(r.status_code, 200)
-        return r.json()['csrfToken']
+        self.api = Api()
+        self.c = self.api.c
 
     def test_me_is_401_when_anonymous(self):
         self.assertEqual(self.c.get('/auth/me').status_code, 401)
 
     def test_login_then_me(self):
-        self.login()
+        self.api.login('qa@example.com')
         self.assertEqual(self.c.get('/auth/me').json()['user']['email'], 'qa@example.com')
 
-    def test_login_returns_the_rotated_csrf_token(self):
+    def test_login_hands_back_the_rotated_csrf_token(self):
         # Django rotates the token on login. Without handing back the new one,
         # the SPA's very next POST is a 403 — sign-in appears to work and
-        # everything after it fails.
-        before = self.csrf()
-        after = self.login()
-        self.assertNotEqual(before, after)
-        self.assertEqual(self.c.post('/auth/executor-token', HTTP_X_CSRFTOKEN=after).status_code, 200)
+        # everything after it fails. allauth's JSON says nothing about it, so
+        # it rides in a header on every answer (CsrfTokenHeader).
+        before = self.api.csrf
+        r = self.api.login('qa@example.com')
+        self.assertTrue(r.headers.get('X-CSRFToken'))
+        self.assertNotEqual(before, self.api.csrf)
+        self.assertEqual(self.api.post('/auth/executor-token').status_code, 200)
+
+    def test_the_old_csrf_token_is_dead_after_login(self):
+        stale = self.api.csrf
+        self.api.login('qa@example.com')
+        r = self.c.post('/auth/executor-token', HTTP_X_CSRFTOKEN=stale)
+        self.assertEqual(r.status_code, 403)
 
     def test_a_post_without_csrf_is_refused(self):
-        r = self.c.post('/auth/login', data=json.dumps({'email': 'qa@example.com', 'password': 'a-long-test-password'}),
+        r = self.c.post(f'{HEADLESS}/auth/login', data=json.dumps({'email': 'qa@example.com', 'password': PASSWORD}),
                         content_type='application/json')
         self.assertEqual(r.status_code, 403)
 
     def test_wrong_password_and_unknown_email_read_the_same(self):
-        tok = self.csrf()
-        wrong = self.c.post('/auth/login', data=json.dumps({'email': 'qa@example.com', 'password': 'nope'}),
-                            content_type='application/json', HTTP_X_CSRFTOKEN=tok)
-        unknown = self.c.post('/auth/login', data=json.dumps({'email': 'nobody@example.com', 'password': 'nope'}),
-                              content_type='application/json', HTTP_X_CSRFTOKEN=tok)
-        self.assertEqual(wrong.status_code, 401)
-        self.assertEqual(unknown.status_code, 401)
+        wrong = self.api.try_login('qa@example.com', 'nope-not-it-at-all')
+        unknown = self.api.try_login('nobody@example.com', 'nope-not-it-at-all')
+        self.assertEqual(wrong.status_code, 400)
+        self.assertEqual(unknown.status_code, 400)
         # Telling them apart turns this endpoint into a way to find out who has
         # an account here.
-        self.assertEqual(wrong.json()['error'], unknown.json()['error'])
+        self.assertEqual(wrong.json()['errors'], unknown.json()['errors'])
+        self.assertEqual(self.c.get('/auth/me').status_code, 401)
+
+    def test_login_cycles_the_session_key(self):
+        self.c.get('/auth/csrf')
+        before = self.c.cookies.get('sessionid')
+        before = before.value if before else None
+        self.api.login('qa@example.com')
+        self.assertNotEqual(self.c.cookies['sessionid'].value, before)
+
+    def test_the_session_endpoint_says_who(self):
+        self.assertEqual(self.api.current().status_code, 401)
+        self.api.login('qa@example.com')
+        r = self.api.current()
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['data']['user']['email'], 'qa@example.com')
+        self.assertTrue(r.json()['meta']['is_authenticated'])
 
     def test_token_requires_a_session(self):
-        self.assertEqual(self.c.post('/auth/executor-token', HTTP_X_CSRFTOKEN=self.csrf()).status_code, 401)
+        self.assertEqual(self.api.post('/auth/executor-token').status_code, 401)
 
     def test_token_is_for_the_session_user_only(self):
-        tok = self.login()
+        self.api.login('qa@example.com')
         # No parameter names a subject. Passing one must not change who the
         # token is for, or this endpoint mints credentials for anyone.
-        r = self.c.post('/auth/executor-token', data=json.dumps({'sub': 999, 'email': 'root@example.com'}),
-                        content_type='application/json', HTTP_X_CSRFTOKEN=tok)
+        r = self.api.post('/auth/executor-token', {'sub': 999, 'email': 'root@example.com'})
         self.assertEqual(r.status_code, 200)
         decoded = keys.claims_of(r.json()['token'])
         self.assertEqual(decoded['sub'], str(self.user.pk))
         self.assertEqual(decoded['email'], 'qa@example.com')
 
     def test_logout_ends_it(self):
-        tok = self.login()
-        after = self.c.post('/auth/logout', HTTP_X_CSRFTOKEN=tok).json()['csrfToken']
+        self.api.login('qa@example.com')
+        r = self.api.logout()
+        self.assertEqual(r.status_code, 401)   # allauth: "and now you are not signed in"
+        self.assertTrue(r.headers.get('X-CSRFToken'))
         self.assertEqual(self.c.get('/auth/me').status_code, 401)
-        self.assertEqual(self.c.post('/auth/executor-token', HTTP_X_CSRFTOKEN=after).status_code, 401)
+        self.assertEqual(self.api.post('/auth/executor-token').status_code, 401)
+
+    def test_config_says_the_mode_and_no_turnstile(self):
+        r = self.c.get('/auth/config')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {'signup': 'invite', 'domains': [], 'turnstile': None})
 
     @override_settings(GC_SIGNING_KEY='')
     def test_unconfigured_says_so_rather_than_failing_obscurely(self):
-        tok = self.login()
-        r = self.c.post('/auth/executor-token', HTTP_X_CSRFTOKEN=tok)
+        self.api.login('qa@example.com')
+        r = self.api.post('/auth/executor-token')
         # 503, not 500: nothing is broken, it has not been given a key.
         self.assertEqual(r.status_code, 503)
         self.assertIn('GC_SIGNING_KEY', r.json()['error'])
+
+
+class AdminLoginTests(TestCase):
+    """
+    Django's own admin login form is gone [credentials-1] [ops-supply-6]:
+    /admin/ authenticates only through allauth, so the rate limits, the
+    verified address and — once the mfa step lands — the MFA policy apply
+    to staff exactly as to everyone else.
+    """
+
+    def test_an_anonymous_visit_is_sent_to_the_spa_sign_in(self):
+        # /admin/ sends an anonymous visitor to its own login URL, as Django
+        # always has; that URL is now a redirect to the SPA rather than a form.
+        r = Api().get('/admin/')
+        self.assertEqual(r.status_code, 302)
+        self.assertEqual(r['Location'], '/admin/login/?next=/admin/')
+        r = Api().get(r['Location'])
+        self.assertEqual(r.status_code, 302)
+        # The SPA's route (GC_APP_URL: relative here, absolute on a laptop
+        # with GC_WEB_ORIGIN, and the same origin deployed).
+        self.assertTrue(r['Location'].split('?')[0].endswith('/app/login'), r['Location'])
+        self.assertIn('next=', r['Location'])
+
+    def test_there_is_no_admin_login_form(self):
+        r = Api().get('/admin/login/')
+        self.assertEqual(r.status_code, 302)
+        self.assertNotIn(b'csrfmiddlewaretoken', r.content)
+        # And nothing to post a password to: the form's action went with it.
+        api = Api()
+        r = api.c.post('/admin/login/', {'username': 'x@example.com', 'password': 'y', 'csrfmiddlewaretoken': api.csrf},
+                       HTTP_X_CSRFTOKEN=api.csrf)
+        self.assertEqual(r.status_code, 302)
+
+    def test_a_staff_session_made_through_allauth_gets_in(self):
+        make_user('staff@example.com', is_staff=True)
+        api = Api()
+        api.login('staff@example.com')
+        self.assertEqual(api.get('/admin/').status_code, 200)
+
+    def test_a_non_staff_session_is_refused(self):
+        make_user('qa@example.com')
+        api = Api()
+        api.login('qa@example.com')
+        self.assertEqual(api.get('/admin/login/?next=/admin/').status_code, 403)
 
 
 class PasswordTests(TestCase):
@@ -227,16 +292,22 @@ class AddUserCommandTests(TestCase):
 
     def sign_in(self, email, password):
         """The real login, CSRF and all — not authenticate()."""
-        c = Client(enforce_csrf_checks=True)
-        token = c.get('/auth/csrf').json()['csrfToken']
-        return c.post('/auth/login', data=json.dumps({'email': email, 'password': password}),
-                      content_type='application/json', HTTP_X_CSRFTOKEN=token)
+        return Api().try_login(email, password)
 
     def test_an_account_it_makes_can_sign_in(self):
         password = self.password_from(self.run_adduser('qa@example.com'))
         r = self.sign_in('qa@example.com', password)
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json()['user']['email'], 'qa@example.com')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(r.json()['data']['user']['email'], 'qa@example.com')
+
+    def test_the_address_is_marked_verified(self):
+        # An operator at a terminal is the proof of the address. Without the
+        # row, allauth's mandatory verification would ask the first sign-in
+        # for a code sent to a mailbox a test account does not have.
+        self.run_adduser('qa@example.com')
+        row = EmailAddress.objects.get(user__email='qa@example.com')
+        self.assertTrue(row.verified)
+        self.assertTrue(row.primary)
 
     def test_a_piped_password_is_the_one_that_works(self):
         # The case a test suite actually wants: it chooses the password, so it
@@ -247,8 +318,12 @@ class AddUserCommandTests(TestCase):
     def test_the_trailing_newline_is_not_part_of_the_password(self):
         # echo adds one. If it were kept, the password that works would be one
         # nobody can type, and the failure would look like a wrong password.
+        # (allauth's login strips surrounding whitespace from what is typed,
+        # so the stored hash is the thing to ask.)
         self.run_adduser('qa@example.com', stdin='a-long-chosen-password\n', password_stdin=True)
-        self.assertEqual(self.sign_in('qa@example.com', 'a-long-chosen-password\n').status_code, 401)
+        user = User.objects.get(email='qa@example.com')
+        self.assertTrue(user.check_password('a-long-chosen-password'))
+        self.assertFalse(user.check_password('a-long-chosen-password\n'))
 
     def test_it_makes_an_ordinary_account_by_default(self):
         # There is no RBAC, so signing in is already enough to drive every run.
@@ -259,11 +334,12 @@ class AddUserCommandTests(TestCase):
         self.assertFalse(user.is_superuser)
         self.assertTrue(user.is_active)
 
-    def test_superuser_is_staff_too(self):
-        self.run_adduser('boss@example.com', superuser=True)
+    def test_superuser_is_staff_too_and_is_told_about_mfa(self):
+        out = self.run_adduser('boss@example.com', superuser=True)
         user = User.objects.get(email='boss@example.com')
         self.assertTrue(user.is_staff)
         self.assertTrue(user.is_superuser)
+        self.assertIn('authenticator', out)
 
     def test_an_existing_account_is_left_alone(self):
         first = self.password_from(self.run_adduser('qa@example.com'))
@@ -276,9 +352,10 @@ class AddUserCommandTests(TestCase):
         first = self.password_from(self.run_adduser('qa@example.com'))
         second = self.password_from(self.run_adduser('qa@example.com', reset_password=True))
         self.assertNotEqual(first, second)
-        self.assertEqual(self.sign_in('qa@example.com', first).status_code, 401)
+        self.assertEqual(self.sign_in('qa@example.com', first).status_code, 400)
         self.assertEqual(self.sign_in('qa@example.com', second).status_code, 200)
         self.assertEqual(User.objects.filter(email='qa@example.com').count(), 1)
+        self.assertEqual(EmailAddress.objects.filter(user__email='qa@example.com').count(), 1)
 
     def test_a_weak_password_is_refused_rather_than_stored(self):
         with self.assertRaises(CommandError):

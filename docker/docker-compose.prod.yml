@@ -93,6 +93,11 @@ services:
       GC_PACE_MS: ${GC_PACE_MS:-250}
       GC_TIMEOUT_MS: ${GC_TIMEOUT_MS:-8000}
       GC_SETTLE_MS: ${GC_SETTLE_MS:-250}
+      # The same public site key the control plane hands the UI. The runner
+      # never uses its value; its presence widens the UI's CSP to admit the
+      # Turnstile widget's host, and one line feeding both services is how
+      # the policy and the page cannot disagree about whether it exists.
+      GC_TURNSTILE_SITE_KEY: ${GC_TURNSTILE_SITE_KEY:-}
     volumes:
       # Run history, the ORIGIN ALLOWLIST, the vault. Without this every
       # deploy forgets which origins were allowed and every run ever made.
@@ -156,6 +161,14 @@ services:
       EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD:-}
       EMAIL_USE_TLS: ${EMAIL_USE_TLS:-1}
       DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:-}
+      # Who may sign up (docs/AUTH.md §4): invite unless told otherwise, and
+      # domain mode needs its domains or the settings module refuses to start.
+      GC_SIGNUP_MODE: ${GC_SIGNUP_MODE:-invite}
+      GC_SIGNUP_DOMAINS: ${GC_SIGNUP_DOMAINS:-}
+      # Cloudflare Turnstile, both halves or neither (the settings module
+      # refuses one without the other). The secret is this container's only.
+      GC_TURNSTILE_SECRET: ${GC_TURNSTILE_SECRET:-}
+      GC_TURNSTILE_SITE_KEY: ${GC_TURNSTILE_SITE_KEY:-}
     volumes:
       - control-static:/app/staticfiles
     expose: ["8000"]

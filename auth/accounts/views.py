@@ -1,15 +1,19 @@
 """
-Six endpoints, and one of them is the whole point.
+The endpoints that are this project's own, and one of them is the whole point.
 
   GET  /auth/csrf             hand the SPA a CSRF token it can echo back
-  POST /auth/login            email + password -> a session cookie
-  POST /auth/logout
+  GET  /auth/config           what the sign-up page needs to know: the mode,
+                              and the Turnstile site key when there is one
   GET  /auth/me               who am I, and for which organisation
   POST /auth/executor-token   a short-lived token the RUNNER will accept
   GET  /auth/jwks             the public keys that token verifies with
 
-The organisation endpoints (switching, invitations) are in tenants/views.py,
-mounted under the same /auth prefix.
+Sign-up, sign-in, sign-out, verification, reset and the password and email
+changes are django-allauth's, under /_allauth/browser/v1/ (docs/AUTH.md §4,
+§5, §7) — there is no hand-written login view here any more, because a
+login view is the thing that forgets a rate limit. The organisation
+endpoints (switching, invitations) are in tenants/views.py, mounted under
+the same /auth prefix.
 
 Errors come back as {"error": "..."} because that is the shape the UI's `req()`
 already unwraps for the executor's API — one error path in the frontend rather
@@ -21,11 +25,9 @@ cookie — the edge strips them. Handing it a long-lived session cookie would
 make every socket a durable credential. A ten-minute token scoped to one
 organisation is the smaller thing to leak.
 """
-import json
 import secrets
 import time
 
-from django.contrib.auth import authenticate, login as django_login, logout as django_logout
 from django.conf import settings
 from django.http import JsonResponse
 from django.middleware.csrf import get_token
@@ -34,20 +36,13 @@ from django.views.decorators.http import require_http_methods
 from tenants import plans
 from tenants.session import describe, selected
 
+from . import turnstile
 from .events import LOGIN_AT, auth_events, record
 from .models import AuthEvent
 from .ratelimit import over
 from .tokens import (
     NoSigningKey, STEP_UP_SECONDS, jwk, kid_of, load_private, mint, public_pem, session_id,
 )
-
-
-def _body(request):
-    """The JSON body, or {} — a malformed body is a 400 with a real sentence."""
-    try:
-        return json.loads(request.body or b'{}')
-    except ValueError:
-        raise ValueError('the request body is not JSON')
 
 
 def _shape(user):
@@ -86,40 +81,19 @@ def csrf(request):
     return JsonResponse({'csrfToken': get_token(request)})
 
 
-@require_http_methods(['POST'])
-def login(request):
-    try:
-        data = _body(request)
-    except ValueError as err:
-        return JsonResponse({'error': str(err)}, status=400)
-
-    email = str(data.get('email', '')).strip()
-    password = data.get('password') or ''
-    if not email or not password:
-        return JsonResponse({'error': 'Enter an email address and a password'}, status=400)
-
-    user = authenticate(request, username=email, password=password)
-    if user is None:
-        # One message for "no such account" and "wrong password" on purpose:
-        # telling them apart turns this endpoint into a way to enumerate who
-        # has an account here.
-        return JsonResponse({'error': 'That email and password do not match an account'}, status=401)
-
-    django_login(request, user)
-    # django_login rotates the CSRF token — deliberately, so a token captured
-    # before sign-in cannot be replayed after it. That means the value the SPA
-    # fetched from /auth/csrf a moment ago is now dead, and the NEXT POST it
-    # makes would be a 403. Handing back the new one keeps that invisible;
-    # without it, signing in works and everything after it fails.
-    return JsonResponse({'ok': True, **whoami(request), 'csrfToken': get_token(request)})
-
-
-@require_http_methods(['POST'])
-def logout(request):
-    # Same rotation on the way out: the session is flushed, so the caller needs
-    # the new token to be able to sign in again without a reload.
-    django_logout(request)
-    return JsonResponse({'ok': True, 'csrfToken': get_token(request)})
+@require_http_methods(['GET'])
+def config(request):
+    """
+    What the sign-up and sign-in pages need before anyone has typed anything.
+    The mode decides which words the page shows; the site key is public by
+    definition (it is rendered into every visitor's page) and null when
+    Turnstile is not configured, which is the SPA's cue not to load it.
+    """
+    return JsonResponse({
+        'signup': settings.GC_SIGNUP_MODE,
+        'domains': settings.GC_SIGNUP_DOMAINS if settings.GC_SIGNUP_MODE == 'domain' else [],
+        'turnstile': turnstile.site_key(),
+    })
 
 
 @require_http_methods(['GET'])

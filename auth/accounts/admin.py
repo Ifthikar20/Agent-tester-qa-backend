@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth.forms import AdminPasswordChangeForm
 
-from .models import AuthEvent, User
+from .models import AuthEvent, PreviousEmail, User
 
 
 @admin.register(User)
@@ -60,4 +60,20 @@ class AuthEventAdmin(admin.ModelAdmin):
         return False
 
     def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(PreviousEmail)
+class PreviousEmailAdmin(admin.ModelAdmin):
+    """
+    Readable so an operator can see which address may still reset which
+    account this week; editable only by deletion, which is the one thing an
+    operator would legitimately do (the owner confirms the change was theirs
+    and asks for the window to close early).
+    """
+    list_display = ['email', 'user', 'replaced_by', 'replaced_at', 'until']
+    search_fields = ['email', 'replaced_by', 'user__email']
+    readonly_fields = ['user', 'email', 'replaced_by', 'replaced_at', 'until']
+
+    def has_add_permission(self, request):
         return False

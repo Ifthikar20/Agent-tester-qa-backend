@@ -300,6 +300,9 @@ fi
 probe /app/            200 "the UI loads"
 probe /api/state       401 "the API is gated"
 probe /auth/csrf       200 "the control plane answers"
+# allauth's session endpoint: 401 is "nobody is signed in", which is the one
+# answer that proves the JSON API is mounted and reachable through the edge.
+probe /_allauth/browser/v1/auth/session 401 "sign-in is allauth's"
 probe /healthz         200 "the browser is up"
 # The edge is the only thing closing this one — server.js exempts it from the
 # bearer gate by design, so an edit that drops the respond line is a real

@@ -1,0 +1,5 @@
+{% autoescape off %}Hello from ghostclick.
+
+{% block content %}{% endblock content %}
+
+— ghostclick{% endautoescape %}

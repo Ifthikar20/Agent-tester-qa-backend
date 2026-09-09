@@ -1,0 +1,1 @@
+{% autoescape off %}You are invited to {{ org_name }} on ghostclick{% endautoescape %}

@@ -12,7 +12,7 @@ import * as vault from './secrets.js';
 import * as history from './runs.js';
 import { chooseHome } from './home.js';
 import { bearer, verify } from './auth.js';
-import { AUTH_ON, DEMO, PUBLIC_KEYS, KEY_ERROR, WEB_ORIGIN, AUTH_ORIGIN } from './mode.js';
+import { AUTH_ON, DEMO, PUBLIC_KEYS, KEY_ERROR, WEB_ORIGIN, TURNSTILE, csp } from './mode.js';
 import * as tickets from './tickets.js';
 import { blocked } from './reach.js';
 import * as suites from './suites.js';
@@ -126,17 +126,18 @@ const app = express();
  * UI's alone because "every response" is a rule that survives a new route
  * and "the UI's" is a list that has to be kept. connect-src carries the
  * control plane's origin when the UI signs in somewhere else (the laptop);
- * deployed, both sit behind one origin and 'self' already says it.
+ * deployed, both sit behind one origin and 'self' already says it. The
+ * Turnstile host joins script-src and frame-src only when the control
+ * plane will ask for the widget (mode.js).
  */
-const CSP = "default-src 'self'; connect-src 'self' wss: https:" + (AUTH_ORIGIN ? ` ${AUTH_ORIGIN}` : '') +
-  "; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'";
+const CSP = csp();
 /**
  * The bundled demo apps carry their behaviour in inline scripts — they are
  * fixtures whose job is to be driven, not the UI — so the pages under
  * public/ keep everything above except the inline-script rule. They are
  * only served in demo mode at all.
  */
-const FIXTURE_CSP = CSP.replace("default-src 'self';", "default-src 'self'; script-src 'self' 'unsafe-inline';");
+const FIXTURE_CSP = csp({ turnstile: false }).replace("default-src 'self';", "default-src 'self'; script-src 'self' 'unsafe-inline';");
 app.use((_req, res, next) => {
   res.setHeader('Content-Security-Policy', CSP);
   res.setHeader('X-Frame-Options', 'DENY');
@@ -803,6 +804,7 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  auth        ->  ${AUTH_ON
               ? `on — an EdDSA token from the control plane is required; keys: ${[...PUBLIC_KEYS.keys()].join(', ')}`
               : 'OFF — GC_AUTH_PUBLIC_KEYS unset, anyone who can reach this port can drive it'}` +
+            `${TURNSTILE ? '\n  turnstile   ->  the CSP admits challenges.cloudflare.com (GC_TURNSTILE_SITE_KEY is set)' : ''}` +
             `\n  reach       ->  ${BLOCK_PRIVATE
               ? 'the driven page cannot reach loopback, private or link-local addresses'
               : 'unrestricted — the driven page may reach anything this host can (GC_BLOCK_PRIVATE=1 to close it)'}` +

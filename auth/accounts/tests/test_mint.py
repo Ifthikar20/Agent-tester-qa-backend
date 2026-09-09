@@ -10,36 +10,30 @@ import io
 import json
 import time
 
-from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.management import call_command
-from django.test import Client, TestCase, override_settings
+from django.test import TestCase, override_settings
 
 from ..events import AUTH_EVENTS, LOGIN_AT
 from ..models import AuthEvent
 from ..tokens import STEP_UP_SECONDS, kid_of, load_public, session_id
 from . import keys
-
-User = get_user_model()
-PASSWORD = 'a-long-test-password'
+from .support import PASSWORD, Api, make_user
 
 
 @override_settings(GC_SIGNING_KEY=keys.PRIVATE_PEM, GC_TOKEN_TTL=600, GC_MINT_RATE='12/10m')
 class MintTests(TestCase):
     def setUp(self):
         cache.clear()
-        self.user = User.objects.create_user(email='qa@example.com', password=PASSWORD)
-        self.c = Client(enforce_csrf_checks=True)
-        self.csrf = self.c.get('/auth/csrf').json()['csrfToken']
+        self.user = make_user('qa@example.com')
+        self.api = Api()
+        self.c = self.api.c
 
     def login(self):
-        r = self.c.post('/auth/login', data=json.dumps({'email': 'qa@example.com', 'password': PASSWORD}),
-                        content_type='application/json', HTTP_X_CSRFTOKEN=self.csrf)
-        self.assertEqual(r.status_code, 200)
-        self.csrf = r.json()['csrfToken']
+        self.api.login('qa@example.com')
 
     def mint(self):
-        return self.c.post('/auth/executor-token', HTTP_X_CSRFTOKEN=self.csrf)
+        return self.api.post('/auth/executor-token')
 
     def claims(self):
         r = self.mint()
@@ -128,11 +122,9 @@ class MintTests(TestCase):
         self.login()
         for _ in range(12):
             self.mint()
-        other = Client(enforce_csrf_checks=True)
-        tok = other.get('/auth/csrf').json()['csrfToken']
-        r = other.post('/auth/login', data=json.dumps({'email': 'qa@example.com', 'password': PASSWORD}),
-                       content_type='application/json', HTTP_X_CSRFTOKEN=tok)
-        self.assertEqual(other.post('/auth/executor-token', HTTP_X_CSRFTOKEN=r.json()['csrfToken']).status_code, 200)
+        other = Api()
+        other.login('qa@example.com')
+        self.assertEqual(other.post('/auth/executor-token').status_code, 200)
 
     # -- the public key set ----------------------------------------------------
 

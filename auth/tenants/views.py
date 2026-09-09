@@ -3,7 +3,7 @@ The organisation endpoints, all under /auth.
 
   POST   /auth/org                     {org: slug}         switch this session's organisation
   GET    /auth/invitations                                 the selected organisation's invitations
-  POST   /auth/invitations             {email, role}       issue one; the token is in the answer, once
+  POST   /auth/invitations             {email, role}       issue one; the token is mailed to the invitee
   DELETE /auth/invitations/<id>                            revoke one
   POST   /auth/invitations/accept      {token}             become a member
 
@@ -78,14 +78,17 @@ def invitation_list(request):
         return JsonResponse({'error': str(err)}, status=400)
     role = str(data.get('role') or Role.MEMBER)
     try:
-        invitation, raw = invitations.issue(me, str(data.get('email', '')), role, request)
+        invitation = invitations.issue(me, str(data.get('email', '')), role, request)
     except invitations.Entitlement as err:
         return JsonResponse({'error': 'entitlement', 'limit': err.limit, 'plan': err.plan}, status=402)
     except invitations.Refused as err:
         # The inviter is a manager of this organisation, so the reason is
         # theirs to know — unlike acceptance, where it is not.
         return JsonResponse({'error': err.reason}, status=403 if err.forbidden else 400)
-    return JsonResponse({'ok': True, 'invitation': invitation.to_json(), 'token': raw}, status=201)
+    # No token in the answer: it went to the invitee's mailbox, which is the
+    # one place that proves the address, and an inviter who could read it
+    # back could accept on someone's behalf by signing up as them.
+    return JsonResponse({'ok': True, 'invitation': invitation.to_json()}, status=201)
 
 
 @require_http_methods(['DELETE'])

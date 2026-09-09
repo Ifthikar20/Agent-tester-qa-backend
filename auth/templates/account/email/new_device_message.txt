@@ -1,0 +1,9 @@
+{% extends "account/email/base_message.txt" %}
+
+{% block content %}{% autoescape off %}Your ghostclick account was just signed into from a device and address it had not been signed into from before:
+
+- IP address: {{ ip }}
+- Browser: {{ user_agent }}
+- Date: {{ timestamp }}
+
+If that was you, there is nothing to do. If it was not, change your password now — that ends every other session — and, if the account has none yet, add an authenticator from Security.{% endautoescape %}{% endblock content %}

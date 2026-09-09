@@ -42,6 +42,13 @@ Environment (see .env.example):
   GC_WEB_ORIGIN       laptop only: where the UI is served from, for CORS and
                       CSRF. In production the UI is the same origin as this.
   GC_TOKEN_TTL        seconds an executor token is good for (default 600).
+  GC_SIGNUP_MODE      who may sign up: invite (default), open, or domain.
+  GC_SIGNUP_DOMAINS   for domain mode, the email domains allowed, comma-separated.
+  GC_TURNSTILE_SECRET, GC_TURNSTILE_SITE_KEY
+                      Cloudflare Turnstile. Set both and sign-up in open mode,
+                      and sign-in from an address that has tripped the failed
+                      login limit, require a widget token. Unset, nothing
+                      asks for one.
 """
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -108,6 +115,12 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'corsheaders',
+    # django-allauth owns sign-up, sign-in, verification, reset and the email
+    # and password changes, reached by the SPA through its headless JSON API
+    # under /_allauth/. Nothing here re-implements a login form.
+    'allauth',
+    'allauth.account',
+    'allauth.headless',
     'accounts',
     'tenants',
 ]
@@ -120,19 +133,35 @@ MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
+    # After the CSRF middleware, so its response phase runs after Django has
+    # rotated the token: the SPA reads the fresh value from a header.
+    'accounts.middleware.CsrfTokenHeader',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'allauth.account.middleware.AccountMiddleware',
     # Directly after authentication and before any view: a session past its
     # absolute lifetime must never reach code that trusts request.user.
     'accounts.middleware.AbsoluteSessionLifetime',
+    # And a session whose password Have I Been Pwned knows may do one thing:
+    # change it.
+    'accounts.middleware.PasswordChangeRequired',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
+# allauth's backend and only allauth's: it extends Django's ModelBackend, so
+# the admin's permission checks still work, and it is the one that looks a
+# person up by the email addresses it verified. Listing ModelBackend beside
+# it would run the hasher twice on every wrong password.
+AUTHENTICATION_BACKENDS = ['allauth.account.auth_backends.AuthenticationBackend']
 
 ROOT_URLCONF = 'config.urls'
 
 TEMPLATES = [{
     'BACKEND': 'django.template.backends.django.DjangoTemplates',
-    'DIRS': [],
+    # The project's templates first: the mails under templates/ override
+    # allauth's of the same name (its base greets "Hello from <site>!"; this
+    # product has a name), and app directories are searched after.
+    'DIRS': [BASE_DIR / 'templates'],
     'APP_DIRS': True,
     'OPTIONS': {'context_processors': [
         'django.template.context_processors.request',
@@ -264,7 +293,15 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 WEB_ORIGIN = os.environ.get('GC_WEB_ORIGIN', '').rstrip('/') or PUBLIC_URL
 CORS_ALLOWED_ORIGINS = [WEB_ORIGIN] if WEB_ORIGIN else []
 CORS_ALLOW_CREDENTIALS = True
+# The rotated CSRF token rides back in this header (accounts.middleware
+# .CsrfTokenHeader); cross-origin, a browser hides every header the server
+# did not expose by name.
+CORS_EXPOSE_HEADERS = ['X-CSRFToken']
 CSRF_TRUSTED_ORIGINS = [PUBLIC_URL] if PUBLIC_URL else ([WEB_ORIGIN] if WEB_ORIGIN else [])
+# Where the SPA is: every link in an email, and every redirect allauth or
+# the admin would make, lands on one of its routes. Empty on a laptop with no
+# GC_WEB_ORIGIN at all, which is a laptop with no UI to sign in from.
+GC_APP_URL = f'{WEB_ORIGIN}/app' if WEB_ORIGIN else '/app'
 
 # ---------------------------------------------------------------- transport
 #
@@ -329,15 +366,18 @@ GC_SESSION_ABSOLUTE_SECONDS = 7 * 24 * 3600
 
 # ---------------------------------------------------------------- rate limits
 #
-# Read by django-allauth once the accounts flow installs it; defined here so
-# the numbers live beside the cache they depend on. Per-IP keys use the client
+# Read by django-allauth's limiter; defined here so the numbers live beside
+# the cache they depend on. Per-IP keys use the client
 # address as the edge reports it (ALLAUTH_TRUSTED_PROXY_COUNT above). The
 # 'login_failed' entry is the per-account lockout — five in five minutes — and
 # is what allauth 65 uses in place of the older ACCOUNT_LOGIN_ATTEMPTS_* pair.
+# 'signup' is per address only: allauth applies it before the form is read,
+# so there is no email to key on (a "/key" part raises at request time); the
+# per-address limit on the code that a sign-up then needs is 'confirm_email'.
 ACCOUNT_RATE_LIMITS = {
     'login': '30/m/ip',
     'login_failed': '10/m/ip,5/5m/key',
-    'signup': '10/h/ip,3/h/key',
+    'signup': '10/h/ip',
     'reset_password': '20/m/ip,3/m/key',
     'reset_password_from_key': '20/m/ip',
     'confirm_email': '1/10s/key',
@@ -348,8 +388,101 @@ ACCOUNT_RATE_LIMITS = {
 # A TOTP code is good for its thirty seconds and no neighbouring window: the
 # tolerance exists for clock drift, and the drift a phone has is zero.
 MFA_TOTP_TOLERANCE = 0
+# A trusted-device cookie is the one allauth feature that skips the
+# second-factor stage, so it is off by name and stays off [mfa-recovery-6].
+MFA_TRUST_ENABLED = False
 GC_MINT_RATE = '12/10m'       # per session key, on POST /auth/executor-token
 GC_ACCEPT_RATE = '10/m/ip'    # invitation acceptance
+
+# ---------------------------------------------------------------- accounts
+#
+# django-allauth, headless: the SPA talks JSON to /_allauth/browser/v1/ and
+# no HTML view of allauth's exists (HEADLESS_ONLY). The rules are docs/AUTH.md
+# §4, §5 and §7; each setting below is one of them.
+ACCOUNT_ADAPTER = 'accounts.adapters.AccountAdapter'
+# Email is the login and there is no username field on the model at all.
+ACCOUNT_USER_MODEL_USERNAME_FIELD = None
+ACCOUNT_LOGIN_METHODS = {'email'}
+ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*']
+ACCOUNT_UNIQUE_EMAIL = True
+# A sign-up is an unverified address until a six-digit code proves it, and
+# nothing — no session, no membership, no consumed invitation — happens
+# before that [credentials-6]. Three wrong codes end the attempt.
+ACCOUNT_EMAIL_VERIFICATION = 'mandatory'
+ACCOUNT_EMAIL_VERIFICATION_BY_CODE_ENABLED = True
+ACCOUNT_EMAIL_VERIFICATION_BY_CODE_MAX_ATTEMPTS = 3
+# Six digits, no dashes: the code is read off a phone and typed into a
+# field, and digits are the one alphabet that survives that in every
+# keyboard and locale. A mail that did not arrive can be asked for again,
+# a few times, each one rate limited per address (confirm_email below).
+ACCOUNT_EMAIL_VERIFICATION_BY_CODE_FORMAT = {'length': 6, 'numeric': True, 'dashed': False}
+ACCOUNT_EMAIL_VERIFICATION_SUPPORTS_RESEND = 3
+# "That address already has an account" is never said to the browser: the
+# existing-account branch answers exactly like the new-account branch and
+# the difference goes to the mailbox instead [credentials-3].
+ACCOUNT_PREVENT_ENUMERATION = True
+ACCOUNT_EMAIL_UNKNOWN_ACCOUNTS = True
+# A password change, a reset and an email change each mail the account.
+ACCOUNT_EMAIL_NOTIFICATIONS = True
+ACCOUNT_EMAIL_SUBJECT_PREFIX = '[ghostclick] '
+# Changing the address is: add the new one, verify it by code, and the old
+# one is replaced — two addresses at most, and only during the change.
+ACCOUNT_CHANGE_EMAIL = True
+ACCOUNT_MAX_EMAIL_ADDRESSES = 2
+# Recovery (docs/AUTH.md §7). A reset link is good for an hour and, because
+# the token is derived from the password hash, for one use; it does not sign
+# you in, so a mailbox thief still has to meet whatever factor the account
+# has [mfa-recovery-3]. Changing the password ends the session that changed
+# it (and accounts.events flushes the others), so a thief holding a cookie
+# does not ride out a password change.
+PASSWORD_RESET_TIMEOUT = 3600
+ACCOUNT_LOGIN_ON_PASSWORD_RESET = False
+ACCOUNT_LOGOUT_ON_PASSWORD_CHANGE = True
+ACCOUNT_REAUTHENTICATION_REQUIRED = True
+ACCOUNT_REAUTHENTICATION_TIMEOUT = 300
+ACCOUNT_LOGIN_BY_CODE_ENABLED = False
+ACCOUNT_PASSWORD_RESET_BY_CODE_ENABLED = False
+
+HEADLESS_ONLY = True
+HEADLESS_CLIENTS = ('browser',)
+# Every link allauth puts in an email points at the SPA, not at a view of
+# its own, because there is no view of its own.
+HEADLESS_FRONTEND_URLS = {
+    'account_login': f'{GC_APP_URL}/login',
+    'account_signup': f'{GC_APP_URL}/signup',
+    'account_confirm_email': f'{GC_APP_URL}/verify',
+    'account_reset_password': f'{GC_APP_URL}/forgot-password',
+    'account_reset_password_from_key': f'{GC_APP_URL}/reset-password/{{key}}',
+    'socialaccount_login_error': f'{GC_APP_URL}/login',
+}
+# Django's own admin login form is gone: /admin/ sends an anonymous visitor
+# to the SPA's sign-in, and comes back only to a staff session that went
+# through the rate-limited, verified, MFA-enforcing flow [ops-supply-6].
+LOGIN_URL = HEADLESS_FRONTEND_URLS['account_login']
+
+# Who may sign up (docs/AUTH.md §4). One policy, accounts/policy.py, read by
+# the account adapter and, later, the social one, so the two paths cannot
+# drift [oauth-5]:
+#   invite   only an address with a live invitation
+#   open     anyone, behind Turnstile when it is configured
+#   domain   only addresses on GC_SIGNUP_DOMAINS (Google: the id_token's hd)
+GC_SIGNUP_MODE = os.environ.get('GC_SIGNUP_MODE', 'invite').strip().lower() or 'invite'
+if GC_SIGNUP_MODE not in ('invite', 'open', 'domain'):
+    raise ImproperlyConfigured(f'GC_SIGNUP_MODE must be invite, open or domain, not {GC_SIGNUP_MODE!r}')
+GC_SIGNUP_DOMAINS = [d.lower().lstrip('@') for d in env_list('GC_SIGNUP_DOMAINS')]
+if GC_SIGNUP_MODE == 'domain' and not GC_SIGNUP_DOMAINS:
+    raise ImproperlyConfigured('GC_SIGNUP_MODE=domain needs GC_SIGNUP_DOMAINS (comma-separated)')
+
+# Cloudflare Turnstile [credentials-1]. With both halves set, open-mode
+# sign-up always presents a token and sign-in does so for an hour from any
+# address that tripped the failed-login limit. The site key is public and
+# the SPA reads it from GET /auth/config; the secret verifies tokens here
+# and nowhere else. Unset, neither endpoint asks.
+GC_TURNSTILE_SECRET = os.environ.get('GC_TURNSTILE_SECRET', '').strip()
+GC_TURNSTILE_SITE_KEY = os.environ.get('GC_TURNSTILE_SITE_KEY', '').strip()
+if bool(GC_TURNSTILE_SECRET) != bool(GC_TURNSTILE_SITE_KEY):
+    raise ImproperlyConfigured('GC_TURNSTILE_SECRET and GC_TURNSTILE_SITE_KEY are set together or not at all')
+GC_TURNSTILE_HOURS = 1
 
 # ---------------------------------------------------------------- the executor
 #

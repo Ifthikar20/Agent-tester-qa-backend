@@ -59,8 +59,8 @@ absent.
 Nothing under `auth/` reads the runner's tree — not `suites/`, not
 `.ghostclick/`, not `public/` — and nothing the runner or the UI loads is a file
 from `auth/`. They are joined by one signed token and one HTTP call. The check
-distinguishes a **URL** from a **file path** on purpose: `/auth/login` in the UI
-is the boundary working, not a breach of it.
+distinguishes a **URL** from a **file path** on purpose: `/_allauth/browser/v1/auth/login`
+in the UI is the boundary working, not a breach of it.
 
 This one is not about builds. The control plane's temptation is to reach *into*
 the runner — to read the suites, to decide whether an origin is allowed — and
@@ -159,15 +159,15 @@ becomes the check that the published package version matches.
 
 ## What is deliberately still open
 
-- **SSO.** The reason Django is here, and not built yet. It goes behind the
-  same four endpoints without the runner noticing.
+- **SSO.** The reason Django is here. Sign-up, sign-in, verification, reset
+  and the account changes are django-allauth's now, behind `/_allauth/`;
+  Google and MFA are the next two steps of docs/AUTH.md and slot in behind
+  the same prefix without the runner noticing.
 - **RBAC on the runner.** The control plane now has organisations, roles and
   plans, and the token carries `org`, `role` and `ent`; the runner does not
   read them yet, so anyone who can sign in still drives everything. Reading
   them — and keying every store by `org` — is the runner-tenancy step of
   docs/AUTH.md, and it still crosses this boundary only inside the token.
-- **Rate limiting on `/auth/login`.** Worth having before this meets a network
-  you do not control.
 - **The WebSocket accepts any path.** The ticket is the gate, and with auth on
   the `Origin` header must be the app's — the repository's own check scripts,
   which connect from Node with no `Origin` at all, run against an open runner.

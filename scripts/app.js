@@ -229,8 +229,9 @@ function accounts(py, env) {
   const n = Number((r.out.match(/\d+\s*$/) ?? ['0'])[0]);
   if (n > 0) return step('accounts', `${n} account${n === 1 ? '' : 's'}`);
   step('accounts', 'NONE — you will not be able to sign in until you make one:');
-  console.log(`\n      cd auth && ${py} manage.py createsuperuser      it asks for a password`);
-  console.log('      bash scripts/adduser.sh you@example.com        it generates one\n');
+  console.log(`\n      cd auth && ${py} manage.py createsuperuser      it asks for a password; the first sign-in asks for a code, printed in this terminal`);
+  console.log('      bash scripts/adduser.sh you@example.com        it generates one; the address counts as verified');
+  console.log('      GC_SIGNUP_MODE=open npm run app -- --auth      or sign up at /app/signup — the code is printed here\n');
 }
 
 function buildUi(env) {
@@ -317,8 +318,14 @@ async function main(argv) {
         console.error(`  control plane: ${line}`);
       }
     });
+    // Its stdout is the mail. On a laptop the control plane's mail backend
+    // is the console, so every sign-up code, invitation and reset link is
+    // printed here — and nowhere else, which is why it cannot be dropped.
+    control.stdout.on('data', (d) => {
+      for (const line of String(d).split(/\r?\n/)) if (line.trim()) console.log(`  control plane: ${line}`);
+    });
     children.push(control);
-    console.log(`\n  control plane  ->  http://localhost:${opts.authPort}/admin/  (sign-in at /auth)`);
+    console.log(`\n  control plane  ->  http://localhost:${opts.authPort}/admin/  (sign-in at /app/login; its mail prints here)`);
   }
 
   // The runner prints its own banner, which is the detailed one. No shell

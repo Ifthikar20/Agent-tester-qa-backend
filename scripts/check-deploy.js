@@ -21,7 +21,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
-const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
+// Normalised to LF: a checkout with core.autocrlf on has CRLF in the working
+// tree, and every `\n` anchor below would otherwise miss on Windows while
+// the same files pass everywhere else.
+const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 
 let failures = 0;
 const ok = (l, d = '') => console.log(`  ✓  ${l.padEnd(50)} ${d}`);
@@ -75,6 +78,17 @@ if (/GC_AUTH_PUBLIC_KEYS:/.test(runnerEnv) && !/GC_SIGNING_KEY/.test(runnerEnv))
 else bad('the runner is given public keys and no private one', 'a runner that can sign is a runner that can authorise itself');
 if (/GC_SIGNING_KEY:/.test(controlEnv)) ok('and the control plane is given the private key');
 else bad('and the control plane is given the private key');
+// Turnstile: the secret is the control plane's alone; the public site key
+// reaches both, because the runner's CSP has to admit the widget's host
+// exactly when the control plane will ask for the widget.
+if (/GC_TURNSTILE_SECRET:/.test(controlEnv) && !/GC_TURNSTILE_SECRET/.test(runnerEnv)) ok('the Turnstile secret reaches the control plane only');
+else bad('the Turnstile secret reaches the control plane only');
+if (/GC_TURNSTILE_SITE_KEY:/.test(controlEnv) && /GC_TURNSTILE_SITE_KEY:/.test(runnerEnv)) ok('and the site key reaches both', 'one .env.prod line, two readers');
+else bad('and the site key reaches both', 'the CSP and the page would disagree about the widget');
+if (/GC_SIGNUP_MODE: \$\{GC_SIGNUP_MODE:-invite\}/.test(controlEnv)) ok('sign-up is by invitation unless .env.prod says otherwise');
+else bad('sign-up is by invitation unless .env.prod says otherwise', 'an open sign-up page on a public host by default');
+if (/probe \/_allauth\/browser\/v1\/auth\/session +401/.test(deploy)) ok('the smoke check reaches allauth through the edge');
+else bad('the smoke check reaches allauth through the edge', 'a mis-routed /_allauth/ would deploy green with no sign-in');
 if (!/GC_AUTH_SECRET/.test(compose)) ok('and GC_AUTH_SECRET is gone from compose', 'the runner refuses to boot with it');
 else bad('and GC_AUTH_SECRET is gone from compose', 'the runner refuses to boot with it present');
 if (/GC_AUTH_SECRET=/.test(deploy) && /Remove the line/.test(deploy)) ok('and the deploy refuses a .env.prod that still sets it');

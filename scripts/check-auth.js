@@ -35,6 +35,7 @@ import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { verify, bearer, parseKeys, MAX_LIFETIME_S } from '../auth.js';
 import { isPrivateAddress, blockedName, blocked } from '../reach.js';
+import { csp, TURNSTILE_HOST } from '../mode.js';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -181,6 +182,27 @@ const HEADERS = [['Bearer abc', 'abc'], ['bearer abc', 'abc'], ['Bearer  abc', '
 const wrong = HEADERS.filter(([h, want]) => bearer(h) !== want);
 if (!wrong.length) ok('Authorization headers are read correctly', `${HEADERS.length} shapes`);
 else bad('Authorization headers are read correctly', JSON.stringify(wrong));
+
+// ---------------------------------------------------------------------------
+console.log('\n— the policy the UI is served under ————————————————————');
+
+/**
+ * The CSP is built from the mode (mode.js). Turnstile is the one thing that
+ * widens it, and only when the control plane will actually ask for the
+ * widget: a site key nobody set must leave script-src at 'self', and a set
+ * one must admit exactly Cloudflare's host and no other.
+ */
+const plainCsp = csp({ authOrigin: '', turnstile: false });
+if (/default-src 'self'/.test(plainCsp) && !/script-src/.test(plainCsp) && !/cloudflare/.test(plainCsp)) ok('without Turnstile, script-src is default-src \'self\'', 'no third-party host');
+else bad('without Turnstile, script-src is default-src \'self\'', plainCsp);
+const withTurnstile = csp({ authOrigin: '', turnstile: true });
+if (withTurnstile.includes(`script-src 'self' ${TURNSTILE_HOST}`) && withTurnstile.includes(`frame-src ${TURNSTILE_HOST}`) && /frame-ancestors 'none'/.test(withTurnstile)) {
+  ok('with GC_TURNSTILE_SITE_KEY the widget\'s host is admitted', 'script-src and frame-src, nothing else');
+} else bad('with GC_TURNSTILE_SITE_KEY the widget\'s host is admitted', withTurnstile);
+if (!/unsafe-inline'[^;]*script|script-src[^;]*unsafe-inline/.test(withTurnstile)) ok('and inline script stays refused');
+else bad('and inline script stays refused', withTurnstile);
+if (csp({ authOrigin: 'http://localhost:8000', turnstile: false }).includes('connect-src \'self\' wss: https: http://localhost:8000')) ok('a laptop control plane joins connect-src only', 'GC_AUTH_ORIGIN');
+else bad('a laptop control plane joins connect-src only', csp({ authOrigin: 'http://localhost:8000', turnstile: false }));
 
 // ---------------------------------------------------------------------------
 console.log('\n— Python signs it, Node checks it —————————————————————');

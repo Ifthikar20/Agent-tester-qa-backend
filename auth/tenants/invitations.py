@@ -7,16 +7,23 @@ an inviter never grants a role above their own, and only an owner grants
 so an admin account that is taken over cannot mint another admin, and the
 set of people who can manage an organisation grows only by an owner's hand.
 
-Acceptance is by a signed-in user whose address is the one invited. The
-invitation therefore never creates an account or a session — it only turns
-an existing, verified identity into a membership [credentials-6]. Every
-refusal names its reason in the audit log and says something uniform to the
-client, because "no such invitation" versus "wrong email" is a way to check
-which addresses were invited.
+Acceptance is by a signed-in user whose address is the one invited — either
+presenting the token (an existing account, POST /auth/invitations/accept) or
+by verifying that address at sign-up, at which moment every live invitation
+bound to it is consumed (accept_pending, called from the email_confirmed
+receiver in accounts.events). The invitation therefore never creates an
+account or a session — it only turns an existing, verified identity into a
+membership [credentials-6]. Every refusal names its reason in the audit log
+and says something uniform to the client, because "no such invitation"
+versus "wrong email" is a way to check which addresses were invited.
+
+The token is mailed to the invited address, once, at issue; it appears in
+no response. The link it carries is the SPA's /app/invite route.
 """
 from datetime import timedelta
 
 from django.apps import apps
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -50,11 +57,10 @@ def email_verified(user):
     """
     Whether the address an invitation is bound to has been proven.
 
-    allauth's EmailAddress table is the proof once the accounts flow installs
-    it; until then there is no sign-up path, every account was made by an
-    operator, and the address on the row is the operator's word. The lookup
-    is by app registry rather than import so this module does not break the
-    settings profile that has no allauth in it.
+    allauth's EmailAddress table is the proof: a sign-up's code, or an
+    operator's word (adduser marks the row verified). The lookup is by app
+    registry rather than import so this module does not depend on allauth
+    being installed to import.
     """
     if apps.is_installed('allauth.account'):
         EmailAddress = apps.get_model('account', 'EmailAddress')
@@ -81,11 +87,12 @@ def _check_seats(org):
 
 def issue(inviter, email, role, request=None):
     """
-    A new invitation to the inviter's organisation. Returns (invitation, raw token).
+    A new invitation to the inviter's organisation, mailed to `email`.
+    Returns the invitation row.
 
-    The raw token exists only in the return value: the caller shows it once
-    (or, when the accounts flow adds mail, sends it once) and it is never
-    recoverable from the row.
+    The raw token exists in the mail and nowhere else: it is not returned,
+    not in the row (only its hash), and not recoverable afterwards. An
+    inviter who needs to send it again revokes and issues a new one.
     """
     org = inviter.organization
     email = (email or '').strip()
@@ -100,9 +107,25 @@ def issue(inviter, email, role, request=None):
         organization=org, email=email, role=role, token_hash=hash_token(raw), invited_by=inviter.user,
         expires_at=timezone.now() + timedelta(days=Invitation.LIFETIME_DAYS),
     )
+    mail(invitation, raw, request)
     record(AuthEvent.Kind.INVITATION_SENT, request, user=inviter.user,
            org=org.slug, role=role, invitee=email, invitation=invitation.pk)
-    return invitation, raw
+    return invitation
+
+
+def mail(invitation, raw, request=None):
+    """The one place the raw token is written down: the invitee's mailbox."""
+    from accounts import mailer
+    app = settings.GC_APP_URL
+    mailer.send('tenants/email/invitation', invitation.email, {
+        'email': invitation.email,
+        'org_name': invitation.organization.name,
+        'role': invitation.role,
+        'inviter': getattr(invitation.invited_by, 'email', 'An administrator'),
+        'accept_url': f'{app}/invite?token={raw}',
+        'signup_url': f'{app}/signup',
+        'days': Invitation.LIFETIME_DAYS,
+    })
 
 
 def accept(raw, user, request=None):
@@ -113,8 +136,11 @@ def accept(raw, user, request=None):
     the refusal to the log with the same reason — the log is the only place
     the reason goes.
     """
+    found = Invitation.by_token(raw)
     try:
-        membership = _accept(raw, user)
+        if found is None:
+            raise Refused('no such invitation')
+        membership = _consume(found.pk, user)
     except Refused as err:
         record(AuthEvent.Kind.INVITATION_REFUSED, request, user=user, reason=err.reason)
         raise
@@ -123,15 +149,43 @@ def accept(raw, user, request=None):
     return membership
 
 
-def _accept(raw, user):
-    found = Invitation.by_token(raw)
-    if found is None:
-        raise Refused('no such invitation')
+def accept_pending(user, request=None, email=None):
+    """
+    Every live invitation bound to `email` (the user's own address by
+    default) becomes a membership. Called when that address has just been
+    verified: this is the sign-up half of [credentials-6] — the invitation
+    is consumed at verification and not a moment sooner. Returns the
+    memberships made or confirmed; a refusal (a seat gone since issue) is
+    logged and skipped rather than raised, because the verification that
+    called this has already succeeded and must not be undone by a plan.
+    """
+    email = (email or user.email or '').strip()
+    made = []
+    live = Invitation.objects.live().filter(email__iexact=email).order_by('created_at')
+    for invitation in live:
+        try:
+            membership = _consume(invitation.pk, user)
+        except Refused as err:
+            record(AuthEvent.Kind.INVITATION_REFUSED, request, user=user, reason=err.reason, invitation=invitation.pk)
+            continue
+        record(AuthEvent.Kind.INVITATION_ACCEPTED, request, user=user,
+               org=membership.organization.slug, role=membership.role, at_verification=True)
+        made.append(membership)
+    return made
+
+
+def _consume(pk, user):
     with transaction.atomic():
         # Locked for the duration: two acceptances of one token in the same
         # instant must produce one membership and one refusal, not two rows.
-        invitation = Invitation.objects.select_for_update().select_related('organization', 'organization__plan').get(pk=found.pk)
+        invitation = Invitation.objects.select_for_update().select_related('organization', 'organization__plan').get(pk=pk)
         if invitation.accepted_at:
+            # The same person presenting a token they already used — the
+            # mailed link opened after verification consumed it — is a
+            # double click, not an attack, and gets the membership it made.
+            existing = Membership.objects.filter(organization=invitation.organization, user=user).first()
+            if invitation.accepted_by_id == user.pk and existing is not None:
+                return existing
             raise Refused('already used')
         if invitation.revoked_at:
             raise Refused('revoked')

@@ -5,29 +5,23 @@ Written by receivers on Django's own auth signals, so the assertion is made
 through the real endpoint: a view that signs someone in without a row here
 would be a view that bypassed the framework, and there is not one.
 """
-import json
-
 from django.contrib.auth import get_user_model
-from django.test import Client, RequestFactory, TestCase, override_settings
+from django.test import RequestFactory, TestCase, override_settings
 
 from ..events import client_ip
 from ..models import AuthEvent
+from .support import PASSWORD, Api, make_user
 
 User = get_user_model()
-PASSWORD = 'a-long-test-password'
 
 
 class AuthEventTests(TestCase):
     def setUp(self):
-        self.user = User.objects.create_user(email='qa@example.com', password=PASSWORD)
-        self.c = Client(enforce_csrf_checks=True, HTTP_USER_AGENT='check/1.0')
-
-    def post(self, path, body=None):
-        tok = self.c.get('/auth/csrf').json()['csrfToken']
-        return self.c.post(path, data=json.dumps(body or {}), content_type='application/json', HTTP_X_CSRFTOKEN=tok)
+        self.user = make_user('qa@example.com')
+        self.api = Api(HTTP_USER_AGENT='check/1.0')
 
     def test_a_sign_in_is_recorded_with_who_and_from_where(self):
-        self.assertEqual(self.post('/auth/login', {'email': 'qa@example.com', 'password': PASSWORD}).status_code, 200)
+        self.api.login('qa@example.com')
         ev = AuthEvent.objects.get(kind=AuthEvent.Kind.LOGIN)
         self.assertEqual(ev.user, self.user)
         self.assertEqual(ev.email, 'qa@example.com')
@@ -35,20 +29,20 @@ class AuthEventTests(TestCase):
         self.assertEqual(ev.user_agent, 'check/1.0')
 
     def test_a_refused_sign_in_is_recorded_as_typed_with_no_user(self):
-        self.assertEqual(self.post('/auth/login', {'email': 'nobody@example.com', 'password': PASSWORD}).status_code, 401)
+        self.assertEqual(self.api.try_login('nobody@example.com', PASSWORD).status_code, 400)
         ev = AuthEvent.objects.get(kind=AuthEvent.Kind.LOGIN_FAILED)
         self.assertIsNone(ev.user)
         self.assertEqual(ev.email, 'nobody@example.com')
         self.assertEqual(ev.ip, '127.0.0.1')
 
     def test_a_wrong_password_against_a_real_account_is_recorded_too(self):
-        self.post('/auth/login', {'email': 'qa@example.com', 'password': 'not-it-and-long-enough'})
+        self.api.try_login('qa@example.com', 'not-it-and-long-enough')
         self.assertEqual(AuthEvent.objects.filter(kind=AuthEvent.Kind.LOGIN_FAILED, email='qa@example.com').count(), 1)
         self.assertFalse(AuthEvent.objects.filter(kind=AuthEvent.Kind.LOGIN).exists())
 
     def test_a_sign_out_is_recorded(self):
-        self.post('/auth/login', {'email': 'qa@example.com', 'password': PASSWORD})
-        self.assertEqual(self.post('/auth/logout').status_code, 200)
+        self.api.login('qa@example.com')
+        self.api.logout()
         self.assertEqual(AuthEvent.objects.get(kind=AuthEvent.Kind.LOGOUT).user, self.user)
 
     def test_the_log_cannot_be_edited_in_the_admin(self):
@@ -92,8 +86,6 @@ class ClientIpTests(TestCase):
 
     @override_settings(ALLAUTH_TRUSTED_PROXY_COUNT=1)
     def test_the_recorded_address_is_the_edge_s_not_the_spoof(self):
-        c = Client(enforce_csrf_checks=True, HTTP_X_FORWARDED_FOR='1.2.3.4, 198.51.100.7')
-        tok = c.get('/auth/csrf').json()['csrfToken']
-        c.post('/auth/login', data=json.dumps({'email': 'x@example.com', 'password': 'a-long-test-password'}),
-               content_type='application/json', HTTP_X_CSRFTOKEN=tok)
+        api = Api(HTTP_X_FORWARDED_FOR='1.2.3.4, 198.51.100.7')
+        api.try_login('x@example.com', 'a-long-test-password')
         self.assertEqual(AuthEvent.objects.get(kind=AuthEvent.Kind.LOGIN_FAILED).ip, '198.51.100.7')
