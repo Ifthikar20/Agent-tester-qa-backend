@@ -1,5 +1,12 @@
 # One origin in front of two services.
 #
+# This is a TEMPLATE, not a config. The nginx image runs envsubst over
+# /etc/nginx/templates/*.template at boot, and NGINX_ENVSUBST_FILTER (set in
+# docker-compose.prod.yml) restricts that pass to GC_ADMIN_PATH alone. The
+# filter is load-bearing: an unfiltered envsubst would also eat $host,
+# $remote_addr, $proxy_add_x_forwarded_for and $http_upgrade, and the socket
+# would 400 with nothing saying why.
+#
 # This is what makes the deployment simple: the UI, the API, the socket and the
 # login all answer on the same scheme://host:port, so there is no CORS
 # preflight, no cross-site cookie, and no third URL to keep in sync. The two
@@ -18,13 +25,41 @@ server {
     client_max_body_size 8m;
 
     # ---- the control plane -------------------------------------------------
-    location ~ ^/(auth|admin|static)/ {
+    #
+    # /static/ is here for the admin's own CSS. `admin` is deliberately NOT in
+    # this list any more — see the two locations below.
+    location ~ ^/(auth|static)/ {
         proxy_pass         http://control;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header   X-Forwarded-Proto $scheme;
     }
+
+    # ---- the admin, somewhere you would have to be told about ---------------
+    #
+    # Django serves the admin at GC_ADMIN_PATH (auth/config/settings.py) and
+    # nginx proxies only that path. On a box with port 80 open to the internet
+    # and no TLS, /admin/ is a login form anyone can find and sit in front of:
+    # there is no lockout and no django-axes in auth/requirements.txt.
+    #
+    # This is obscurity, not a control, and it is worth being plain about which
+    # one it is. It costs nothing, it takes the box out of every scan that walks
+    # the well-known paths, and it does not survive the path appearing in a
+    # screenshot, a referrer header or a shared browser history. The control is
+    # TLS and a lockout, and neither is here yet.
+    location ^~ /${GC_ADMIN_PATH}/ {
+        proxy_pass         http://control;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+
+    # ^~ rather than a prefix match, so the trailing-slash-less /admin cannot
+    # sail past into the catch-all and reach the runner. 404 rather than 403:
+    # a 403 confirms there is something here to find.
+    location ^~ /admin { return 404; }
 
     # ---- the extension hand-off, closed ------------------------------------
     #

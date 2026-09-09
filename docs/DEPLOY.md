@@ -137,12 +137,15 @@ the memory maths above does not work.
 ## What has to persist
 
 Everything ghostclick remembers is gitignored, which is correct for a laptop
-and a trap for a container. Two volumes, or every deploy silently resets:
+and a trap for a container. Three named volumes, or every deploy silently
+resets. These are Docker volume names and container paths — nothing here lives
+at a path on the host you can `cd` into:
 
-| Path | Holds | Lost without a volume |
-|---|---|---|
-| `/opt/ghostclick/.ghostclick` | run history, the **origin allowlist**, the vault, the shared auth secret | Every allowed origin. Every run. And a regenerated secret, which logs everyone out and invalidates in-flight tokens. |
-| `/opt/ghostclick/auth-db` | the accounts database | Every account. You would create a superuser on every deploy. |
+| Volume | Mounted at | Holds | Lost without it |
+|---|---|---|---|
+| `ghostclick-state` | `runner:/app/.ghostclick` | run history, the **origin allowlist**, the vault, the shared auth secret | Every allowed origin. Every run. And a regenerated secret, which logs everyone out and invalidates in-flight tokens. |
+| `control-db` | `control:/app/db` | the accounts database | Every account. You would create a superuser on every deploy. |
+| `control-static` | `control:/app/staticfiles` | the admin's collected CSS, read-only into nginx | An unstyled admin. Cosmetic, and the reason the mountpoint has to exist in `auth/Dockerfile` before its `USER` line — a volume over a missing directory arrives root-owned and `collectstatic` then fails as `app`, which ends the deploy. |
 
 Suites are the happy exception: `suites/*.json` is **in git**, so cases deploy
 with the code and need no volume. That is the point of storing them there.
@@ -300,14 +303,19 @@ screencast, the socket and the gate together.
 
 If all eight work, the deployment is good.
 
-### 4 · Optional: the suite, on the host
+### 4 · The suite — on your laptop, not in the container
 
 ```bash
-./scripts/gc exec runner npm run check:all
+npm run check:all
 ```
 
-20 checks, and slow — it drives real browsers. Worth doing once to prove the
-host is sane, not on every deploy.
+21 checks, and slow: it drives real browsers.
+
+Do **not** try to run this inside the runner container. An earlier version of
+this guide told you to, and that instruction was wrong twice over: the image
+installs with `npm ci --omit=dev`, so the tooling the checks need is not there,
+and `.dockerignore` now excludes `.git/` and `docs/` so two of the checks have
+nothing to read. The container is built to run the app, not to test it.
 
 ---
 
@@ -324,7 +332,7 @@ is not is worse than one that admits the gap.
   a comment, it is `${GC_AUTH_SECRET:?...}` and it fails the command.
 - Django's settings are valid under `DEBUG=0` with exactly the environment the
   compose file supplies: `manage.py check` → *no issues*.
-- `npm run check:all` is green on this commit — 20 checks, exit 0 — including
+- `npm run check:all` is green on this commit — 21 checks, exit 0 — including
   the assertion that `http://169.254.169.254/latest/meta-data/` is refused.
 
 **Not verified, because there is no Docker daemon in the environment I built
@@ -388,6 +396,43 @@ aws ec2 modify-instance-metadata-options --instance-id <id> \
 
 ---
 
+## Who can do what, and where the admin lives
+
+Two things change the moment port 80 is open to more than your own address.
+
+**The Django admin is not at `/admin/`.** It answers at `GC_ADMIN_PATH`, a
+random token generated on the box by `scripts/aws-up.sh` and printed once when
+it finishes; `/admin/` returns 404. Be plain about what that buys: it is
+obscurity, not a control. There is no lockout and no `django-axes` here, so on
+an open port `/admin/` would be a login form anyone could sit in front of.
+Moving it takes the box out of every scan that walks the well-known paths, and
+it does not survive the path appearing in a screenshot, a referrer header or a
+shared browser history. The real controls are TLS and a lockout, and neither is
+here yet.
+
+To find it again: `EC2_HOST=<ip> bash scripts/deploy.sh inspect-env` prints key
+names only, so read the value on the box with
+`ssh … 'grep GC_ADMIN_PATH /opt/ghostclick/.env.prod'`.
+
+**A signed-in account can run tests. Only a staff account can widen the origin
+allowlist.** Until now the executor verified the token and then never read its
+claims, which meant every account that could sign in could also add a place the
+browser was allowed to go — and the allowlist is the gate the rest of the design
+rests on. The control plane now puts `admin` in the token from
+`user.is_staff`, and `POST`/`DELETE /api/origins` require it.
+
+The account you create with `createsuperuser` is staff, so nothing about your
+own use changes. An account made through the admin without the staff flag can
+drive the browser and run suites but will get a 403 with an explanation if it
+tries to add an origin. Tokens last 600 seconds, so flipping the flag takes
+effect within ten minutes.
+
+This is the whole of the authorisation model. It is one boundary, not a role
+system: everything else a signed-in account can do, any signed-in account can
+do. Creating an account is still close to handing someone the box.
+
+---
+
 ## Common operations
 
 From `/opt/ghostclick` on the host.
@@ -417,7 +462,7 @@ re-runs the same five smoke checks. Do not roll back by hand with
 `git checkout <sha>`: that leaves a detached HEAD, and the next deploy's branch
 lookup then resolves to the literal string `HEAD`.
 
-Both volumes survive a rollback. There are no destructive migrations in this
+All three volumes survive a rollback. There are no destructive migrations in this
 app today — the control plane's schema is four columns — but that stops being
 true the moment it stores anything real.
 
@@ -437,16 +482,16 @@ true the moment it stores anything real.
   balancer would give two people two different runners and a screencast that
   follows whichever they happened to land on. The fix is a runner pool with a
   session-affinity router, and it is a real project.
-- **Backups.** The two volumes are on one EBS volume with no snapshot
+- **Backups.** All three volumes are on one EBS volume with no snapshot
   schedule. Fine for a demo; take an EBS snapshot before anything you care about.
 
 ## Pre-deploy checklist
 
-- [ ] `npm run check:all` green locally — exit code 0, 20 checks
+- [ ] `npm run check:all` green locally — exit code 0, 21 checks
 - [ ] A **new** t3.medium instance, not the Cansee host
 - [ ] Launched with the `cansee-deploy` key pair
 - [ ] Security group: 22 and 80 to **your IP only**
 - [ ] IMDSv2 required
 - [ ] `.env.prod` has a real `GC_AUTH_SECRET` (48 random bytes, not a word)
 - [ ] `PUBLIC_URL` matches how you will actually reach the box
-- [ ] Both volumes declared in the compose file before the first `up`
+- [ ] All three volumes declared in the compose file before the first `up`

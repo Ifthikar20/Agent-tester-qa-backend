@@ -9,9 +9,22 @@
 # host, nothing to leak, and no reason to open port 22 to GitHub's ranges.
 name: checks
 
+# PARKED, on purpose, and not yet correct.
+#
+# Two things are wrong with it and both need a change I have not made yet:
+#
+#   1. A `container:` job runs its steps as root, and Chromium refuses to start
+#      as root without --no-sandbox — which Dockerfile:39-41 explains is exactly
+#      the trade this project will not make. It needs `options: --user pwuser`
+#      and a chowned workspace, or a plain runner with `playwright install`.
+#   2. Most of the twenty-one checks talk to a running server (scripts/check.js
+#      opens ws://localhost:3000). Nothing here starts one.
+#
+# A workflow that is red on every push teaches people to ignore red, so it runs
+# on request only until those two are fixed. `workflow_dispatch` still lets you
+# run it from the Actions tab to watch it fail honestly.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

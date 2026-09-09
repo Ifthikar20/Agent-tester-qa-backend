@@ -32,6 +32,8 @@ const compose = read('../docker/docker-compose.prod.yml');
 const deploy  = read('../scripts/deploy.sh');
 const doc     = read('../docs/DEPLOY.md');
 const dockerignore = read('../.dockerignore');
+const nginx   = read('../docker/nginx.conf.template');
+const compose2 = compose;   // named for the volume/mountpoint check below
 
 /**
  * 1 · No runbook anywhere may show command substitution as the CONTENT of an
@@ -75,14 +77,24 @@ else bad('and the deploy refuses them', 'a copied example file would deploy');
 
 /**
  * 4 · Readiness must prove the BROWSER, not the port. express starts listening
- *     ~100 lines before chromium.launch, so a loop polling the UI exits on its
- *     first iteration against a runner whose browser failed to start.
+ *     ~130 lines before chromium.launch, so a loop polling the UI exits on its
+ *     first iteration while there is still no browser.
+ *
+ *     Being precise about the failure this does and does not catch: a launch
+ *     that THROWS ends the process — it is a top-level await with no try/catch
+ *     — and `restart: unless-stopped` crash-loops it into a 502 that the old
+ *     wait would have caught. The gap is a launch that HANGS, and a runner that
+ *     is up but browserless. Those are the ones that used to deploy green.
  */
 const server = read('../server.js');
 if (/app\.get\('\/healthz'/.test(server)) ok('/healthz exists');
 else bad('/healthz exists');
-if (server.indexOf("app.get('/healthz'") < server.indexOf("app.use('/api'")) ok('and is outside the /api gate', 'a deploy can read it with no token');
-else bad('and is outside the /api gate');
+// NOT an ordering assertion. /healthz is not under /api, so app.use('/api', …)
+// never sees it whatever the order — checking that would pass forever without
+// meaning anything. What matters is that it reports 503 while the browser is
+// still starting, which is the entire reason a deploy can wait on it.
+if (/browserReady \? 200 : 503/.test(server)) ok('and is 503 until the browser exists', 'so waiting on it means something');
+else bad('and is 503 until the browser exists', 'a readiness probe that is always 200 proves nothing');
 if (/browserReady = true/.test(server)) ok('and only says ok once there is a page');
 else bad('and only says ok once there is a page');
 if (/healthz/.test(deploy) && /"browser":true/.test(deploy)) ok('and the deploy waits on browser:true', 'not on the UI answering');
@@ -138,6 +150,82 @@ if (!/git checkout <previous-good-sha>/.test(doc)) ok('the rollback recipe does 
 else bad('the rollback recipe does not detach HEAD', 'it breaks the NEXT deploy');
 if (/rollback\)/.test(deploy) && /last_deploy_prior/.test(deploy)) ok('and rollback is a subcommand', 'with the sha recorded before the deploy');
 else bad('and rollback is a subcommand', 'recovery is prose');
+
+/**
+ * 10 · The class of bug that would have killed the first deploy.
+ *
+ *      auth/Dockerfile created /app/db and not /app/staticfiles, while compose
+ *      mounted control-static there. Docker creates a missing mountpoint as
+ *      ROOT; the container runs as a non-root user; collectstatic fails EACCES;
+ *      `set -e` ends the deploy. This asserts the general rule rather than that
+ *      one path, because the next volume added will have the same problem.
+ */
+const dockerfiles = { runner: read('../Dockerfile'), control: read('../auth/Dockerfile') };
+const namedVolumes = new Set((compose2.match(/^volumes:\n(?:\s{2}\S+:.*\n?)+/m)?.[0] ?? '')
+  .split('\n').slice(1).map((l) => l.trim().replace(/:$/, '')).filter(Boolean));
+for (const [svc, body] of Object.entries({
+  runner:  compose2.slice(compose2.indexOf('  runner:'),  compose2.indexOf('  control:')),
+  control: compose2.slice(compose2.indexOf('  control:'), compose2.indexOf('  nginx:')),
+})) {
+  const df = dockerfiles[svc];
+  const userAt = df.search(/^USER /m);
+  for (const m of body.matchAll(/^\s+- ([a-z-]+):(\/\S+?)(?::ro)?$/gm)) {
+    const [, vol, path] = m;
+    if (!namedVolumes.has(vol)) continue;
+    const made = [...df.matchAll(/mkdir -p ([^&\n]+)/g)].some((mk) => mk[1].split(/\s+/).includes(path));
+    const madeFirst = made && df.search(new RegExp(`mkdir -p [^&\n]*${path.replace(/\//g, '\\/')}`)) < userAt;
+    if (userAt === -1 || madeFirst) ok(`${svc} creates ${path} before USER`, vol);
+    else bad(`${svc} creates ${path} before USER`, `${vol} would mount root-owned and the first write fails`);
+  }
+}
+
+/**
+ * 11 · The admin is not where a scanner looks for it.
+ */
+if (!/\^\/\(auth\|admin\|static\)\//.test(nginx)) ok('nginx does not proxy /admin/ to Django');
+else bad('nginx does not proxy /admin/ to Django', 'a login form with no lockout, on an open port');
+if (/location \^~ \/admin \{ return 404/.test(nginx)) ok('and /admin closes with a 404', 'not a 403, which confirms there is something there');
+else bad('and /admin closes with a 404');
+if (/\$\{GC_ADMIN_PATH\}/.test(nginx) && /NGINX_ENVSUBST_FILTER/.test(compose2)) ok('the real path comes from the environment', 'envsubst, filtered to one variable');
+else bad('the real path comes from the environment', 'an unfiltered envsubst also eats $host and $http_upgrade');
+if (/GC_ADMIN_PATH/.test(deploy) && /that is the path this exists to move away from/.test(deploy)) ok("and the deploy refuses 'admin'");
+else bad("and the deploy refuses 'admin'");
+
+/**
+ * 12 · Authentication is not authorisation. The token's claims have to be READ
+ *      somewhere, or every account that can sign in can widen the allowlist —
+ *      and the allowlist is the gate the rest of the design rests on.
+ */
+if (/req\.user\?\.admin === true/.test(server)) ok('the allowlist reads a claim from the token');
+else bad('the allowlist reads a claim from the token', 'any signed-in account could add an origin');
+for (const route of ["app.post('/api/origins', staffOnly", "app.delete('/api/origins', staffOnly"]) {
+  if (server.includes(route)) ok(`${route.slice(4, 30)}… is gated`);
+  else bad(`${route.slice(4, 30)}… is gated`);
+}
+if (/'admin': bool\(admin\)/.test(read('../auth/accounts/tokens.py'))) ok('and the control plane mints it');
+else bad('and the control plane mints it', 'the executor would read a claim nobody sets');
+
+/**
+ * 13 · At least one probe must prove ACCESS. Everything else in the smoke table
+ *      asserts a 401, 403 or 404 — a deploy where nobody can sign in passes all
+ *      of them.
+ */
+if (/csrftoken/.test(deploy) && /sign-in can actually start/.test(deploy)) ok('the smoke table proves sign-in can start');
+else bad('the smoke table proves sign-in can start', 'a login broken by CSRF or a missing key deploys green');
+if (/SMOKE_EMAIL/.test(deploy) && /SKIPPED/.test(deploy)) ok('and the full round trip is offered', 'skipped loudly, never silently');
+else bad('and the full round trip is offered');
+if (/showmigrations --plan/.test(deploy)) ok('and the schema is asserted, not assumed');
+else bad('and the schema is asserted, not assumed', '"migrate exited 0" is a different claim');
+
+/**
+ * 14 · The runbook and the compose file must agree about what persists.
+ */
+for (const vol of namedVolumes) {
+  if (doc.includes(vol)) ok(`DEPLOY.md knows about ${vol}`);
+  else bad(`DEPLOY.md knows about ${vol}`, 'the persistence table is wrong about what survives');
+}
+if (!/auth-db/.test(doc)) ok('and names no volume that does not exist');
+else bad('and names no volume that does not exist', 'auth-db appears nowhere in the repo');
 
 console.log(failures
   ? `\n  ${failures} FAILED\n`

@@ -70,6 +70,7 @@ services:
       GC_AUTH_SECRET: ${GC_AUTH_SECRET:?set GC_AUTH_SECRET in .env.prod}
       GC_WEB_ORIGIN: ${PUBLIC_URL:?set PUBLIC_URL in .env.prod}
       GC_TOKEN_TTL: ${GC_TOKEN_TTL:-600}
+      GC_ADMIN_PATH: ${GC_ADMIN_PATH:?set GC_ADMIN_PATH in .env.prod}
     volumes:
       - control-db:/app/db
       - control-static:/app/staticfiles
@@ -92,6 +93,12 @@ services:
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
+    environment:
+      GC_ADMIN_PATH: ${GC_ADMIN_PATH:?set GC_ADMIN_PATH in .env.prod}
+      # Substitute THIS AND NOTHING ELSE. Without the filter, envsubst also
+      # replaces $host, $remote_addr, $proxy_add_x_forwarded_for and
+      # $http_upgrade with empty strings, and the WebSocket 400s silently.
+      NGINX_ENVSUBST_FILTER: GC_ADMIN_PATH
     # condition matters: nginx resolves `runner` and `control` once, at config
     # load. Starting before they exist makes it exit, and `restart` then papers
     # over it with a crash loop that reads as a broken config.
@@ -101,7 +108,9 @@ services:
     ports:
       - "80:80"
     volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # A template, not a config: the image runs envsubst over
+      # /etc/nginx/templates/*.template at boot and writes conf.d/default.conf.
+      - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
       # Django's admin CSS, collected by the deploy script.
       - control-static:/app/staticfiles:ro
     deploy:

@@ -112,6 +112,7 @@ def executor_token(request):
             subject=request.user.pk,
             email=request.user.email,
             scope='run',
+            admin=request.user.is_staff,
             secret=settings.GC_AUTH_SECRET,
             ttl=settings.GC_TOKEN_TTL,
         )

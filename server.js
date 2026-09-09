@@ -329,15 +329,43 @@ app.get('/api/state', (_req, res) => res.json({
   paceMs: PACE,
 }));
 
+/**
+ * Who may change the allowlist.
+ *
+ * Until now the token was verified and its claims were then never read — the
+ * one `req.user` in this file was the line that assigned it. That is
+ * authentication without authorisation: every account that could sign in could
+ * also add an origin, and the allowlist is the gate the rest of this design
+ * rests on. A gate anyone signed in can widen is a log, not a gate.
+ *
+ * So the line is drawn here and nowhere else. Running a suite stays open to
+ * every account, because that is the product. Adding a place this browser is
+ * allowed to go is a staff decision, and the control plane says which kind of
+ * account this is in the token itself (auth/accounts/tokens.py).
+ *
+ * When AUTH_SECRET is unset there is no token to read a claim from, and the
+ * runner has already said at boot that it is open — a single-user laptop, where
+ * demanding a staff claim nobody can obtain would just break the feature.
+ */
+const staffOnly = (req, res, next) => {
+  if (!AUTH_SECRET) return next();
+  if (req.user?.admin === true) return next();
+  return res.status(403).json({
+    ok: false,
+    error: 'Changing the origin allowlist needs a staff account. '
+         + 'This one can run tests but not choose where they may go.',
+  });
+};
+
 app.get('/api/origins', (_req, res) => res.json({ origins: origins.list() }));
-app.post('/api/origins', (req, res) => {
+app.post('/api/origins', staffOnly, (req, res) => {
   try {
     const r = origins.add(req.body?.origin);
     emit({ t: 'origins', origins: origins.list() });
     sendOk(res, { ...r, origins: origins.list() });
   } catch (err) { fail(res, err); }
 });
-app.delete('/api/origins', (req, res) => {
+app.delete('/api/origins', staffOnly, (req, res) => {
   try { origins.remove(req.body?.origin); sendOk(res, { origins: origins.list() }); }
   catch (err) { fail(res, err); }
 });

@@ -127,6 +127,16 @@ grep -qE '^PUBLIC_URL=https?://.+' .env.prod || {
 grep -qE '^DJANGO_SECRET_KEY=.{32,}' .env.prod || {
   echo "  .env.prod has no DJANGO_SECRET_KEY of at least 32 characters."; exit 1; }
 
+# The admin path is the only thing standing in front of a login form on an
+# internet-facing port with no lockout. 'admin' defeats the entire point, and a
+# slash in it produces an nginx location that silently never matches.
+adminpath=\$(grep -E '^GC_ADMIN_PATH=' .env.prod | head -1 | cut -d= -f2- | tr -d '\r')
+case "\$adminpath" in
+  ''|CHANGE_ME*) echo "  .env.prod has no GC_ADMIN_PATH. It is where the Django admin answers."; exit 1 ;;
+  admin|admin/)  echo "  GC_ADMIN_PATH is 'admin' — that is the path this exists to move away from."; exit 1 ;;
+  */*)           echo "  GC_ADMIN_PATH must be one path segment with no slashes (got '\$adminpath')."; exit 1 ;;
+esac
+
 ok_disk=\$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
 if [ "\${ok_disk:-99}" -lt 8 ]; then
   echo "  only \${ok_disk}G free — the image build needs room. Pruning."
@@ -168,6 +178,11 @@ $GC up -d --build
 echo "  migrating"
 $GC exec -T control python manage.py migrate --noinput
 $GC exec -T control python manage.py collectstatic --noinput >/dev/null
+
+# "migrate exited 0" and "the schema matches the code" are different claims,
+# and only the second one matters. This is the cheapest way to assert it.
+unapplied=\$($GC exec -T control python manage.py showmigrations --plan | grep -c '^\[ \]' || true)
+[ "\$unapplied" = "0" ] || { echo "  \$unapplied migration(s) did not apply"; exit 1; }
 
 # nginx resolves runner and control once, at config load, and --build just gave
 # them new addresses.
@@ -213,6 +228,52 @@ probe /healthz         200 "the browser is up"
 # bearer gate by design, so an edit that drops the location block is a real
 # regression and must not deploy green.
 probe /api/recording   403 "the extension hand-off is shut" POST
+probe /admin/          404 "the old admin path is gone"
+probe "/\$adminpath/" 302 "the admin answers where it should"
+
+# Everything above asserts the ABSENCE of access, and a deploy where nobody can
+# sign in passes all of it. A PUBLIC_URL that does not match how you reach the
+# box gives a CSRF 403 on login; a control plane without the shared key gives a
+# 503 from NoSigningKey. Neither shows up as a 401 anywhere.
+if curl -s -m 10 -i http://localhost/auth/csrf | grep -qi '^set-cookie:.*csrftoken'; then
+  printf '    %-34s %s\n' "sign-in can actually start" "csrftoken set"
+else
+  printf '    %-34s %s\n' "sign-in can actually start" "NO csrftoken — login will 403"; FAIL=1
+fi
+
+# An empty VITE_AUTH_URL ships an SPA with no sign-in at all, and every probe
+# above still passes. The built bundle is the only place that is visible.
+if curl -s -m 10 http://localhost/app/ | grep -q 'assets/'; then
+  bundle=\$(curl -s -m 10 http://localhost/app/ | grep -o '/app/assets/index-[A-Za-z0-9_-]*\.js' | head -1)
+  if [ -n "\$bundle" ] && curl -s -m 15 "http://localhost\$bundle" | grep -q '/auth/'; then
+    printf '    %-34s %s\n' "the UI knows where to sign in" "VITE_AUTH_URL baked in"
+  else
+    printf '    %-34s %s\n' "the UI knows where to sign in" "NO auth route in the bundle"; FAIL=1
+  fi
+fi
+
+# The whole round trip, when you give it an account to use. Skipped loudly
+# rather than silently, because "no positive check ran" and "the positive check
+# passed" must never look the same.
+if [ -n "\${SMOKE_EMAIL:-}" ] && [ -n "\${SMOKE_PASSWORD:-}" ]; then
+  jar=\$(mktemp)
+  csrf=\$(curl -s -c "\$jar" http://localhost/auth/csrf | grep -o '"csrfToken":"[^"]*"' | cut -d'"' -f4)
+  tok=\$(curl -s -b "\$jar" -c "\$jar" -H "X-CSRFToken: \$csrf" -H 'Content-Type: application/json' \
+          -H "Origin: \$(grep -E '^PUBLIC_URL=' .env.prod | cut -d= -f2-)" \
+          -d "{\"email\":\"\$SMOKE_EMAIL\",\"password\":\"\$SMOKE_PASSWORD\"}" \
+          -o /dev/null -w '%{http_code}' http://localhost/auth/login)
+  if [ "\$tok" = "200" ]; then
+    t=\$(curl -s -b "\$jar" -H "X-CSRFToken: \$csrf" -X POST http://localhost/auth/executor-token | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+    code=\$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer \$t" http://localhost/api/state)
+    if [ "\$code" = "200" ]; then printf '    %-34s %s\n' "a real sign-in reaches the API" "200"
+    else printf '    %-34s %s  WANT 200\n' "a real sign-in reaches the API" "\$code"; FAIL=1; fi
+  else
+    printf '    %-34s %s  WANT 200\n' "a real sign-in reaches the API" "login \$tok"; FAIL=1
+  fi
+  rm -f "\$jar"
+else
+  printf '    %-34s %s\n' "a real sign-in reaches the API" "SKIPPED (set SMOKE_EMAIL/SMOKE_PASSWORD)"
+fi
 
 [ "\$FAIL" = 0 ] || { echo; echo "  smoke checks failed — rolling back is: bash scripts/deploy.sh rollback"; exit 1; }
 REMOTE

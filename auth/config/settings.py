@@ -21,6 +21,8 @@ Environment (see .env.example):
                       minted and /auth/executor-token says so plainly.
   GC_WEB_ORIGIN       where the UI is served from, for CORS and CSRF.
   GC_TOKEN_TTL        seconds an executor token is good for (default 600).
+  GC_ADMIN_PATH       where the admin answers (default 'admin'). Set it to
+                      something unguessable on anything internet-facing.
 """
 from pathlib import Path
 import os
@@ -150,3 +152,16 @@ SESSION_COOKIE_HTTPONLY = True
 # minted, and the endpoint says exactly that.
 GC_AUTH_SECRET = os.environ.get('GC_AUTH_SECRET', '')
 GC_TOKEN_TTL = int(os.environ.get('GC_TOKEN_TTL', '600'))
+
+# Where the Django admin answers.
+#
+# On a box whose port 80 is open to the internet with no TLS, /admin/ is a login
+# form anyone can find and sit in front of — there is no lockout here and no
+# django-axes in requirements.txt. Moving it somewhere unguessable is not a
+# control, it is obscurity, and it is worth having anyway because it costs
+# nothing and removes the box from every scan that walks the well-known paths.
+#
+# Normalised to exactly one trailing slash and no leading one, because Django's
+# path() and nginx's location need the two halves spelled differently and a
+# mismatch is a 404 that looks like a broken deploy.
+GC_ADMIN_PATH = os.environ.get('GC_ADMIN_PATH', 'admin').strip('/') + '/'

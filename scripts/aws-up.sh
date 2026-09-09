@@ -254,7 +254,8 @@ ok "in"
 # script's output or your shell history.
 step "installing docker, cloning, generating secrets, building"
 ok "the first build downloads a Playwright image — expect 5-10 minutes"
-$SSH "REPO_URL='$REPO_URL' BRANCH='$BRANCH' PUBLIC_IP='$IP' bash -s" <<'REMOTE'
+BOOTLOG=$(mktemp)
+$SSH "REPO_URL='$REPO_URL' BRANCH='$BRANCH' PUBLIC_IP='$IP' bash -s" <<'REMOTE' | tee "$BOOTLOG"
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -298,8 +299,13 @@ if [ ! -f .env.prod ]; then
   sed -i "s|^GC_AUTH_SECRET=.*|GC_AUTH_SECRET=$(gen)|"        .env.prod
   sed -i "s|^DJANGO_SECRET_KEY=.*|DJANGO_SECRET_KEY=$(gen)|"  .env.prod
   sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=http://$PUBLIC_IP|"     .env.prod
+  # Not a secret in the same sense as the other two — you have to be able to
+  # type it — but it is the only thing in front of the admin login on a port
+  # open to the internet, so it is generated rather than chosen.
+  sed -i "s|^GC_ADMIN_PATH=.*|GC_ADMIN_PATH=$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')|" .env.prod
   chmod 600 .env.prod
 fi
+ADMIN_PATH=$(grep -E '^GC_ADMIN_PATH=' .env.prod | cut -d= -f2-)
 
 export GC_GIT_SHA=$(git rev-parse --short HEAD)
 sg docker -c './scripts/gc up -d --build'
@@ -314,6 +320,7 @@ for i in $(seq 1 90); do
   [ "$i" = 90 ] && { echo "  the browser never came up:"; sg docker -c './scripts/gc logs --tail=40 runner'; exit 1; }
   sleep 2
 done
+echo "ADMIN_PATH=$ADMIN_PATH"
 REMOTE
 
 # ---- prove it from outside --------------------------------------------------
@@ -329,6 +336,7 @@ probe /api/state     401 "the API is gated"
 probe /auth/csrf     200 "the control plane answers"
 probe /healthz       200 "the browser is up"
 probe /api/recording 403 "the extension hand-off is shut" POST
+probe /admin/        404 "the old admin path is gone"
 [ "$FAIL" = 0 ] || die "the box is up but not healthy — EC2_HOST=$IP PEM=$KEY_FILE bash scripts/deploy.sh logs runner"
 
 step "up at  http://$IP/app/"
@@ -337,6 +345,15 @@ ok "make yourself an account (interactive, so the password is never in a script)
 echo "      ssh -i $KEY_FILE ubuntu@$IP 'cd $REMOTE_DIR && ./scripts/gc exec control python manage.py createsuperuser'"
 echo
 ok "then sign in at http://$IP/app/ from any machine allowed by $HTTP_CIDR"
+echo
+ADMIN_PATH=$(grep -oE 'ADMIN_PATH=[a-f0-9]+' "$BOOTLOG" | tail -1 | cut -d= -f2)
+rm -f "$BOOTLOG"
+if [ -n "$ADMIN_PATH" ]; then
+  ok "the Django admin is at  http://$IP/$ADMIN_PATH/"
+  ok "  /admin/ is a 404 on purpose. That path is the only thing in front of a"
+  ok "  login form on an open port, so treat it like a password: it is in"
+  ok "  .env.prod on the box, and it does not survive a screenshot."
+fi
 echo
 ok "later:  EC2_HOST=$IP PEM=$KEY_FILE bash scripts/deploy.sh          (redeploy)"
 ok "        EC2_HOST=$IP PEM=$KEY_FILE bash scripts/deploy.sh health   (is it up)"

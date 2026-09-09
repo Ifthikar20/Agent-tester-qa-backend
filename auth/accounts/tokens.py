@@ -43,7 +43,7 @@ def _segment(obj) -> str:
     return _b64(json.dumps(obj, separators=(',', ':'), sort_keys=True).encode('utf-8'))
 
 
-def mint(*, subject, email='', scope='run', secret, ttl=600, now=None) -> str:
+def mint(*, subject, email='', scope='run', admin=False, secret, ttl=600, now=None) -> str:
     """
     A signed token for `subject`, good for `ttl` seconds.
 
@@ -61,6 +61,11 @@ def mint(*, subject, email='', scope='run', secret, ttl=600, now=None) -> str:
         'sub': str(subject),
         'email': email,
         'scope': scope,
+        # Who may WIDEN THE ORIGIN ALLOWLIST. Not who may run a test — every
+        # signed-in account may do that. The allowlist is the gate the rest of
+        # the design rests on, so extending it is a staff decision and the
+        # executor has to be told, in the token, which kind of account this is.
+        'admin': bool(admin),
         'iat': issued,
         'exp': issued + int(ttl),
     }
