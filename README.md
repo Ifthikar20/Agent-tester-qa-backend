@@ -758,6 +758,37 @@ It is bound by route name now.
 and a finished step were both `bg-ink text-white`, character for character.
 Current is the accent, done is ink.
 
+**It collapses to a rail, not to nothing.** 64px, holding the icons and the
+toggle. Collapsing to zero would mean the control that brings it back has to
+live somewhere else — a floating button, or a hamburger in the header — and then
+the shell has two nav affordances that must agree with each other. The wordmark
+in the corner is the toggle, which is also the most findable place to put it.
+The width is the only thing that changes: `App.vue` is plain flexbox with a
+`flex-1` main, so nothing has to be kept in sync. Remembered per viewer under
+`gc.nav.collapsed`, the same shape as `gc.pace`.
+
+The rail costs one thing, and it is worth naming: the visible label *is* the
+accessible name in the expanded nav, which is why the icons are `aria-hidden`.
+Take the label away and the row has no name at all, so every item in the rail
+carries an explicit `aria-label` and a `title`.
+
+**Each suite wears its own site's mark.** Every row used to carry the same
+three-bar glyph, so six projects were six identical lines you read rather than
+recognised. The favicon is fetched by the server, cached in `.ghostclick/icons`,
+and served from our own origin — not pointed at from the browser. A sidebar full
+of `<img src="https://thatsite/favicon.ico">` would tell every site in your
+suite list, every time anyone opens the app, that someone is looking at it; and
+it would show a broken image for exactly the internal hosts this tool exists to
+test. A site with no icon gets a monogram on a colour derived from its hostname,
+so it is still distinguishable.
+
+That fetch is the only outbound request this backend makes, which is why
+`icons.js` carries more guard than feature and `check:icons` is mostly about
+refusals — the allowlist by exact membership rather than `origins.has()`, whose
+`'*'` branch would open it; link-local refused ahead of the allowlist rather
+than behind it; redirects never followed off the vetted origin; and the body
+capped while reading, because content-length is a claim by the other end.
+
 The pass/fail chart pair is deliberately unchanged — grey and red separate by
 ΔE 9.4 under deuteranopia and that was measured, not guessed. Repainting the
 chrome is no reason to re-roll it.
