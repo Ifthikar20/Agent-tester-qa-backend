@@ -12,6 +12,10 @@ web/node_modules/
 # untracked file in every `git status` forever, and noise you learn to scroll
 # past is how a real change gets committed without being read.
 suites/check-*.json
+suites/*/check-*.json
+# The tenancy check signs tokens for organisations of its own; their
+# directories are removed when it ends, and ignored in case it does not.
+suites/check-*/
 
 # Deployment. The PEM authenticates to the host; .env.prod holds the shared
 # auth key and Django's signing key. Neither has any business in a repository,

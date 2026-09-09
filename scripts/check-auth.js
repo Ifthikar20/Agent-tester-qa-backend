@@ -132,6 +132,10 @@ for (const missing of ['iss', 'aud', 'sub', 'org', 'iat', 'exp']) {
 refuses('a token for another audience is refused', sign(claimsFor({ aud: 'ghostclick-admin' })));
 refuses('a token from another issuer is refused', sign(claimsFor({ iss: 'someone' })));
 refuses('an empty org is refused', sign(claimsFor({ org: '' })));
+// The org becomes a directory name on the runner (.ghostclick/<org>/), so a
+// token whose org could climb out of one is refused before any path is built.
+refuses('an org that is not a slug is refused', sign(claimsFor({ org: '../local' })));
+refuses('and one with a capital letter or a space', sign(claimsFor({ org: 'Acme Corp' })));
 
 // Time, both directions, and the lifetime between.
 refuses('an expired token is refused', sign(claimsFor({ iat: nowS() - 4000, exp: nowS() - 3600 })));
@@ -223,7 +227,7 @@ const python = spawnSync('python3', ['-c',
   + 'import os\n'
   + 'print(kid_of(load_private(os.environ["K"])))\n'
   + 'print(mint(subject=42, email="qa@example.com", key=os.environ["K"], ttl=600,\n'
-  + '           org="acme", role="admin", ent={"suites.max": 25, "vault.enabled": True, "runs.per_day": None}, ent_v=7,\n'
+  + '           org="acme", role="admin", plan="team", ent={"suites.max": 25, "vault.enabled": True, "runs.per_day": None}, ent_v=7,\n'
   + '           amr=["otp", "password"], auth_time=1, su=2, sid="s"))',
 ], { cwd: AUTH_DIR, encoding: 'utf8', env: { ...process.env, K: PRIVATE_PEM } });
 
@@ -260,6 +264,10 @@ if (!existsSync(AUTH_DIR)) {
     } else {
       bad('and so do the organisation, role and entitlements', JSON.stringify({ org: claims.org, role: claims.role, ent, ent_v: claims.ent_v }));
     }
+    // The plan's name rides along for the 402 the runner answers with
+    // ({error: 'entitlement', limit, plan}); nothing is decided by it.
+    if (claims.plan === 'team') ok('and the plan’s name, for the refusals', `plan=${claims.plan}`);
+    else bad('and the plan’s name, for the refusals', JSON.stringify(claims.plan));
     /**
      * amr is a LIST of the methods used (docs/AUTH.md §8): a second factor
      * rides beside the password, in the runner's vocabulary, and the runner
@@ -501,6 +509,18 @@ try {
     const { r: opened, ws: live } = await socket(`?ticket=${t1.ticket}`);
     if (opened === 'open') ok('and accepted from the app origin', 'open');
     else bad('and accepted from the app origin', opened);
+    // The greeting names the organisation and its lock, and never the
+    // vault's key names: those come from /api/state under the token
+    // (docs/AUTH.md §9.6 [websocket-3]).
+    if (opened === 'open') {
+      const greeting = await new Promise((res) => {
+        live.on('message', (d, bin) => { if (!bin) { const ev = JSON.parse(d); if (ev.t === 'ready') res(ev); } });
+        setTimeout(() => res(null), 4000);
+      });
+      if (greeting && !('secrets' in greeting) && greeting.org === 'acme' && greeting.driving && Array.isArray(greeting.origins)) {
+        ok('the greeting names the organisation and carries no vault names', `org=${greeting.org}`);
+      } else bad('the greeting names the organisation and carries no vault names', JSON.stringify(greeting));
+    }
     const { r: reused } = await socket(`?ticket=${t1.ticket}`);
     if (/401/.test(reused)) ok('a ticket presented twice is refused', reused);
     else bad('a ticket presented twice is refused', reused);
@@ -620,10 +640,11 @@ try {
     if (recTok.status === 400) ok('and with a token it is still origin-gated', '400');
     else bad('and with a token it is still origin-gated', `${recTok.status} — expected the origin gate`);
 
-    // The origins allowed above were persisted to .ghostclick/origins.json,
-    // which every runner started from this checkout reads. Leave it as it
-    // was found: a check that leaves an allowed origin behind has quietly
-    // widened the gate for the next person to run the app.
+    // The origins allowed above were persisted to .ghostclick/acme/origins.json
+    // — the organisation the throwaway token names — which a runner started
+    // from this checkout reads for that organisation. Leave it as it was
+    // found: a check that leaves an allowed origin behind has quietly
+    // widened the gate for the next person to sign in as it.
     for (const origin of ['https://example.com', BASE]) {
       await fetch(`${BASE}/api/origins`, { method: 'DELETE', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ origin }) });
     }

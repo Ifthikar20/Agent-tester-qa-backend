@@ -41,6 +41,12 @@ class TokenClaimsTests(TestCase):
             'history.retention_days': 90,
         })
 
+    def test_the_plan_is_named_for_the_runner_s_refusals(self):
+        # Display only: the runner writes it into a 402 and decides nothing by it.
+        self.assertEqual(self.mint()['plan'], 'free')
+        self.api.post('/auth/org', {'org': 'acme'})
+        self.assertEqual(self.mint()['plan'], 'team')
+
     def test_the_body_cannot_choose_the_organisation_or_role(self):
         c = self.mint({'org': 'acme', 'role': 'owner', 'ent': {'suites.max': None}})
         self.assertEqual((c['org'], c['role']), ('ada', 'owner'))

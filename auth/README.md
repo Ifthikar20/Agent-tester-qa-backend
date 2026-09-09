@@ -17,8 +17,9 @@ for sign-up, sign-in, verification, recovery and the account changes (§4, §5
 and §7), Google sign-in (§6), and now the second factor — an authenticator
 app, recovery codes and passkeys, the policy that says who must hold one,
 the strong reauthentication that gates every sensitive change, and the
-sessions list (§5, §7.2, §12). The runner does not partition its state by
-organisation yet — that is the runner-tenancy step.
+sessions list (§5, §7.2, §12). The runner's half of §10 — state keyed by
+organisation, the driving-org lock, the plan enforced with 402s — is in the
+runner (`tenancy.js`); this service only ever puts the facts in the token.
 
 ## Why Django
 
@@ -433,6 +434,9 @@ Ours, under `/auth`:
 | `POST /auth/invitations` | `{email, role}` — issue one; the token is mailed to the invitee and appears in no answer |
 | `DELETE /auth/invitations/<id>` | revoke one |
 | `POST /auth/invitations/accept` | `{token}` — become a member, signed in as the invited, verified address |
+| `GET /auth/members` | the selected organisation's members (any member) |
+| `PATCH /auth/members/<user id>` | `{role}` — an owner sets another member's role |
+| `DELETE /auth/members/<user id>` | remove a member (owner: anyone but the last owner; admin: members), or leave with your own id |
 | `POST /auth/executor-token` | a short-lived signed token the **runner** will accept; 12 per 10 minutes per session |
 | `GET /auth/jwks` | the public key the tokens verify with, for humans and tooling — the runner never fetches it |
 | `/admin/` | Django's admin — where accounts, plans and organisations are managed; the edge admits it only from `GC_ADMIN_CIDRS`; its login is the app's |
@@ -516,6 +520,15 @@ matters `[authz-tenancy-5]`: an inviter never grants above their own role,
 and only an owner grants `admin` or `owner` — so an admin can only ever add
 members, and the set of people who can manage an organisation grows only by
 an owner's hand.
+
+**Members** (`tenants/members.py`) follow the same cap: only an owner changes
+a role, nobody changes their own, an organisation keeps at least one owner
+and a personal organisation keeps its person. An admin removes members, an
+owner removes anyone but the last owner, and leaving is the one thing a
+member does to themselves — after which the session is back on their
+personal organisation. Every change is an `AuthEvent`
+(`member_role_changed`, `member_removed`), and it reaches the runner with the
+next token, since the role is re-read from `Membership` at every mint.
 
 **Invitations** are `token_urlsafe(32)`, stored as a SHA-256 and looked up
 by it, bound to an email, good for seven days, single-use, and consumed only
@@ -602,7 +615,9 @@ token signed with it has expired.
 The claims (docs/AUTH.md §8): `iss` and `aud` name the two services; `sub`
 and `email` the account; `org`, `role`, `ent` and `ent_v` the session's
 selected organisation, the role from its `Membership` row, the
-runner-enforced entitlements and their version; `amr` and `auth_time` the
+runner-enforced entitlements and their version; `plan` the plan's slug, for
+display only — the runner writes it into a `402 {error: 'entitlement',
+limit, plan}` and decides nothing by it; `amr` and `auth_time` the
 methods actually used in this session and when, read from the list of
 authentication events the sign-in receiver appends to the session, with
 `auth_time` the most recent second-factor event for an account that holds
@@ -644,16 +659,14 @@ Python or Django is missing, because this directory is optional.
 
 - **Suites and run history.** They stay as JSON beside the runner. Moving them
   is a real project and is not what adding a login needed.
-- **Enforcement of the organisation on the runner.** The token now says
-  which organisation and role, and what the plan allows; the runner does not
-  read those claims yet, so everyone who can sign in still drives the one
-  shared browser and its one set of state. Partitioning `.ghostclick/` and
-  `suites/` by organisation, the driving-org lock and the `402 entitlement`
-  refusals are the runner-tenancy step of docs/AUTH.md.
+- **Plans in the UI.** An organisation's plan is set in the admin; the app
+  shows the plan and the runner's usage under Organisation and offers no
+  way to change it. Billing is not a thing this project has.
 - **A purge of anything.** `AuthEvent` rows past 90 days, expired
   invitations, previous addresses past their week, and the stale-address
   purge on a schedule are the ops step's; the commands that exist are
   idempotent and nothing runs them yet.
-- **Multi-tenancy on the runner.** The runner holds one browser and one run
-  lock. Two people signed in still share it — a login says *who*, not *which
-  runner*.
+- **A runner pool.** The runner holds one browser and one run lock, now
+  partitioned by organisation: one organisation drives at a time and the
+  others are told it is busy. A login says *who*, not *which runner*; two
+  organisations driving at once is a second runner, not a rule here.

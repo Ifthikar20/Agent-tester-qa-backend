@@ -33,8 +33,13 @@
  *   4. The LIFETIME is bounded. `exp - iat` above 660 seconds is refused even
  *      when the signature is good: the control plane clamps to 600, so a
  *      longer one was not minted by it [token-4].
+ *   5. The ORGANISATION is a slug. It becomes a directory name on this
+ *      machine (`.ghostclick/<org>/`, `suites/<org>/`), so a signed token
+ *      whose org is `../local` is refused at the door rather than trusted
+ *      to be a path segment because the control plane would never mint one.
  */
 import { createPublicKey, verify as cryptoVerify } from 'node:crypto';
+import { SLUG } from './org.js';
 
 /** Tokens live ~10 minutes; a minute of clock drift between two hosts is normal. */
 const SKEW_MS = 60_000;
@@ -161,6 +166,8 @@ export function verify(token, keys, now = Date.now()) {
   if (claims.aud !== AUDIENCE) throw new AuthError('the token is not for this runner');
   if (!nonEmpty(claims.sub)) throw new AuthError('the token names no one');
   if (!nonEmpty(claims.org)) throw new AuthError('the token names no organisation');
+  // (5) A directory name, or nothing.
+  if (!SLUG.test(claims.org)) throw new AuthError('the organisation in the token is not a slug');
   if (!isInt(claims.iat)) throw new AuthError('the token does not say when it was issued');
   if (!isInt(claims.exp)) throw new AuthError('the token does not say when it expires');
 

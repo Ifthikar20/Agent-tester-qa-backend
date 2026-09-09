@@ -6,6 +6,9 @@ The organisation endpoints, all under /auth.
   POST   /auth/invitations             {email, role}       issue one; the token is mailed to the invitee
   DELETE /auth/invitations/<id>                            revoke one
   POST   /auth/invitations/accept      {token}             become a member
+  GET    /auth/members                                     the selected organisation's members
+  PATCH  /auth/members/<user id>       {role}              an owner sets another member's role
+  DELETE /auth/members/<user id>                           remove a member, or leave (your own id)
 
 Which organisation an invitation is for is never in the body: it is the one
 this session has selected, checked against Membership on the way in. A body
@@ -20,7 +23,7 @@ from django.views.decorators.http import require_http_methods
 from accounts.events import client_ip
 from accounts.ratelimit import over
 
-from . import invitations, session
+from . import invitations, members, session
 from .models import Invitation, Role
 
 
@@ -125,3 +128,41 @@ def invitation_accept(request):
         return JsonResponse({'error': invitations.REFUSAL}, status=400)
     session.select(request, membership.organization.slug)
     return JsonResponse({'ok': True, **_whoami(request)})
+
+
+@require_http_methods(['GET'])
+def member_list(request):
+    """Any member may see who else is in the organisation they are acting for."""
+    if not _signed_in(request):
+        return JsonResponse({'error': 'Not signed in'}, status=401)
+    me = session.selected(request)
+    if me is None:
+        return JsonResponse({'error': 'no_organisation'}, status=403)
+    return JsonResponse({'org': me.organization.slug, 'members': members.listing(me.organization, me)})
+
+
+@require_http_methods(['PATCH', 'DELETE'])
+def member_change(request, user_id):
+    """
+    Change a role or remove a member (tenants.members). The organisation is
+    the session's, the target is looked up inside it, and every refusal is
+    said out loud: the caller is a member and may know why.
+    """
+    if not _signed_in(request):
+        return JsonResponse({'error': 'Not signed in'}, status=401)
+    me = session.selected(request)
+    if me is None:
+        return JsonResponse({'error': 'no_organisation'}, status=403)
+    try:
+        if request.method == 'PATCH':
+            role = str(_body(request).get('role', '')).strip()
+            row = members.change_role(me, user_id, role, request)
+            return JsonResponse({'ok': True, 'member': members.to_json(row, me)})
+        row = members.remove(me, user_id, request)
+        # Leaving means the session's selected organisation is gone; whoami
+        # falls back to the personal one, and the answer says so.
+        return JsonResponse({'ok': True, 'removed': row.user_id, 'left': row.user_id == me.user_id, **_whoami(request)})
+    except ValueError as err:
+        return JsonResponse({'error': str(err)}, status=400)
+    except members.Refused as err:
+        return JsonResponse({'error': err.reason}, status=err.status)

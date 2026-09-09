@@ -86,6 +86,8 @@ class AuthEvent(models.Model):
         INVITATION_SENT = 'invitation_sent', 'invitation issued'
         INVITATION_ACCEPTED = 'invitation_accepted', 'invitation accepted'
         INVITATION_REFUSED = 'invitation_refused', 'invitation refused'
+        MEMBER_ROLE_CHANGED = 'member_role_changed', 'member’s role changed'
+        MEMBER_REMOVED = 'member_removed', 'member removed'
         # One row per executor token, with its jti in `detail`: a token that
         # never appears here was not minted here [token-5].
         MINT = 'mint', 'executor token minted'

@@ -118,9 +118,36 @@ Every account has a personal organisation, and organisations have owners,
 admins and members, invitations (mailed to the invitee, and consumed the
 moment the invited address is verified), and a plan that says what they may
 do — the token the runner sees carries which organisation you are acting
-for, your role and the plan's limits, and the runner will enforce them once
-it is partitioned by organisation. See [auth/README.md](auth/README.md), and
-[docs/AUTH.md](docs/AUTH.md) for where this is going.
+for, your role and the plan's limits, and the runner enforces every one of
+them itself (docs/AUTH.md §10):
+
+- **State is per organisation.** The origin allowlist, the vault and run
+  history live under `.ghostclick/<org>/`, suites under `suites/<org>/`,
+  and a request only ever sees its own organisation's — another
+  organisation's suite id is a 404, never a 403. With no login there is one
+  organisation, `local`; a runner from before this rule moves its flat
+  files under `local` once, at boot, and says so in the banner.
+- **The plan is enforced by the runner, not the page.** `suites.max` when a
+  suite is made, `runs.per_day` when a run starts (counted from that
+  organisation's own history), `origins.max` when an origin is allowed,
+  `vault.enabled` when a `$KEY` is resolved, `history.retention_days` when
+  history is read. A refusal is `402 {error: "entitlement", limit, plan}`
+  whoever asks — a bare `curl` gets the same answer as the UI, which draws
+  it as an upgrade prompt rather than an error. A token minted before the
+  plan changed is refused once a newer one has been seen.
+- **One browser, one driving organisation.** Whoever opens a page or starts
+  a run is driving; frames, the address, the targets and the page's console
+  reach that organisation's sockets and nobody else's, and everyone else
+  gets `409 {error: "runner_busy", org}` on every path to the browser until
+  the run has ended and the driver has been quiet for a minute
+  (`GC_RUNNER_IDLE_MS`). The UI shows who is driving instead of a black
+  canvas.
+- **Origins and the vault are an owner's or admin's to change**; members run
+  and view. The organisation's members, roles, invitations, plan and usage
+  are under **Organisation** in the sidebar, which also switches between the
+  organisations you belong to.
+
+See [auth/README.md](auth/README.md), and [docs/AUTH.md](docs/AUTH.md).
 
 On a laptop the control plane's mail is printed to the terminal `npm run app
 -- --auth` runs in, codes and links included; `bash scripts/adduser.sh
@@ -330,10 +357,12 @@ a click. Each page's expectations generate a case — reach it, assert what shou
 be there — and that is the test that catches "the URL moved" instead of leaving
 it as a mystery three steps into a longer flow.
 
-Suites live in `suites/*.json`, **in the repository**, one readable file each.
-Run history is machine-local (`.ghostclick/`, gitignored) because it records what
-happened on your machine; a suite is the opposite — the shared description of a
-project, so it should diff, review and merge like any other source file.
+Suites live in `suites/<org>/*.json`, **in the repository**, one readable file
+each — `suites/local/` on a laptop with no login, one directory per
+organisation with one. Run history is machine-local (`.ghostclick/<org>/`,
+gitignored) because it records what happened on your machine; a suite is the
+opposite — the shared description of a project, so it should diff, review and
+merge like any other source file.
 
 ---
 

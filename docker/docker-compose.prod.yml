@@ -93,14 +93,19 @@ services:
       GC_PACE_MS: ${GC_PACE_MS:-250}
       GC_TIMEOUT_MS: ${GC_TIMEOUT_MS:-8000}
       GC_SETTLE_MS: ${GC_SETTLE_MS:-250}
+      # How long an organisation keeps the one browser after its run has
+      # ended and its viewers have gone quiet (docs/AUTH.md §10); a minute
+      # unless said otherwise.
+      GC_RUNNER_IDLE_MS: ${GC_RUNNER_IDLE_MS:-60000}
       # The same public site key the control plane hands the UI. The runner
       # never uses its value; its presence widens the UI's CSP to admit the
       # Turnstile widget's host, and one line feeding both services is how
       # the policy and the page cannot disagree about whether it exists.
       GC_TURNSTILE_SITE_KEY: ${GC_TURNSTILE_SITE_KEY:-}
     volumes:
-      # Run history, the ORIGIN ALLOWLIST, the vault. Without this every
-      # deploy forgets which origins were allowed and every run ever made.
+      # Run history, the ORIGIN ALLOWLIST, the vault — one directory per
+      # organisation, .ghostclick/<org>/. Without this every deploy forgets
+      # which origins were allowed and every run ever made.
       - ghostclick-state:/app/.ghostclick
     # Chromium is told --disable-dev-shm-usage so it does not need a big /dev/shm,
     # but headroom here is cheap and a starved browser fails in confusing ways.

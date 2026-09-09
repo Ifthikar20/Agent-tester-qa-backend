@@ -212,6 +212,7 @@ def executor_token(request):
             now=now,
             org=org.slug,
             role=membership.role,
+            plan=org.plan.slug,
             ent=plans.runner_subset(org.entitlements()),
             ent_v=org.entitlements_version,
             amr=amr,

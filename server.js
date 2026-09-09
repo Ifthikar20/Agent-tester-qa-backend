@@ -7,15 +7,15 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { VirtualCursor, sleep } from './cursor.js';
 import { OPS, validate, PACE, paceOf } from './ops.js';
-import * as origins from './origins.js';
-import * as vault from './secrets.js';
-import * as history from './runs.js';
+import { normalizeUrl } from './origins.js';
 import { chooseHome } from './home.js';
 import { bearer, verify } from './auth.js';
 import { AUTH_ON, DEMO, PUBLIC_KEYS, KEY_ERROR, WEB_ORIGIN, TURNSTILE, csp } from './mode.js';
 import * as tickets from './tickets.js';
+import * as tenancy from './tenancy.js';
+import { LOCAL } from './org.js';
 import { blocked } from './reach.js';
-import * as suites from './suites.js';
+import { originOf, pageCheckFlow } from './suites.js';
 import { discover, links } from './targets.js';
 import { parse } from './parse.js';
 import { parseFlow, flatten, toFlow } from './flow.js';
@@ -26,12 +26,6 @@ import { NavigationLog } from './navlog.js';
 const require = createRequire(import.meta.url);
 const PORT = Number(process.env.PORT) || 3000;
 const VIEW = { width: 1180, height: 760 };
-/** Where the runner points when it starts — the rule itself is in home.js. */
-const homeUrl = () => chooseHome({
-  envUrl: process.env.HOME_URL,
-  runs: history.list(),
-  isAllowed: (origin) => origins.has(origin),
-});
 
 /**
  * Auth is OFF unless GC_AUTH_PUBLIC_KEYS names a key (mode.js), and that is a
@@ -88,6 +82,22 @@ const BLOCK_PRIVATE = process.env.GC_BLOCK_PRIVATE != null
 const HEADED = /^(1|true|yes|on)$/i.test(process.env.HEADED ?? '');
 
 /**
+ * Every store is keyed by organisation (tenancy.js, docs/AUTH.md §10). The
+ * flat files a pre-tenancy runner left behind are moved under `local` first,
+ * BEFORE any store is opened, so the move is one rename and not a merge.
+ */
+const migrated = tenancy.migrate();
+/** The laptop's one organisation. With auth on nothing signs in as it. */
+const local = tenancy.workspace(LOCAL);
+
+/** Where the runner points when it starts — the rule itself is in home.js. */
+const homeUrl = () => chooseHome({
+  envUrl: process.env.HOME_URL,
+  runs: local.history.list(),
+  isAllowed: (origin) => local.origins.has(origin),
+});
+
+/**
  * The runner's live state, declared before anything can be asked about it.
  *
  * These are assigned further down, after a browser has been launched — which
@@ -113,6 +123,31 @@ let running = false;
 // chromium.launch, so "the server answers" and "the app works" are two
 // different facts. /healthz reports this one, and a deploy waits on it.
 let browserReady = false;
+/**
+ * The viewers and the last picture, declared up here for the same reason:
+ * a socket can connect, and a route can try to tell one something, in the
+ * seconds before the browser exists.
+ */
+let lastFrame = null;
+const clients = new Set();
+
+/**
+ * Who is driving the one browser (tenancy.js). With auth off it is `local`
+ * from the first moment and never anyone else, so the lock is never held
+ * against anybody and every socket sees the page — the laptop is unchanged.
+ * With auth on nobody drives until an organisation opens a page or starts a
+ * run, and until then no socket receives a frame of anything.
+ *
+ * GC_RUNNER_IDLE_MS is how long an organisation keeps the browser after its
+ * run has ended with none of its sockets doing anything; a minute by default
+ * (docs/AUTH.md §10), and configuration rather than code because the checks
+ * need to watch the lock lapse without waiting a minute for it.
+ */
+const driver = new tenancy.Driver({
+  idleMs: Math.max(1000, Number(process.env.GC_RUNNER_IDLE_MS) || tenancy.IDLE_MS),
+  isRunning: () => running,
+});
+if (!AUTH_ON) driver.claim(LOCAL);
 
 const app = express();
 
@@ -221,14 +256,6 @@ app.use('/app', (req, res, next) => {
 });
 
 /**
- * Where the browser extension drops a recording.
- *
- * It is validated here and put in the viewer's script box — never run. Any
- * page you visit can reach a localhost port, so an endpoint that executed what
- * it was handed would be a remote-code path with extra steps. A human presses
- * Run.
- */
-/**
  * Who may call the API from a browser.
  *
  * With auth off, `*`: the extension POSTs a recording from whatever page you
@@ -261,7 +288,20 @@ app.get('/healthz', (_req, res) => {
   res.status(browserReady ? 200 : 503).json({ ok: browserReady, browser: browserReady, busy: running });
 });
 
-const fail = (res, err, code = 400) => res.status(code).json({ ok: false, error: err.message ?? String(err) });
+/**
+ * The refusals the plan and the lock produce, in the shapes the UI reads
+ * (docs/AUTH.md §10): a 402 names the limit and the plan, a 409 names who is
+ * driving, a 403 says which role it wanted. Every route goes through `fail`,
+ * so a new route cannot answer a plan refusal with a 400 by forgetting.
+ */
+const fail = (res, err, code = 400) => {
+  if (err instanceof tenancy.EntitlementError) {
+    return res.status(402).json({ ok: false, error: 'entitlement', limit: err.limit, plan: err.plan });
+  }
+  if (err instanceof tenancy.RunnerBusy) return res.status(409).json({ ok: false, error: 'runner_busy', org: err.org });
+  if (err instanceof tenancy.Forbidden) return res.status(403).json({ ok: false, error: 'forbidden', needs: 'admin' });
+  return res.status(code).json({ ok: false, error: err.message ?? String(err) });
+};
 const sendOk = (res, body) => res.json({ ok: true, ...body });
 
 app.use('/api', (req, res, next) => {
@@ -279,7 +319,13 @@ app.use('/api', (req, res, next) => {
   // cross-origin call fail at the preflight, which reads as a CORS bug.
   if (req.method === 'OPTIONS') return res.sendStatus(204);
 
-  if (!AUTH_ON) return next();
+  if (!AUTH_ON) {
+    // The laptop: one organisation, no plan, nobody to refuse.
+    req.user = null;
+    req.space = local;
+    req.ent = tenancy.entitlements(null);
+    return next();
+  }
 
   /**
    * No exceptions. POST /api/recording used to be the one route left open
@@ -297,13 +343,21 @@ app.use('/api', (req, res, next) => {
     // where they are enforced. Nothing about who is calling is ever read
     // from anywhere else.
     req.user = verify(token, PUBLIC_KEYS);
+    // A token minted before the plan changed is refused once a newer one has
+    // been seen, so a downgrade is not ten minutes away (docs/AUTH.md §8.6).
+    // 401, because the remedy is the same as for an expired token: the UI
+    // forgets it and mints again.
+    tenancy.noteVersion(req.user);
   } catch (err) {
     // The reason is safe to say: the caller already holds the token, so
     // "expired" versus "bad signature" tells them nothing they could not
     // determine anyway, and it is the difference between the UI silently
     // re-authenticating and a person staring at a spinner.
-    return res.status(401).json({ ok: false, error: err.message });
+    const error = err instanceof tenancy.StaleEntitlements ? 'stale_entitlements' : err.message;
+    return res.status(401).json({ ok: false, error });
   }
+  req.space = tenancy.workspace(req.user.org);
+  req.ent = tenancy.entitlements(req.user);
   next();
 });
 
@@ -331,8 +385,19 @@ app.post('/api/socket-ticket', (req, res) => {
  */
 const steppedUp = (claims) => !AUTH_ON || (typeof claims?.su === 'number' && Date.now() / 1000 < claims.su);
 
-app.get('/api/runs', (req, res) => res.json(history.summary(14, req.query.suite || null)));
-app.get('/api/defects', (_req, res) => res.json(history.defects(14)));
+/**
+ * The organisation's history, pruned to what its plan keeps before it is
+ * read (docs/AUTH.md §10 `history.retention_days`). Pruning on read rather
+ * than on a timer means the number a plan says is the number a page shows,
+ * and there is no job to forget to run.
+ */
+const historyOf = (req) => {
+  req.space.history.prune(req.ent.limit('history.retention_days'));
+  return req.space.history;
+};
+
+app.get('/api/runs', (req, res) => res.json(historyOf(req).summary(14, req.query.suite || null)));
+app.get('/api/defects', (req, res) => res.json(historyOf(req).defects(14)));
 
 /**
  * Pictures for the hero panels, if anyone has put any there.
@@ -363,17 +428,32 @@ app.get('/api/hero', (_req, res) => {
  * same run lock and the same origin gate as everything else. Neither can add
  * an origin: `POST /api/origins` exists for that, and it is only ever reached
  * by someone pressing a button.
+ *
+ * Every one of them reads `req.space.suites`: the calling organisation's
+ * directory and no other, so an id from another organisation is "no suite"
+ * here exactly as it would be for an id nobody ever made.
  */
 
-/** Parse+validate a flow the way the executor will. Suites store nothing unrunnable. */
-const checkFlow = (flow) => validate(flatten(parseFlow(flow)));
+/** Parse+validate a flow the way the executor will, against THIS organisation's allowlist. Suites store nothing unrunnable. */
+const checkFlowFor = (space) => (flow) => validate(flatten(parseFlow(flow)), { origins: space.origins });
 
 /** The gate, as an answer the UI can act on rather than an error it must read. */
-function gate(res, origin) {
-  if (origins.has(origin)) return false;
+function gate(res, origin, space) {
+  if (space.origins.has(origin)) return false;
   res.status(409).json({ ok: false, needsOrigin: origin,
     error: `${origin} is not allowed yet` });
   return true;
+}
+
+/**
+ * Take the browser for an organisation, telling the room when it changes
+ * hands — whoever had it, and whoever was waiting. A failure is a
+ * RunnerBusy, which `fail` turns into the 409 the UI reads.
+ */
+function take(org) {
+  const changed = driver.claim(org);
+  if (changed) announceDriving();
+  armRelease();
 }
 
 /**
@@ -413,33 +493,63 @@ const buildTime = () => {
 };
 app.get('/api/version', (_req, res) => res.json({ ...identity, built: buildTime() }));
 
-app.get('/api/state', (_req, res) => res.json({
-  url: page?.url() ?? null,
-  running,
-  recording: recorder?.recording ?? false,
-  origins: origins.list(),
-  secrets: vault.names(),        // names only — a value never leaves the server
-  headed: HEADED,
-  // How patient the runner is, so it is visible rather than folklore.
-  timeoutMs: Number(process.env.GC_TIMEOUT_MS) || 8000,
-  settleMs: Number(process.env.GC_SETTLE_MS) || 250,
-  // How much of a run is performed for a watcher. The UI offers a per-run
-  // override, and needs to know what it is overriding.
-  paceMs: PACE,
-}));
+/**
+ * How much of the plan this organisation has used, counted by the runner
+ * from its own stores — the same numbers the refusals are made from, so the
+ * page that shows them cannot disagree with the 402 that follows.
+ */
+const usage = (req) => ({
+  suites: { used: req.space.suites.list().length, max: req.ent.limit('suites.max') },
+  runs: { used: req.space.history.today(), max: req.ent.limit('runs.per_day') },
+  origins: { used: req.space.origins.list().length, max: req.ent.limit('origins.max') },
+  vault: req.ent.enabled('vault.enabled'),
+  retentionDays: req.ent.limit('history.retention_days'),
+});
 
-app.get('/api/origins', (_req, res) => res.json({ origins: origins.list() }));
+app.get('/api/state', (req, res) => {
+  // The page belongs to whoever is driving. Another organisation is told the
+  // runner is busy and nothing about the address on it.
+  const mine = driver.sees(req.space.org);
+  res.json({
+    url: mine ? page?.url() ?? null : null,
+    running: mine && running,
+    recording: mine && (recorder?.recording ?? false),
+    origins: req.space.origins.list(),
+    secrets: req.space.vault.names(),   // names only — a value never leaves the server
+    headed: HEADED,
+    // How patient the runner is, so it is visible rather than folklore.
+    timeoutMs: Number(process.env.GC_TIMEOUT_MS) || 8000,
+    settleMs: Number(process.env.GC_SETTLE_MS) || 250,
+    // How much of a run is performed for a watcher. The UI offers a per-run
+    // override, and needs to know what it is overriding.
+    paceMs: PACE,
+    org: req.space.org,
+    plan: req.ent.plan,
+    driving: driver.describe(req.space.org),
+    usage: usage(req),
+  });
+});
+
+app.get('/api/origins', (req, res) => res.json({ origins: req.space.origins.list() }));
 app.post('/api/origins', (req, res) => {
-  if (!steppedUp(req.user)) return res.status(403).json({ ok: false, error: 'step_up_required' });
   try {
-    const r = origins.add(req.body?.origin);
-    emit({ t: 'origins', origins: origins.list() });
-    sendOk(res, { ...r, origins: origins.list() });
+    // Origins are an owner's or admin's to change (docs/AUTH.md §10), and
+    // then only with a recent authentication, and then only within the plan.
+    tenancy.requireManager(req.user);
+    if (!steppedUp(req.user)) return res.status(403).json({ ok: false, error: 'step_up_required' });
+    req.ent.check('origins.max', req.space.origins.list().length);
+    const r = req.space.origins.add(req.body?.origin);
+    emitTo(req.space.org, { t: 'origins', origins: req.space.origins.list() });
+    sendOk(res, { ...r, origins: req.space.origins.list() });
   } catch (err) { fail(res, err); }
 });
 app.delete('/api/origins', (req, res) => {
-  try { origins.remove(req.body?.origin); sendOk(res, { origins: origins.list() }); }
-  catch (err) { fail(res, err); }
+  try {
+    tenancy.requireManager(req.user);
+    req.space.origins.remove(req.body?.origin);
+    emitTo(req.space.org, { t: 'origins', origins: req.space.origins.list() });
+    sendOk(res, { origins: req.space.origins.list() });
+  } catch (err) { fail(res, err); }
 });
 
 /**
@@ -450,10 +560,10 @@ app.delete('/api/origins', (req, res) => {
  * the sidebar. The flow rides along because loading a case IS its flow, and a
  * second round trip to fetch it would only make selecting one feel slow.
  */
-app.get('/api/cases', (_req, res) => {
+app.get('/api/cases', (req, res) => {
   const out = [];
-  for (const row of suites.list()) {
-    for (const c of suites.get(row.id).cases) {
+  for (const row of req.space.suites.list()) {
+    for (const c of req.space.suites.get(row.id).cases) {
       out.push({ suiteId: row.id, suite: row.name, ...c });
       if (out.length >= 200) break;              // a picker, not an archive
     }
@@ -462,34 +572,39 @@ app.get('/api/cases', (_req, res) => {
   res.json({ cases: out });
 });
 
-app.get('/api/suites', (_req, res) => res.json({ suites: suites.list() }));
+app.get('/api/suites', (req, res) => res.json({ suites: req.space.suites.list() }));
 app.post('/api/suites', (req, res) => {
-  try { sendOk(res, { suite: suites.create(req.body ?? {}) }); } catch (err) { fail(res, err); }
+  try {
+    req.ent.check('suites.max', req.space.suites.list().length);
+    sendOk(res, { suite: req.space.suites.create(req.body ?? {}) });
+  } catch (err) { fail(res, err); }
 });
 app.get('/api/suites/:id', (req, res) => {
   try {
-    const s = suites.get(req.params.id);
+    const s = req.space.suites.get(req.params.id);
     // The gate's state travels with the suite, so onboarding can show where it
     // stands without a second round trip.
-    res.json({ suite: s, allowed: origins.has(suites.originOf(s)) });
+    res.json({ suite: s, allowed: req.space.origins.has(originOf(s)) });
   } catch (err) { fail(res, err, 404); }
 });
 app.patch('/api/suites/:id', (req, res) => {
-  try { sendOk(res, { suite: suites.update(req.params.id, req.body ?? {}) }); } catch (err) { fail(res, err); }
+  try { sendOk(res, { suite: req.space.suites.update(req.params.id, req.body ?? {}) }); }
+  catch (err) { fail(res, err, /^No suite/.test(err.message) ? 404 : 400); }
 });
 app.delete('/api/suites/:id', (req, res) => {
-  try { sendOk(res, suites.remove(req.params.id)); } catch (err) { fail(res, err); }
+  try { sendOk(res, req.space.suites.remove(req.params.id)); }
+  catch (err) { fail(res, err, /^No suite/.test(err.message) ? 404 : 400); }
 });
 
 app.post('/api/suites/:id/pages', (req, res) => {
-  try { sendOk(res, { page: suites.addPage(req.params.id, req.body ?? {}) }); } catch (err) { fail(res, err); }
+  try { sendOk(res, { page: req.space.suites.addPage(req.params.id, req.body ?? {}) }); } catch (err) { fail(res, err); }
 });
 app.patch('/api/suites/:id/pages/:pageId', (req, res) => {
-  try { sendOk(res, { page: suites.updatePage(req.params.id, req.params.pageId, req.body ?? {}) }); }
+  try { sendOk(res, { page: req.space.suites.updatePage(req.params.id, req.params.pageId, req.body ?? {}) }); }
   catch (err) { fail(res, err); }
 });
 app.delete('/api/suites/:id/pages/:pageId', (req, res) => {
-  try { sendOk(res, suites.removePage(req.params.id, req.params.pageId)); } catch (err) { fail(res, err); }
+  try { sendOk(res, req.space.suites.removePage(req.params.id, req.params.pageId)); } catch (err) { fail(res, err); }
 });
 
 /**
@@ -502,22 +617,27 @@ app.delete('/api/suites/:id/pages/:pageId', (req, res) => {
  * the browser again.
  */
 app.post('/api/suites/:id/pages/:pageId/scan', async (req, res) => {
+  const space = req.space;
   let suite, pg;
   try {
-    suite = suites.get(req.params.id);
+    suite = space.suites.get(req.params.id);
     pg = suite.pages.find((p) => p.id === req.params.pageId);
     if (!pg) throw new Error('No such page');
   } catch (err) { return fail(res, err, 404); }
 
-  if (gate(res, suites.originOf(suite))) return;
+  if (gate(res, originOf(suite), space)) return;
+  // The lock before the run lock: an organisation that cannot have the
+  // browser is told it is busy, not that "a run is in progress" — which is
+  // someone else's run, and none of its business.
+  try { take(space.org); } catch (err) { return fail(res, err); }
   if (running) return fail(res, new Error('A run is in progress'), 409);
 
   running = true;
   try {
-    await OPS.goto(page, { url: pg.url }, { cursor, emit, nav, onNavigate: publishTargets });
+    await OPS.goto(page, { url: pg.url }, { cursor, emit, nav, onNavigate: publishTargets, origins: space.origins });
     const items = await discover(page);
     const linked = await links(page).catch(() => []);
-    const saved = suites.updatePage(suite.id, pg.id, { targets: items, linked });
+    const saved = space.suites.updatePage(suite.id, pg.id, { targets: items, linked });
     emit({ t: 'log', level: 'info',
            msg: `scanned ${pg.url} — ${items.length} targets, ${linked.length} links` });
     sendOk(res, { page: saved, url: page.url() });
@@ -525,20 +645,21 @@ app.post('/api/suites/:id/pages/:pageId/scan', async (req, res) => {
     fail(res, err);
   } finally {
     running = false;
+    armRelease();
     await publishTargets();
   }
 });
 
 app.post('/api/suites/:id/cases', (req, res) => {
-  try { sendOk(res, { case: suites.addCase(req.params.id, req.body ?? {}, checkFlow) }); }
+  try { sendOk(res, { case: req.space.suites.addCase(req.params.id, req.body ?? {}, checkFlowFor(req.space)) }); }
   catch (err) { fail(res, err); }
 });
 app.patch('/api/suites/:id/cases/:caseId', (req, res) => {
-  try { sendOk(res, { case: suites.updateCase(req.params.id, req.params.caseId, req.body ?? {}, checkFlow) }); }
+  try { sendOk(res, { case: req.space.suites.updateCase(req.params.id, req.params.caseId, req.body ?? {}, checkFlowFor(req.space)) }); }
   catch (err) { fail(res, err); }
 });
 app.delete('/api/suites/:id/cases/:caseId', (req, res) => {
-  try { sendOk(res, suites.removeCase(req.params.id, req.params.caseId)); } catch (err) { fail(res, err); }
+  try { sendOk(res, req.space.suites.removeCase(req.params.id, req.params.caseId)); } catch (err) { fail(res, err); }
 });
 
 /**
@@ -550,19 +671,28 @@ app.delete('/api/suites/:id/cases/:caseId', (req, res) => {
  * definitive answer rather than having to infer one from events.
  */
 app.post('/api/suites/:id/run', async (req, res) => {
+  const space = req.space;
   let suite;
-  try { suite = suites.get(req.params.id); } catch (err) { return fail(res, err, 404); }
-  if (gate(res, suites.originOf(suite))) return;
-  if (running) return fail(res, new Error('A run is in progress'), 409);
+  try { suite = space.suites.get(req.params.id); } catch (err) { return fail(res, err, 404); }
+  if (gate(res, originOf(suite), space)) return;
 
   const wanted = req.query.case
     ? suite.cases.filter((c) => c.id === req.query.case)
     : suite.cases;
   if (!wanted.length) return fail(res, new Error('This suite has no cases to run'));
+  // The whole suite, counted up front: a run that would stop at case three
+  // of five is refused before case one, not discovered halfway. And the
+  // plan before the lock: a run the plan refuses never takes the browser.
+  try {
+    req.ent.check('runs.per_day', space.history.today(), wanted.length);
+    take(space.org);
+  } catch (err) { return fail(res, err); }
+  if (running) return fail(res, new Error('A run is in progress'), 409);
 
   // How much of this run to perform, for this run only. Absent means the
   // server's default, so a caller that has never heard of pace is unaffected.
   const pace = paceOf(req.query.pace, PACE);
+  const checkFlow = checkFlowFor(space);
 
   emit({ t: 'suite.start', suite: suite.name, cases: wanted.length });
   const outcomes = [];
@@ -581,7 +711,7 @@ app.post('/api/suites/:id/run', async (req, res) => {
     // Express 4 does not catch a rejection from an async handler, so an
     // unexpected throw here would take the process with it rather than failing
     // one case. A suite run survives a bad case.
-    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name, pace })
+    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name, pace, space, ent: req.ent })
       .catch((err) => ({ ok: false, passed: 0, total: 0, error: err.message }));
     outcomes.push({ case: c.id, name: c.name, ...r });
   }
@@ -606,9 +736,15 @@ app.post('/api/suites/:id/run', async (req, res) => {
  * which origin it needs, exactly like every other path to the browser.
  */
 app.post('/api/suites/quickstart', async (req, res) => {
+  const space = req.space;
   let u;
-  try { u = origins.normalizeUrl(req.body?.url); } catch (err) { return fail(res, err); }
-  if (gate(res, u.origin)) return;
+  try { u = normalizeUrl(req.body?.url); } catch (err) { return fail(res, err); }
+  try {
+    req.ent.check('suites.max', space.suites.list().length);
+    req.ent.check('runs.per_day', space.history.today());
+  } catch (err) { return fail(res, err); }
+  if (gate(res, u.origin, space)) return;
+  try { take(space.org); } catch (err) { return fail(res, err); }
   if (running) return fail(res, new Error('A run is in progress'), 409);
 
   let suite, pg, items;
@@ -616,35 +752,37 @@ app.post('/api/suites/quickstart', async (req, res) => {
   try {
     // Open it first: the page's own title is a better suite name than anything
     // derived from a hostname, and it costs nothing since we must go there.
-    await OPS.goto(page, { url: u.href }, { cursor, emit, nav, onNavigate: publishTargets });
+    await OPS.goto(page, { url: u.href }, { cursor, emit, nav, onNavigate: publishTargets, origins: space.origins });
     const title = (await page.title().catch(() => '')).trim().slice(0, 80);
     items = await discover(page);
     const linked = await links(page).catch(() => []);
     const path = `${u.pathname}${u.search}${u.hash}`;
 
-    suite = suites.create({
+    suite = space.suites.create({
       name: String(req.body?.name ?? '').trim() || title || u.host,
       baseUrl: u.href,
       description: `Added from ${u.href}`,
     });
-    pg = suites.addPage(suite.id, {
+    pg = space.suites.addPage(suite.id, {
       name: title || 'Entry',
       path,
       expect: [{ kind: 'url', value: path }],
     });
-    suites.updatePage(suite.id, pg.id, { targets: items, linked });
+    space.suites.updatePage(suite.id, pg.id, { targets: items, linked });
   } catch (err) {
     return fail(res, err);
   } finally {
     running = false;
+    armRelease();
   }
 
-  const flow = suites.pageCheckFlow(suites.get(suite.id), suites.get(suite.id).pages[0]);
-  const c = suites.addCase(suite.id, { name: `${pg.name} loads`, pageId: pg.id, flow }, checkFlow);
-  const outcome = await run(checkFlow(flow), { suiteId: suite.id, caseId: c.id, caseName: c.name });
+  const checkFlow = checkFlowFor(space);
+  const flow = pageCheckFlow(space.suites.get(suite.id), space.suites.get(suite.id).pages[0]);
+  const c = space.suites.addCase(suite.id, { name: `${pg.name} loads`, pageId: pg.id, flow }, checkFlow);
+  const outcome = await run(checkFlow(flow), { suiteId: suite.id, caseId: c.id, caseName: c.name, space, ent: req.ent });
 
   sendOk(res, {
-    suite: suites.get(suite.id),
+    suite: space.suites.get(suite.id),
     targets: items.length,
     run: outcome,
   });
@@ -653,23 +791,35 @@ app.post('/api/suites/quickstart', async (req, res) => {
 /** A page's expectations, as a flow you can read before you run it. */
 app.get('/api/suites/:id/pages/:pageId/check', (req, res) => {
   try {
-    const s = suites.get(req.params.id);
+    const s = req.space.suites.get(req.params.id);
     const p = s.pages.find((x) => x.id === req.params.pageId);
     if (!p) throw new Error('No such page');
-    res.json({ flow: suites.pageCheckFlow(s, p) });
+    res.json({ flow: pageCheckFlow(s, p) });
   } catch (err) { fail(res, err, 404); }
 });
 
+/**
+ * Where the browser extension drops a recording.
+ *
+ * It is validated here and put in the viewer's script box — never run. Any
+ * page you visit can reach a localhost port, so an endpoint that executed what
+ * it was handed would be a remote-code path with extra steps. A human presses
+ * Run.
+ *
+ * Scoped to the organisation of the token that brought it: the recording is
+ * checked against that organisation's allowlist and lands in that
+ * organisation's script boxes and nobody else's (docs/AUTH.md §10).
+ */
 app.post('/api/recording', (req, res) => {
   const flow = String(req.body?.flow ?? '');
   let plan;
   try {
-    plan = validate(flatten(parseFlow(flow)));
+    plan = validate(flatten(parseFlow(flow)), { origins: req.space.origins });
   } catch (err) {
     return res.status(400).json({ ok: false, error: err.message });
   }
-  emit({ t: 'imported', flow, steps: plan.steps.length });
-  emit({ t: 'log', level: 'info', msg: `recording imported — ${plan.steps.length} steps, not run` });
+  emitTo(req.space.org, { t: 'imported', flow, steps: plan.steps.length });
+  emitTo(req.space.org, { t: 'log', level: 'info', msg: `recording imported — ${plan.steps.length} steps, not run` });
   res.json({ ok: true, steps: plan.steps.length });
 });
 /**
@@ -786,15 +936,17 @@ http.on('upgrade', (req, socket, head) => {
     // Bound at the upgrade and read by every message handler. `null` is auth
     // off, and nothing downstream may treat null as "anyone".
     ws.claims = claims;
+    ws.org = tenancy.orgOf(claims);
     wss.emit('connection', ws, req);
   });
 });
 
 // Starting with HOME_URL set is a person naming an origin on the command line,
 // which is the same decision the Allow button represents — so honour it rather
-// than opening on your own app and immediately refusing to drive it.
+// than opening on your own app and immediately refusing to drive it. It is the
+// laptop's decision, so it goes to the laptop's organisation.
 if (process.env.HOME_URL) {
-  try { origins.add(process.env.HOME_URL); }
+  try { local.origins.add(process.env.HOME_URL); }
   catch (err) { console.error(`  HOME_URL: ${err.message}`); }
 }
 
@@ -804,6 +956,10 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  auth        ->  ${AUTH_ON
               ? `on — an EdDSA token from the control plane is required; keys: ${[...PUBLIC_KEYS.keys()].join(', ')}`
               : 'OFF — GC_AUTH_PUBLIC_KEYS unset, anyone who can reach this port can drive it'}` +
+            `\n  tenancy     ->  ${AUTH_ON
+              ? 'state is kept per organisation under .ghostclick/<org>/ and suites/<org>/; one organisation drives at a time'
+              : `one workspace, "${LOCAL}" — .ghostclick/${LOCAL}/ and suites/${LOCAL}/`}` +
+            `${migrated.length ? `\n  migrated    ->  ${migrated.join('; ')}` : ''}` +
             `${TURNSTILE ? '\n  turnstile   ->  the CSP admits challenges.cloudflare.com (GC_TURNSTILE_SITE_KEY is set)' : ''}` +
             `\n  reach       ->  ${BLOCK_PRIVATE
               ? 'the driven page cannot reach loopback, private or link-local addresses'
@@ -812,8 +968,8 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
               ? 'the bundled apps and /go/* fixtures are served'
               : 'not served — GC_DEMO=1 serves them behind the gate'}` +
             `\n  browser     ->  ${HEADED ? 'headed — a real window you can watch' : 'headless — streamed to the canvas (HEADED=1 for a window)'}` +
-            `\n  allowed     ->  ${origins.list().join(', ')}` +
-            `\n  secrets     ->  ${vault.names().join(', ') || '(none set)'}` +
+            `\n  allowed     ->  ${AUTH_ON ? 'per organisation' : local.origins.list().join(', ')}` +
+            `\n  secrets     ->  ${AUTH_ON ? 'per organisation' : local.vault.names().join(', ') || '(none set)'}` +
             `\n  patience    ->  waits ${Number(process.env.GC_TIMEOUT_MS) || 8000}ms for a target, ` +
             `settles ${Number(process.env.GC_SETTLE_MS) || 250}ms after a click ` +
             `(GC_TIMEOUT_MS, GC_SETTLE_MS)` +
@@ -845,12 +1001,45 @@ const browser = await chromium.launch({
 page = await browser.newPage({ viewport: VIEW });
 const cdp = await page.context().newCDPSession(page);
 
-let lastFrame = null;
-const clients = new Set();
-
-function emit(ev) {
+/**
+ * Broadcast is per organisation (docs/AUTH.md §9.6 [websocket-3]).
+ *
+ * `emitTo` reaches the sockets of one organisation. `emit` — what the
+ * executor, the cursor, the navigation log and the page's console call — is
+ * the driving organisation's sockets and nobody else's: those events
+ * describe the page, and the page belongs to whoever is driving it. With
+ * auth off every socket is `local` and so is the driver, which is the
+ * room-wide broadcast the laptop always had.
+ */
+function emitTo(org, ev) {
   const msg = JSON.stringify(ev);
-  for (const c of clients) if (c.readyState === 1) c.send(msg);
+  for (const c of clients) if (c.readyState === 1 && c.org === org) c.send(msg);
+}
+function emit(ev) {
+  if (driver.org) emitTo(driver.org, ev);
+}
+
+/**
+ * Tell every socket where the lock stands, each in its own terms. Called
+ * when the lock lapses on its own — the organisation that was waiting has
+ * no other way to learn the browser is free.
+ */
+function announceDriving() {
+  for (const c of clients) {
+    if (c.readyState === 1) c.send(JSON.stringify({ t: 'driving', ...driver.describe(c.org) }));
+  }
+}
+let releaseTimer = null;
+function armRelease() {
+  if (releaseTimer) { clearTimeout(releaseTimer); releaseTimer = null; }
+  const inMs = driver.lapsesIn();
+  if (inMs === null) return;
+  releaseTimer = setTimeout(() => {
+    releaseTimer = null;
+    // Something may have touched the lock since; if so it re-armed this.
+    if (!driver.held()) announceDriving();
+  }, inMs + 50);
+  releaseTimer.unref?.();
 }
 
 /**
@@ -877,9 +1066,11 @@ cdp.on('Page.screencastFrame', async ({ data, sessionId }) => {
 
   lastFrame = Buffer.from(data, 'base64');
   for (const c of clients) {
-    // Drop frames for a viewer that is already behind rather than queueing
-    // them in Node. Video is the one thing that is always safe to drop.
-    if (c.readyState === 1 && c.bufferedAmount < 1 << 20) c.send(lastFrame, { binary: true });
+    // Only the driving organisation's viewers: a frame is a picture of
+    // somebody's page. Drop frames for a viewer that is already behind
+    // rather than queueing them in Node. Video is the one thing that is
+    // always safe to drop.
+    if (c.readyState === 1 && driver.sees(c.org) && c.bufferedAmount < 1 << 20) c.send(lastFrame, { binary: true });
   }
 });
 
@@ -911,14 +1102,17 @@ const cursor = new VirtualCursor(cdp, emit);
  * reason existed only inside a browser nobody could open devtools on. You saw
  * "expected the URL to contain /dashboard" and had to guess why it did not.
  *
- * Vault values are redacted on the way out. An app logging the token it just
- * received is not unusual, and a secret that never leaves the server must not
- * leave it through here either. Long lines are cut: a page that dumps a 2MB
- * JSON blob into console.log should not be able to do it down this socket.
+ * Vault values are redacted on the way out — the driving organisation's,
+ * since its page is the one that could print them. An app logging the token
+ * it just received is not unusual, and a secret that never leaves the
+ * server must not leave it through here either. Long lines are cut: a page
+ * that dumps a 2MB JSON blob into console.log should not be able to do it
+ * down this socket.
  */
 const LINE_MAX = 2000;
 function redact(text) {
   let out = String(text ?? '');
+  const vault = tenancy.workspace(driver.org ?? LOCAL).vault;
   for (const name of vault.names()) {
     const v = vault.get(`secrets.${name}`);
     // Two characters would match everywhere; a real secret is not that short.
@@ -1038,17 +1232,46 @@ async function publishTargets() {
 // `running` is declared at the top, so /api/state can be answered during boot.
 
 /**
+ * The organisation's vault, as the executor sees it: the plan's switch in
+ * front of the value (docs/AUTH.md §10 `vault.enabled`). The step that
+ * resolves a `$KEY` on a plan without the vault fails with the plan's
+ * refusal, and the socket is told in the shape the UI turns into an
+ * upgrade prompt.
+ */
+const vaultFor = (space, ent) => ({
+  get(ref) {
+    ent.demand('vault.enabled');
+    return space.vault.get(ref);
+  },
+});
+
+/**
  * @param meta which suite and case this plan came from, when it came from one.
  *   A plan typed into the console has no suite; that is a legitimate state and
  *   the history records it as such rather than inventing a home for it.
+ *   `space` and `ent` are the calling organisation's workspace and plan;
+ *   absent, the laptop's.
  * @returns {{ok:boolean, passed:number, total:number, error:string|null}}
  */
 async function run(plan, meta = {}) {
+  const space = meta.space ?? local;
+  const ent = meta.ent ?? tenancy.entitlements(null);
   if (running) {
     // An error, not a warning. A refused run does nothing visible, so if this
     // is quiet the only symptom is a button that appears not to work.
-    emit({ t: 'log', level: 'error', msg: 'A run is already in progress — wait for it to finish' });
+    emitTo(space.org, { t: 'log', level: 'error', msg: 'A run is already in progress — wait for it to finish' });
     return { ok: false, passed: 0, total: 0, error: 'A run is already in progress' };
+  }
+  // The browser is the driving organisation's for the length of the run, and
+  // a run is the plan's to count. Both refusals are answered to the
+  // organisation that asked, in the shape its UI acts on.
+  try {
+    take(space.org);
+    ent.check('runs.per_day', space.history.today());
+  } catch (err) {
+    emitTo(space.org, { t: 'refused', of: 'run', ...refusal(err) });
+    emitTo(space.org, { t: 'log', level: 'error', msg: err.message });
+    return { ok: false, passed: 0, total: 0, error: err.message };
   }
   running = true;
   const wasRecording = recorder.recording;
@@ -1057,8 +1280,11 @@ async function run(plan, meta = {}) {
   const results = [];
   // A run can be told how much of itself to perform. Unset means this server's
   // default, so nothing that does not ask is affected.
-  const ctx = { cursor, emit, nav, onNavigate: publishTargets, pace: paceOf(meta.pace, PACE) };
-  emit({ t: 'run.start', total: plan.steps.length, suite: plan.suite, ...meta });
+  const ctx = {
+    cursor, emit, nav, onNavigate: publishTargets, pace: paceOf(meta.pace, PACE),
+    origins: space.origins, vault: vaultFor(space, ent),
+  };
+  emit({ t: 'run.start', total: plan.steps.length, suite: plan.suite, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName });
 
   // Everything from here to the finally must be able to throw without wedging
   // the executor. It used to clear the lock on the happy path only, so a
@@ -1077,6 +1303,8 @@ async function run(plan, meta = {}) {
       } catch (err) {
         results.push({ i, ok: false, ms: Date.now() - t0, error: err.message });
         emit({ t: 'step.fail', i, ms: Date.now() - t0, error: err.message });
+        // A step the plan refused is a plan refusal, not a broken page.
+        if (err instanceof tenancy.EntitlementError) emit({ t: 'refused', of: 'run', ...refusal(err) });
         break;
       }
       await sleep(120);
@@ -1084,7 +1312,7 @@ async function run(plan, meta = {}) {
 
     const passed = results.filter((r) => r.ok).length;
     const ok = results.every((r) => r.ok);
-    const entry = history.record({
+    const entry = space.history.record({
       suite: plan.suite,
       suiteId: meta.suiteId ?? null,
       caseId: meta.caseId ?? null,
@@ -1093,6 +1321,7 @@ async function run(plan, meta = {}) {
       ms: results.reduce((a, r) => a + (r.ms ?? 0), 0),
       results,
     });
+    space.history.prune(ent.limit('history.retention_days'));
     // Same function, same IR — with outcomes folded in, the plan diagram
     // becomes the run report. Drawing it is a nicety; failing to draw it must
     // not cost you the run's verdict.
@@ -1109,8 +1338,18 @@ async function run(plan, meta = {}) {
     // back-to-back scripts hang on a silently refused second run.
     running = false;
     recorder.recording = wasRecording;
-    emit({ t: 'run.end', ok: results.every((r) => r.ok) && results.length > 0, ...meta });
+    driver.touch(space.org);
+    armRelease();
+    emit({ t: 'run.end', ok: results.every((r) => r.ok) && results.length > 0, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName });
   }
+}
+
+/** A refusal, in the shape the UI reads off the socket — the same words as the HTTP status would carry. */
+function refusal(err) {
+  if (err instanceof tenancy.EntitlementError) return { error: 'entitlement', limit: err.limit, plan: err.plan };
+  if (err instanceof tenancy.RunnerBusy) return { error: 'runner_busy', org: err.org };
+  if (err instanceof tenancy.Forbidden) return { error: 'forbidden', needs: 'admin' };
+  return { error: err.message };
 }
 
 // ---------------------------------------------------------------- sockets
@@ -1119,8 +1358,16 @@ const MAX_SOCKETS_PER_SUB = 3;
 
 wss.on('connection', (ws) => {
   const claims = ws.claims ?? null;
+  const org = ws.org;
+  const space = tenancy.workspace(org);
+  const ent = tenancy.entitlements(claims);
   // Only to this viewer — a refusal is theirs, not the room's.
   const tell = (ev) => { if (ws.readyState === 1) ws.send(JSON.stringify(ev)); };
+  /** Say no, in the shape the UI acts on, and in words for the log. */
+  const refuse = (of, err) => {
+    tell({ t: 'refused', of, ...refusal(err) });
+    tell({ t: 'log', level: 'error', msg: err.message });
+  };
 
   let expiry = null;
   if (claims) {
@@ -1135,6 +1382,10 @@ wss.on('connection', (ws) => {
     expiry = setTimeout(() => ws.close(4401, 'token expired'), Math.max(0, claims.exp * 1000 - Date.now()));
   }
   clients.add(ws);
+  // Arriving counts as activity: an organisation whose viewer has just
+  // connected is not one whose browser should be handed away.
+  driver.touch(org);
+  armRelease();
   // A socket that sends more than maxPayload, or breaks the framing, raises
   // 'error' on the socket — and an 'error' event with no listener is an
   // uncaught exception that takes the whole runner down. One bad viewer
@@ -1154,29 +1405,45 @@ wss.on('connection', (ws) => {
     try { m = JSON.parse(raw); } catch { return; }
     if (!m || typeof m !== 'object') return;
 
-    // Every message is authorised against the claims bound at the upgrade,
-    // exactly as the HTTP routes are against req.user — never against
-    // anything in the message. The driving-org lock and the per-org
-    // broadcast (docs/AUTH.md §9.5–6) read `claims.org` here; that is the
-    // runner-tenancy step. What is enforced today is step-up on origin.add.
+    /**
+     * Every message is authorised against the claims bound at the upgrade,
+     * exactly as the HTTP routes are against req.user — never against
+     * anything in the message (docs/AUTH.md §9.5 [websocket-2]). The
+     * organisation is `org`; whether it may have the browser is the
+     * driver's answer; whether it may change origins is its role's; and a
+     * socket whose plan has changed under it is closed so the UI comes
+     * back with a token that says so.
+     */
+    if (tenancy.stale(claims)) return void ws.close(4401, 'the plan changed; reconnect with a fresh token');
+    driver.touch(org);
+    armRelease();
 
     // The UI says goodbye on sign-out and before a new sign-in, and the
     // socket is dropped at once rather than left to time out [session-3].
-    if (m.t === 'bye') return void ws.close(1000, 'bye');
+    // So are the session's other sockets: `sid` is the session, and a
+    // session that signed out in one tab has signed out in all of them.
+    if (m.t === 'bye') {
+      ws.close(1000, 'bye');
+      if (claims?.sid) {
+        for (const c of clients) if (c !== ws && c.claims?.sid === claims.sid) c.close(4403, 'signed out');
+      }
+      return;
+    }
 
     if (m.t === 'command') {
+      try { take(org); } catch (err) { return refuse('command', err); }
       let plan;
       try {
         // Two front ends, one IR: the line DSL and the mermaid flow language
         // meet at validate() and the executor never learns which was typed.
         const isFlow = /\b(testcase|flowchart|graph)\s+(TD|TB|LR|RL|BT)\b/.test(m.text) || /-{2,3}>/.test(m.text);
-        plan = validate(isFlow ? flatten(parseFlow(m.text)) : parse(m.text));
+        plan = validate(isFlow ? flatten(parseFlow(m.text)) : parse(m.text), { origins: space.origins });
       } catch (err) {
-        emit({ t: 'log', level: 'error', msg: err.message });
+        emitTo(org, { t: 'log', level: 'error', msg: err.message });
         // An origin the script needs is a decision waiting for a person, not a
         // dead end. Offer the button rather than a sentence about where to
         // find one.
-        if (err.origin) emit({ t: 'needs.origin', origin: err.origin, url: err.url });
+        if (err.origin) emitTo(org, { t: 'needs.origin', origin: err.origin, url: err.url });
         return;
       }
       // Draw the plan before running it, so a diagram exists even if step 0
@@ -1187,29 +1454,31 @@ wss.on('connection', (ws) => {
       // rejection, and Node kills the process for those: one unexpected throw
       // inside a step and the whole runner disappeared, which from the browser
       // looks exactly like "Run script does nothing".
-      run(plan, { pace: paceOf(m.pace, PACE) }).catch((err) => {
-        emit({ t: 'log', level: 'error', msg: `run failed: ${err.message}` });
-        emit({ t: 'run.end', ok: false });
+      run(plan, { pace: paceOf(m.pace, PACE), space, ent }).catch((err) => {
+        emitTo(org, { t: 'log', level: 'error', msg: `run failed: ${err.message}` });
+        emitTo(org, { t: 'run.end', ok: false });
       });
       return;
     }
 
     // Point the browser anywhere the allowlist permits, then ask the page
     // what it can be told to do. This is what makes an unseen URL scriptable.
-    if (m.t === 'open' && !running) {
+    if (m.t === 'open') {
+      try { take(org); } catch (err) { return refuse('open', err); }
+      if (running) return;
       let url;
       try {
-        url = origins.normalizeUrl(m.url).href;   // "acme.com" is a host, not a path
+        url = normalizeUrl(m.url).href;   // "acme.com" is a host, not a path
       } catch (err) {
         return emit({ t: 'log', level: 'error', msg: err.message });
       }
-      if (!origins.has(new URL(url).origin)) {
+      if (!space.origins.has(new URL(url).origin)) {
         // Offer the one thing that unblocks it, rather than an error that
         // ends in "restart with an env var".
         return emit({ t: 'needs.origin', origin: new URL(url).origin, url });
       }
       try {
-        await OPS.goto(page, { url }, { cursor, emit, nav, onNavigate: publishTargets });
+        await OPS.goto(page, { url }, { cursor, emit, nav, onNavigate: publishTargets, origins: space.origins });
         emit({ t: 'log', level: 'info', msg: `opened ${url}` });
       } catch (err) {
         emit({ t: 'log', level: 'error', msg: err.message });
@@ -1217,45 +1486,65 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // Allowing an origin is a human act, through the UI. No plan can reach it,
-    // and — identical to POST /api/origins — it wants a recent authentication.
+    // Allowing an origin is a human act, through the UI — an owner's or an
+    // admin's, and, identical to POST /api/origins, one with a recent
+    // authentication and room left on the plan. No plan can reach it.
     if (m.t === 'origin.add') {
+      try { tenancy.requireManager(claims); } catch (err) { return refuse('origin.add', err); }
       if (!steppedUp(claims)) {
         tell({ t: 'refused', of: 'origin.add', error: 'step_up_required' });
         tell({ t: 'log', level: 'error', msg: 'allowing an origin needs a recent sign-in — sign in again and retry' });
         return;
       }
       try {
-        const r = origins.add(m.origin);
-        emit({ t: 'origins', origins: origins.list() });
-        emit({ t: 'log', level: 'info',
+        ent.check('origins.max', space.origins.list().length);
+        const r = space.origins.add(m.origin);
+        emitTo(org, { t: 'origins', origins: space.origins.list() });
+        emitTo(org, { t: 'log', level: 'info',
                msg: `${r.added ? 'allowed' : 'already allowed'} ${r.origin}` +
                     (r.private ? ' — private address, allowed by name' : '') });
         if (m.thenOpen) ws.send(JSON.stringify({ t: 'reopen', url: m.thenOpen }));
       } catch (err) {
-        emit({ t: 'log', level: 'error', msg: err.message });
+        refuse('origin.add', err);
       }
       return;
     }
     if (m.t === 'origin.remove') {
       try {
-        origins.remove(m.origin);
-        emit({ t: 'origins', origins: origins.list() });
+        tenancy.requireManager(claims);
+        space.origins.remove(m.origin);
+        emitTo(org, { t: 'origins', origins: space.origins.list() });
       } catch (err) {
-        emit({ t: 'log', level: 'error', msg: err.message });
+        refuse('origin.remove', err);
       }
       return;
     }
     if (m.t === 'secrets.reload') {
-      emit({ t: 'secrets', secrets: vault.reload() });
+      // Names only, and only to the socket that asked: the greeting never
+      // carries them, and neither does anyone else's socket [websocket-3].
+      try { tenancy.requireManager(claims); } catch (err) { return refuse('secrets.reload', err); }
+      tell({ t: 'secrets', secrets: space.vault.reload() });
       return;
     }
 
     // The canvas asks for a picture. Frames are damage-driven, so a viewer that
     // arrives while the page is sitting still has nothing to show and no reason
-    // to expect anything — this is how it gets the current one.
+    // to expect anything — this is how it gets the current one. Only ever the
+    // driving organisation's picture, to the driving organisation.
     if (m.t === 'frame.request') {
-      if (lastFrame && ws.readyState === 1) ws.send(lastFrame, { binary: true });
+      if (driver.sees(org) && lastFrame && ws.readyState === 1) ws.send(lastFrame, { binary: true });
+      return;
+    }
+
+    // Everything below acts on the page that is open, so it is the driving
+    // organisation's to do. A person's mouse moving over a busy runner is
+    // dropped without a word — the notice on their screen already says why —
+    // and the deliberate acts are refused out loud.
+    if (!driver.sees(org)) {
+      if (/^human\./.test(String(m.t))) return;
+      if (['inspect', 'record.start', 'record.stop'].includes(m.t)) {
+        return refuse(m.t, driver.org ? new tenancy.RunnerBusy(driver.org) : new Error('Nothing is open yet — open a URL first'));
+      }
       return;
     }
 
@@ -1309,18 +1598,24 @@ wss.on('connection', (ws) => {
   ws.on('close', () => { clients.delete(ws); if (expiry) clearTimeout(expiry); });
 
   // Now say hello. Frames are damage-driven — a static page emits nothing — so
-  // prime the viewer with the last one we held rather than leaving it black.
-  if (lastFrame) ws.send(lastFrame, { binary: true });
+  // prime the viewer with the last one we held rather than leaving it black —
+  // if the page is theirs to see. The greeting carries the driven URL and the
+  // origins of THIS organisation, and never the vault's key names: those come
+  // from GET /api/state under the token [websocket-3] [authz-tenancy-4].
+  const mine = driver.sees(org);
+  if (mine && lastFrame) ws.send(lastFrame, { binary: true });
   ws.send(JSON.stringify({
-    t: 'ready', url: page.url(),
+    t: 'ready',
+    url: mine ? page.url() : null,
     // The executor's real state. Without this a socket that reconnected during
     // a run kept a disabled Run button until someone reloaded the page.
-    running,
-    recording: recorder.recording,
-    origins: origins.list(),
-    secrets: vault.names(),        // names only — a value never leaves the server
+    running: mine && running,
+    recording: mine && recorder.recording,
+    origins: space.origins.list(),
+    org,
+    driving: driver.describe(org),
   }));
-  publishTargets();
+  if (mine) publishTargets();
 });
 
 /**

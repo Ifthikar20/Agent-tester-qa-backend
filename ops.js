@@ -1,8 +1,9 @@
 import { sleep } from './cursor.js';
 import { parseTarget, locate, aliasesFor, discover } from './targets.js';
 import { OP_NAMES, checkAction } from './vocabulary.js';
-import * as origins from './origins.js';
-import * as vault from './secrets.js';
+import { PRIVATE_HOST, forOrg as originsOf } from './origins.js';
+import { forOrg as vaultOf } from './secrets.js';
+import { LOCAL } from './org.js';
 
 const DEFAULT_ORIGIN = `http://localhost:${process.env.PORT || 3000}`;
 
@@ -132,11 +133,17 @@ async function settle(page, ms = SETTLE) {
  * The gate in front of every navigation. The list is managed at runtime by a
  * person (see origins.js) — a plan can only ever be checked against it.
  *
+ * WHICH list is the calling organisation's, handed in by whoever holds the
+ * token (docs/AUTH.md §10): a plan is checked against the allowlist of the
+ * organisation that will run it, never against a process-wide one. The
+ * default is the `local` organisation's, which is the laptop and the checks
+ * that drive it with no token at all.
+ *
  * Known gap: this checks the hostname, not what it resolves to, so a public
  * name pointing at a private address still gets through. The real fix is
  * resolve-and-pin, or an egress firewall on the container.
  */
-export function checkUrl(url) {
+export function checkUrl(url, origins = originsOf(LOCAL)) {
   let u;
   try { u = new URL(url ?? ''); }
   catch { throw new Error('goto needs an absolute http(s) url'); }
@@ -147,7 +154,7 @@ export function checkUrl(url) {
   if (origins.has(u.origin)) {
     // A wildcard is a blunt instrument, so it still does not reach the private
     // network — an internal origin has to be named on purpose.
-    if (!origins.list().includes(u.origin) && origins.PRIVATE_HOST.test(u.hostname)) {
+    if (!origins.list().includes(u.origin) && PRIVATE_HOST.test(u.hostname)) {
       throw new Error(`origin ${u.origin} is private — allow it by name, not by wildcard`);
     }
     return u;
@@ -419,7 +426,7 @@ async function pointAt(page, target, ctx, opts = {}) {
  */
 export const OPS = {
   async goto(page, step, ctx) {
-    checkUrl(step.url);                       // re-checked at run time, not just at validate
+    checkUrl(step.url, ctx.origins ?? originsOf(LOCAL));   // re-checked at run time, not just at validate
     markNav(ctx);
 
     // A goto to the URL already on screen does NOT reload — Chrome treats it as
@@ -448,7 +455,7 @@ export const OPS = {
     // trusting where it ends up is a person's.
     try {
       const landed = new URL(page.url()).origin;
-      if (landed !== new URL(step.url).origin && !origins.has(landed)) {
+      if (landed !== new URL(step.url).origin && !(ctx.origins ?? originsOf(LOCAL)).has(landed)) {
         ctx.emit?.({ t: 'needs.origin', origin: landed, url: page.url(), redirected: true });
         ctx.emit?.({
           t: 'log', level: 'warn',
@@ -511,7 +518,10 @@ export const OPS = {
     await pointAt(page, step.target, ctx, { leftEdge: true, at: step.at });
     const perf = performanceAt(ctx.pace ?? PACE);
     await ctx.cursor.click(perf.press); // focus the way a user does, not via .fill()
-    const value = step.valueRef ? vault.get(step.valueRef) : step.value;
+    // The vault is the organisation's (docs/AUTH.md §10), handed in with the
+    // context, and whether the plan may open it at all is that wrapper's
+    // question, not this step's.
+    const value = step.valueRef ? (ctx.vault ?? vaultOf(LOCAL)).get(step.valueRef) : step.value;
     if (value === undefined) throw new Error(`No value for ${step.target}`);
     await page.keyboard.press('ControlOrMeta+A');
     // Per character, so this is the largest single cost in a form-heavy case:
@@ -667,7 +677,7 @@ for (const name of Object.keys(OPS)) {
  * The property that survives is the important one: a target is always looked
  * up through a semantic locator, never interpreted as a selector.
  */
-export function validate(plan, baseOrigin = DEFAULT_ORIGIN) {
+export function validate(plan, { origins = originsOf(LOCAL), baseOrigin = DEFAULT_ORIGIN } = {}) {
   if (!plan || !Array.isArray(plan.steps)) throw new Error('Plan has no steps');
   if (plan.steps.length > 60) throw new Error('Plan too long');
 
@@ -679,7 +689,7 @@ export function validate(plan, baseOrigin = DEFAULT_ORIGIN) {
     if (why !== true) throw new Error(`Step ${i}: ${why}`);
 
     if (s.op === 'goto') {
-      try { origin = checkUrl(s.url).origin; }
+      try { origin = checkUrl(s.url, origins).origin; }
       catch (e) {
         // Re-wrap for context, but carry the origin through — the UI turns it
         // into an Allow button, and a plain string cannot be pressed.

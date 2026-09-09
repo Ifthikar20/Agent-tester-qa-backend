@@ -13,7 +13,7 @@ So the boundary is not a convention. It is four rules, and
    ┌───────────────────────────┐        ┌───────────────────────────┐
    │  web/                     │        │  server.js, ops.js, …     │
    │    src/         the app   │        │  public/     pages to drive
-   │    src/lang/    a copy    │        │  suites/     saved suites │
+   │    src/lang/    a copy    │        │  suites/<org>/ saved suites
    │    dist/        the build │        │  scripts/    the checks   │
    │    package.json           │        │  package.json             │
    └───────────┬───────────────┘        └────────────┬──────────────┘
@@ -164,16 +164,18 @@ becomes the check that the published package version matches.
   `/_allauth/` (plus the one Google callback under `/accounts/`); MFA is the
   next step of docs/AUTH.md and slots in behind the same prefix without the
   runner noticing.
-- **RBAC on the runner.** The control plane now has organisations, roles and
-  plans, and the token carries `org`, `role` and `ent`; the runner does not
-  read them yet, so anyone who can sign in still drives everything. Reading
-  them — and keying every store by `org` — is the runner-tenancy step of
-  docs/AUTH.md, and it still crosses this boundary only inside the token.
+- **Plans on the runner are numbers in a token.** The runner keys every
+  store by `org`, enforces `ent` and honours `ent_v` and `role` — and learns
+  all four from the signature and nothing else. It never asks the control
+  plane what a plan allows, and the control plane never reads a suite: the
+  facts cross this boundary inside the token, once, and each side enforces
+  its own half (docs/AUTH.md §10).
 - **The WebSocket accepts any path.** The ticket is the gate, and with auth on
   the `Origin` header must be the app's — the repository's own check scripts,
   which connect from Node with no `Origin` at all, run against an open runner.
   Narrowing the path would break six of them and secure nothing.
 - **One driven browser, one process.** The runner holds a single Playwright
-  browser and a single run lock. A login says *who*, not *which runner* — two
-  signed-in people still share one browser, and that is the scaling
-  conversation rather than a repository-layout one.
+  browser and a single run lock, with one organisation driving at a time and
+  the others told it is busy (tenancy.js). A login says *who*, not *which
+  runner* — two organisations driving at once is a second runner, and that is
+  the scaling conversation rather than a repository-layout one.

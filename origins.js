@@ -9,13 +9,17 @@
  * still cannot add to it — only a person can, through the UI, one origin at a
  * time. That is the distinction that matters: the list exists to stop generated
  * text from reaching arbitrary hosts, not to stop you from choosing one.
+ *
+ * One list PER ORGANISATION (docs/AUTH.md §10). An origin that Acme allowed is
+ * a decision Acme made about where Acme's browser may go; Globex allowing it
+ * is a separate decision, and the two lists live in separate files under
+ * `.ghostclick/<org>/`. `forOrg(org)` hands back the organisation's list, the
+ * same object every time, so every caller in the process sees one state.
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { DEMO } from './mode.js';
-
-const STORE = fileURLToPath(new URL('./.ghostclick/origins.json', import.meta.url));
+import { stateDir } from './org.js';
 
 /**
  * This process's own origin, where the bundled demo apps live. Seeded as
@@ -28,25 +32,6 @@ const own = () => `http://localhost:${process.env.PORT || 3000}`;
 /** Loopback and the private ranges, including where cloud metadata lives. */
 export const PRIVATE_HOST =
   /^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|\[?::1\]?|.*\.local|.*\.internal)$/i;
-
-const seed = () => {
-  const fromEnv = (process.env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-  let saved = [];
-  try { saved = JSON.parse(readFileSync(STORE, 'utf8')).origins ?? []; } catch { /* first run */ }
-  return new Set([...(DEMO ? [own()] : []), ...saved, ...fromEnv]);
-};
-
-const allowed = seed();
-
-function persist() {
-  try {
-    mkdirSync(dirname(STORE), { recursive: true });
-    writeFileSync(STORE, JSON.stringify({ origins: [...allowed] }, null, 2));
-  } catch { /* read-only checkout; the list still works for this session */ }
-}
-
-export const list = () => [...allowed];
-export const has = (origin) => allowed.has(origin) || allowed.has('*');
 
 /**
  * Turn what a person types into a URL. "treasury.acme.com" is a host, not a
@@ -67,17 +52,56 @@ export function normalizeUrl(input) {
   return u;
 }
 
-export function add(input) {
-  const u = normalizeUrl(input);
-  if (allowed.has(u.origin)) return { origin: u.origin, added: false, private: PRIVATE_HOST.test(u.hostname) };
-  allowed.add(u.origin);
-  persist();
-  return { origin: u.origin, added: true, private: PRIVATE_HOST.test(u.hostname) };
-}
+const stores = new Map();
 
-export function remove(origin) {
-  if (DEMO && origin === own()) throw new Error('That is where the demo apps are served from');
-  const gone = allowed.delete(origin);
-  if (gone) persist();
-  return gone;
+/**
+ * The allowlist of one organisation. Memoised: two callers asking for the
+ * same organisation must share one Set, or an origin allowed through the
+ * socket would not be allowed for the next HTTP call.
+ *
+ * Seeds are the operator's, not the organisation's: the demo origin in demo
+ * mode and ALLOWED_ORIGINS from the environment are boot-time decisions
+ * made by whoever started the process, so every organisation gets them.
+ * They still count towards `origins.max` — the plan bounds the size of the
+ * list, and the list is what the gate reads.
+ */
+export function forOrg(org) {
+  const have = stores.get(org);
+  if (have) return have;
+
+  const STORE = join(stateDir(org), 'origins.json');
+  const fromEnv = (process.env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  let saved = [];
+  try { saved = JSON.parse(readFileSync(STORE, 'utf8')).origins ?? []; } catch { /* first run */ }
+  const allowed = new Set([...(DEMO ? [own()] : []), ...saved, ...fromEnv]);
+
+  function persist() {
+    try {
+      mkdirSync(stateDir(org), { recursive: true });
+      writeFileSync(STORE, JSON.stringify({ origins: [...allowed] }, null, 2));
+    } catch { /* read-only checkout; the list still works for this session */ }
+  }
+
+  const store = {
+    org,
+    list: () => [...allowed],
+    has: (origin) => allowed.has(origin) || allowed.has('*'),
+
+    add(input) {
+      const u = normalizeUrl(input);
+      if (allowed.has(u.origin)) return { origin: u.origin, added: false, private: PRIVATE_HOST.test(u.hostname) };
+      allowed.add(u.origin);
+      persist();
+      return { origin: u.origin, added: true, private: PRIVATE_HOST.test(u.hostname) };
+    },
+
+    remove(origin) {
+      if (DEMO && origin === own()) throw new Error('That is where the demo apps are served from');
+      const gone = allowed.delete(origin);
+      if (gone) persist();
+      return gone;
+    },
+  };
+  stores.set(org, store);
+  return store;
 }

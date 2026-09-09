@@ -184,7 +184,7 @@ and a trap for a container. Four volumes, or every deploy silently resets:
 
 | Volume | Holds | Lost without it |
 |---|---|---|
-| `ghostclick-state` | run history, the **origin allowlist**, the vault | Every allowed origin. Every run. |
+| `ghostclick-state` | run history, the **origin allowlist**, the vault — one directory per organisation, `.ghostclick/<org>/` | Every allowed origin. Every run. |
 | `postgres-data` | the accounts, the sessions, the audit log | Every account. You would create a superuser on every deploy. |
 | `caddy-data` | certificates and the ACME account key | A fresh certificate request per deploy, against a rate limit that will eventually say no. |
 | `control-static` | Django's collected admin CSS | Nothing you would miss for long; it is rebuilt by `collectstatic`. |
@@ -192,8 +192,19 @@ and a trap for a container. Four volumes, or every deploy silently resets:
 Redis has no volume on purpose: it holds rate-limit counters, and a restart
 that forgets them hands out a few extra attempts rather than losing anything.
 
-Suites are the happy exception: `suites/*.json` is **in git**, so cases deploy
-with the code and need no volume. That is the point of storing them there.
+Suites are the happy exception: `suites/<org>/*.json` is **in git**, so cases
+deploy with the code and need no volume. That is the point of storing them
+there. A suite belongs to the organisation whose directory it is in; a file
+committed under `suites/local/` is the laptop's and no signed-in organisation
+sees it.
+
+> **Upgrading a box from before per-organisation state.** The first boot
+> moves `.ghostclick/origins.json`, `runs.json` and `secrets.json` under
+> `.ghostclick/local/`, and `suites/*.json` under `suites/local/`, and says
+> so in the runner's banner (`migrated -> …`). Nothing is deleted. Those
+> files were made by a runner with no login, which is what `local` means;
+> an organisation that should have them gets a copy placed under its own
+> directory by an operator, not by the code guessing.
 
 > **Upgrading a box that ran the SQLite version.** The control plane used to
 > keep its accounts in a `control-db` volume. It now reads Postgres and refuses

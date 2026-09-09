@@ -314,6 +314,12 @@ async function main(argv) {
     step('signing key', keys.made
       ? `generated, kept in .ghostclick/signing-key.pem (private) and auth-public-keys.json (${Object.keys(keys.publicKeys).join(', ')})`
       : `kept — kid ${Object.keys(keys.publicKeys).join(', ')}`);
+    // The runner enforces the plan (docs/AUTH.md §10), and a personal
+    // organisation starts on `free`, which has no vault — so the bundled
+    // demo's sign-in flow, which reads $QA_PASS, is refused with a 402
+    // until the organisation is moved to a plan that has one. Said here,
+    // because from the console it reads as a step that failed.
+    step('plans', 'every personal organisation starts on free (3 suites, 2 origins, no vault); move it to team in /admin/ to run the demo sign-in flow');
     if (existsSync(OLD_SECRET_FILE)) {
       step('', '.ghostclick/auth-secret is the old shared HMAC secret; nothing reads it now, delete it');
     }
