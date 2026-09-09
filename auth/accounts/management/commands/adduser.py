@@ -162,10 +162,11 @@ class Command(BaseCommand):
         else:
             self.stdout.write('    password   the one you piped in')
         if user.is_staff:
-            # docs/AUTH.md §12: staff meets the MFA policy the moment the mfa
-            # step lands, and the person should hear it from the command
-            # that made them staff rather than from a 403.
-            self.stdout.write('    admin      yes - /admin/ is open to it, and will demand an authenticator at first sign-in')
+            # docs/AUTH.md §12: staff must hold a second factor, and the
+            # person should hear it from the command that made them staff
+            # rather than from being sent to enrol one at first sign-in.
+            self.stdout.write('    admin      yes - /admin/ opens to it once an authenticator is enrolled; the first')
+            self.stdout.write('               sign-in is sent to /app/security/mfa to set one up (an app or a passkey)')
         else:
             self.stdout.write('    admin      no')
         self.stdout.write("    email      marked verified - no code is asked for at first sign-in")

@@ -39,6 +39,17 @@ And the social adapter, for Google (docs/AUTH.md §6):
   save_user                     a Google sign-up's address is verified on
                                 Google's word, so what verification does
                                 (the log row, the invitations) happens here
+
+And the MFA adapter (docs/AUTH.md §5, §12):
+
+  encrypt / decrypt             TOTP secrets and recovery-code seeds are
+                                Fernet-encrypted with GC_MFA_KEY, a key
+                                that is not DJANGO_SECRET_KEY [ops-supply-2]
+  get_public_key_credential_rp_entity
+                                the passkey relying party is the public
+                                host, from GC_PUBLIC_URL, never the Host
+                                header of whoever is asking
+  get_totp_issuer               the product's name, not the request's host
 """
 import logging
 import secrets
@@ -47,8 +58,10 @@ from urllib.parse import urlsplit
 from allauth.account.adapter import DefaultAccountAdapter
 from allauth.account.models import EmailAddress
 from allauth.core import context
+from allauth.mfa.adapter import DefaultMFAAdapter
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from allauth.socialaccount.models import SocialAccount
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
@@ -297,6 +310,64 @@ class SocialAccountAdapter(DefaultSocialAccountAdapter):
         # Where a connect lands when the SPA gave no callback_url; it
         # always gives one, and this is the page it gives.
         return f'{settings.GC_APP_URL}/security'
+
+
+class MFAAdapter(DefaultMFAAdapter):
+    """
+    The second factor's secrets, and the passkey relying party.
+
+    allauth stores a TOTP secret and a recovery-code seed as text in the
+    Authenticator row. A database dump would then be every second factor in
+    the clear — and the dump is the thing that leaves the box in a backup.
+    So the two hooks allauth provides for exactly this encrypt with a key
+    that lives in the environment beside the signing key and nowhere near
+    the database [ops-supply-2].
+    """
+
+    ISSUER = 'ghostclick'
+
+    # ---------------------------------------------------------------- at rest
+
+    @staticmethod
+    def fernet():
+        # Several keys are a rotation: the first encrypts, every one is
+        # tried on decrypt, so a re-encryption can happen row by row rather
+        # than in one outage. Built per call rather than at import so a
+        # test can override the setting; Fernet construction is cheap.
+        keys = [k.strip() for k in str(getattr(settings, 'GC_MFA_KEY', '')).split(',') if k.strip()]
+        return MultiFernet([Fernet(k) for k in keys])
+
+    def encrypt(self, text):
+        return self.fernet().encrypt(str(text).encode('utf-8')).decode('ascii')
+
+    def decrypt(self, encrypted_text):
+        try:
+            return self.fernet().decrypt(str(encrypted_text).encode('ascii')).decode('utf-8')
+        except (InvalidToken, ValueError, UnicodeDecodeError):
+            # A row this key cannot open verifies no code and says so as an
+            # incorrect code, which is what the person can act on; the
+            # operator finds the rotated-away key in the log, not the user.
+            log.error('an authenticator secret could not be decrypted with GC_MFA_KEY; was the key rotated away?')
+            return ''
+
+    # ---------------------------------------------------------------- the relying party
+
+    def get_totp_issuer(self):
+        return self.ISSUER
+
+    def _get_site_name(self):
+        # allauth reads the request's Host header here. The product has a
+        # name, and the host is whatever the caller said it was.
+        return self.ISSUER
+
+    def get_public_key_credential_rp_entity(self):
+        # The RP ID is derived from the configured origin, so a ceremony is
+        # bound to the deployment's own host whatever Host header arrived.
+        # fido2 then refuses any origin that is not that host or under it,
+        # and accounts.webauthn.check_origin refuses anything but the exact
+        # origin before fido2 is even asked.
+        from . import webauthn
+        return {'id': webauthn.rp_id(), 'name': self.ISSUER}
 
 
 def _email_of(sociallogin):

@@ -1,3 +1,4 @@
+from allauth.mfa.models import Authenticator
 from allauth.socialaccount.models import SocialApp, SocialToken
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
@@ -14,6 +15,29 @@ from .models import AuthEvent, EmailAddressAdded, PreviousEmail, User
 # Google identity opens which account is exactly what an operator looks up.
 admin.site.unregister(SocialApp)
 admin.site.unregister(SocialToken)
+# allauth's own screen for authenticators puts the `data` column in an
+# editable form. It is ciphertext now (accounts.adapters.MFAAdapter), but a
+# form that can rewrite a second factor is still a form a taken-over staff
+# session could use to plant one; the one thing an operator legitimately
+# does here is remove an authenticator for someone locked out, and that
+# survives below.
+admin.site.unregister(Authenticator)
+
+
+@admin.register(Authenticator)
+class AuthenticatorAdmin(admin.ModelAdmin):
+    raw_id_fields = ['user']
+    list_display = ['user', 'type', 'created_at', 'last_used_at']
+    list_filter = ['type', 'created_at', 'last_used_at']
+    search_fields = ['user__email']
+    fields = ['user', 'type', 'created_at', 'last_used_at']
+    readonly_fields = ['user', 'type', 'created_at', 'last_used_at']
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(User)

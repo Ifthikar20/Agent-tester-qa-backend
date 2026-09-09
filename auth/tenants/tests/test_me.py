@@ -5,7 +5,7 @@ from django.test import TestCase
 
 from ..models import Membership, Role
 from ..session import ORG_KEY
-from .support import Api, member, org, user
+from .support import Api, give_authenticator, member, org, user
 
 
 class MeShapeTests(TestCase):
@@ -13,6 +13,7 @@ class MeShapeTests(TestCase):
         self.ada = user('ada@acme.example', name='Ada', is_staff=True)
         self.acme = org('acme', plan='team')
         member(self.acme, self.ada, Role.ADMIN)
+        give_authenticator(self.ada)
         self.api = Api()
         self.api.login('ada@acme.example')
 
@@ -24,7 +25,9 @@ class MeShapeTests(TestCase):
         self.assertEqual(me['org']['role'], 'owner')
         self.assertEqual([(o['slug'], o['role']) for o in me['orgs']], [('ada', 'owner'), ('acme', 'admin')])
         self.assertEqual(me['entitlements']['suites.max'], 3)       # the personal org is free
-        self.assertEqual(me['mfa'], {'required': False, 'enrolled': False})
+        # Staff, and an admin of acme: both name the account (docs/AUTH.md §5.4),
+        # and only the second is said — there is no isStaff [authz-tenancy-6].
+        self.assertEqual(me['mfa'], {'required': True, 'enrolled': True, 'reasons': ['manages_organisation']})
         self.assertEqual(me['flags'], {})
 
     def test_there_is_no_is_staff(self):

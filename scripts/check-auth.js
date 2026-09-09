@@ -224,7 +224,7 @@ const python = spawnSync('python3', ['-c',
   + 'print(kid_of(load_private(os.environ["K"])))\n'
   + 'print(mint(subject=42, email="qa@example.com", key=os.environ["K"], ttl=600,\n'
   + '           org="acme", role="admin", ent={"suites.max": 25, "vault.enabled": True, "runs.per_day": None}, ent_v=7,\n'
-  + '           amr=["password"], auth_time=1, su=2, sid="s"))',
+  + '           amr=["otp", "password"], auth_time=1, su=2, sid="s"))',
 ], { cwd: AUTH_DIR, encoding: 'utf8', env: { ...process.env, K: PRIVATE_PEM } });
 
 if (!existsSync(AUTH_DIR)) {
@@ -260,7 +260,15 @@ if (!existsSync(AUTH_DIR)) {
     } else {
       bad('and so do the organisation, role and entitlements', JSON.stringify({ org: claims.org, role: claims.role, ent, ent_v: claims.ent_v }));
     }
-    if (Array.isArray(claims.amr) && claims.amr[0] === 'password' && claims.auth_time === 1 && claims.su === 2 && claims.sid === 's' && typeof claims.jti === 'string') {
+    /**
+     * amr is a LIST of the methods used (docs/AUTH.md §8): a second factor
+     * rides beside the password, in the runner's vocabulary, and the runner
+     * reads su — never amr — to decide step-up; but a runner that later
+     * wants to know whether a session proved a second factor must find the
+     * word here, not a joined string or the last one only.
+     */
+    if (Array.isArray(claims.amr) && claims.amr.length === 2 && claims.amr.includes('password') && claims.amr.includes('otp')
+        && claims.auth_time === 1 && claims.su === 2 && claims.sid === 's' && typeof claims.jti === 'string') {
       ok('and amr, auth_time, su, sid and jti', `amr=${claims.amr} su=${claims.su}`);
     } else bad('and amr, auth_time, su, sid and jti', JSON.stringify({ amr: claims.amr, auth_time: claims.auth_time, su: claims.su, sid: claims.sid, jti: claims.jti }));
   } catch (err) {

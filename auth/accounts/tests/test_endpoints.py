@@ -22,7 +22,7 @@ from django.test import TestCase, override_settings
 
 from ..tokens import ALGORITHM, AUDIENCE, ISSUER, NoSigningKey, kid_of, load_private, mint
 from . import keys
-from .support import HEADLESS, PASSWORD, Api, make_user
+from .support import HEADLESS, PASSWORD, Api, give_authenticator, make_user
 
 User = get_user_model()
 
@@ -240,10 +240,21 @@ class AdminLoginTests(TestCase):
         self.assertEqual(r.status_code, 302)
 
     def test_a_staff_session_made_through_allauth_gets_in(self):
-        make_user('staff@example.com', is_staff=True)
+        staff = make_user('staff@example.com', is_staff=True)
+        give_authenticator(staff)
         api = Api()
         api.login('staff@example.com')
         self.assertEqual(api.get('/admin/').status_code, 200)
+
+    def test_staff_without_an_authenticator_is_sent_to_enrol_one(self):
+        # docs/AUTH.md §3, §12: /admin/ demands the second factor, and the
+        # admin is HTML, so the answer is the SPA's enrolment page.
+        make_user('staff@example.com', is_staff=True)
+        api = Api()
+        api.login('staff@example.com')
+        r = api.get('/admin/')
+        self.assertEqual(r.status_code, 302)
+        self.assertTrue(r['Location'].endswith('/security/mfa'), r['Location'])
 
     def test_a_non_staff_session_is_refused(self):
         make_user('qa@example.com')

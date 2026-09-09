@@ -303,4 +303,4 @@ class EnumerationTests(TestCase):
     def test_the_session_endpoint_names_the_flows_and_nothing_about_accounts(self):
         r = Api().get(f'{HEADLESS}/auth/session')
         self.assertEqual(r.status_code, 401)
-        self.assertEqual({f['id'] for f in r.json()['data']['flows']}, {'login', 'signup'})
+        self.assertEqual({f['id'] for f in r.json()['data']['flows']}, {'login', 'signup', 'mfa_login_webauthn'})

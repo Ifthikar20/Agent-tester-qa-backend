@@ -7,7 +7,7 @@ from accounts.tests import keys
 from accounts.tests.keys import claims_of
 
 from ..models import Membership, Organization, Role
-from .support import Api, member, org, user
+from .support import Api, give_authenticator, member, org, user
 
 
 @override_settings(GC_SIGNING_KEY=keys.PRIVATE_PEM, GC_TOKEN_TTL=600)
@@ -16,6 +16,7 @@ class TokenClaimsTests(TestCase):
         self.ada = user('ada@acme.example')
         self.acme = org('acme', plan='team', entitlement_overrides={'suites.max': 30})
         member(self.acme, self.ada, Role.ADMIN)
+        give_authenticator(self.ada)      # an admin must hold one to mint at all (docs/AUTH.md §5.4)
         self.api = Api()
         self.api.login('ada@acme.example')
 

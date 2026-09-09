@@ -1,5 +1,5 @@
 """What the tenants tests share: accounts, organisations, a client that signs in."""
-from accounts.tests.support import PASSWORD, Api, User, make_user, token_from_mail  # noqa: F401
+from accounts.tests.support import PASSWORD, Api, User, give_authenticator, make_user, token_from_mail  # noqa: F401
 
 from ..models import Membership, Organization, Plan, Role
 

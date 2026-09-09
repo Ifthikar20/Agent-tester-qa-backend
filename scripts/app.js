@@ -114,7 +114,9 @@ export function envFor(opts, keys, base = {}, root = ROOT) {
     },
     control: {
       ...base,
-      ...(opts.auth ? { GC_SIGNING_KEY: keys.privatePem, GC_WEB_ORIGIN: webOrigin } : {}),
+      // The private key, and the key second factors are encrypted with:
+      // both the control plane's alone (docs/AUTH.md §12).
+      ...(opts.auth ? { GC_SIGNING_KEY: keys.privatePem, GC_MFA_KEY: keys.mfaKey, GC_WEB_ORIGIN: webOrigin } : {}),
       DJANGO_DEBUG: '1',
       DJANGO_ALLOWED_HOSTS: 'localhost,127.0.0.1,[::1]',
     },
@@ -146,7 +148,28 @@ export function choosePython(candidates) {
 // ---------------------------------------------------------------- the keypair
 const PRIVATE_FILE = join(ROOT, '.ghostclick', 'signing-key.pem');
 const PUBLIC_FILE = join(ROOT, '.ghostclick', 'auth-public-keys.json');
+const MFA_KEY_FILE = join(ROOT, '.ghostclick', 'mfa-key');
 const OLD_SECRET_FILE = join(ROOT, '.ghostclick', 'auth-secret');
+
+/**
+ * The key the control plane encrypts authenticator secrets with, kept
+ * beside the signing key for the same reason: regenerated on every start it
+ * would make every enrolled second factor unreadable, which reads as "my
+ * code stopped working". Made by the control plane's own command, 0600,
+ * handed to the control plane's process and to no other.
+ */
+function mfaKey(py) {
+  if (existsSync(MFA_KEY_FILE)) {
+    const key = readFileSync(MFA_KEY_FILE, 'utf8').trim();
+    if (/^[A-Za-z0-9_-]{43}=$/.test(key)) return key;
+  }
+  const r = quiet(py, ['manage.py', 'mfa_key', '--json'], { cwd: join(ROOT, 'auth'), env: { ...process.env, DJANGO_DEBUG: '1' } });
+  if (!r.ok) fail(`could not generate a second-factor key:\n${r.out}`);
+  const key = JSON.parse(r.out.trim().split(/\r?\n/).pop()).mfa_key;
+  mkdirSync(dirname(MFA_KEY_FILE), { recursive: true });
+  writeFileSync(MFA_KEY_FILE, `${key}\n`, { mode: 0o600 });
+  return key;
+}
 
 /**
  * The keypair executor tokens are signed with, made by the control plane's
@@ -281,6 +304,7 @@ async function main(argv) {
     py = python();
     django(py);
     keys = keypair(py);
+    keys.mfaKey = mfaKey(py);
   }
   const env = envFor(opts, keys);
 

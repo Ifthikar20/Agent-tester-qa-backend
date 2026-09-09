@@ -152,6 +152,11 @@ services:
       # together every token is a "bad signature" and reads as a broken login.
       GC_SIGNING_KEY: ${GC_SIGNING_KEY:?set GC_SIGNING_KEY in .env.prod}
       GC_TOKEN_TTL: ${GC_TOKEN_TTL:-600}
+      # The key TOTP secrets and recovery codes are encrypted with at rest
+      # (docs/AUTH.md §12) — this container only, like the signing key, and
+      # required: without it the settings module refuses to start rather
+      # than store second factors in the clear.
+      GC_MFA_KEY: ${GC_MFA_KEY:?set GC_MFA_KEY in .env.prod}
       # Mail. SMTP unless a backend is named; the settings module refuses SMTP
       # with no host rather than let the first password reset find out.
       DJANGO_EMAIL_BACKEND: ${DJANGO_EMAIL_BACKEND:-}

@@ -21,17 +21,29 @@ request reaches the subclass first:
   auth/password/request  an address the account used until a week ago still
                          identifies it, so an email change can be undone
                          from the old mailbox [mfa-recovery-3]
+  the four WebAuthn views
+                         every ceremony demands user verification, and a
+                         credential made on any origin but the app's own is
+                         refused before allauth reads it (accounts/webauthn.py)
+                         [mfa-recovery-5]
+  auth/sessions          ending other sessions is a row in the audit log
 
 Everything else — the codes, the rate limits, the session cycling, the
 responses the SPA reads — is allauth's own.
 """
 from allauth.account.forms import ResetPasswordForm
+from allauth.core.internal.httpkit import authenticated_user
 from allauth.headless.account import inputs as allauth_inputs
 from allauth.headless.account import views as allauth_views
 from allauth.headless.internal.restkit import inputs
+from allauth.headless.mfa import inputs as mfa_inputs
+from allauth.headless.mfa import response as mfa_response
+from allauth.headless.mfa import views as mfa_views
+from allauth.headless.usersessions import views as usersessions_views
+from allauth.mfa.base.forms import ReauthenticateForm
 from django.core.exceptions import ValidationError
 
-from . import policy, turnstile
+from . import policy, turnstile, webauthn
 from .events import client_ip, record
 from .models import AuthEvent, PreviousEmail
 
@@ -118,3 +130,116 @@ class SignupView(allauth_views.SignupView):
 
 class RequestPasswordResetView(allauth_views.RequestPasswordResetView):
     input_class = RequestPasswordResetInput
+
+
+# ---------------------------------------------------------------- passkeys
+#
+# The origin check runs in the field's own clean, which Django runs before
+# the form's, so a credential from elsewhere is refused before allauth's
+# clean() hands it to fido2 — and with the same "incorrect code" every
+# other refusal gets.
+
+class PinnedOrigin:
+    def clean_credential(self):
+        webauthn.check_origin(self.cleaned_data.get('credential'))
+        parent = getattr(super(), 'clean_credential', None)
+        return parent() if parent else self.cleaned_data['credential']
+
+
+class AddWebAuthnInput(PinnedOrigin, mfa_inputs.AddWebAuthnInput):
+    pass
+
+
+class AuthenticateWebAuthnInput(PinnedOrigin, mfa_inputs.AuthenticateWebAuthnInput):
+    pass
+
+
+class ReauthenticateWebAuthnInput(PinnedOrigin, mfa_inputs.ReauthenticateWebAuthnInput):
+    pass
+
+
+class LoginWebAuthnInput(PinnedOrigin, mfa_inputs.LoginWebAuthnInput):
+    pass
+
+
+class ManageWebAuthnView(mfa_views.ManageWebAuthnView):
+    input_class = {**mfa_views.ManageWebAuthnView.input_class, 'POST': AddWebAuthnInput}
+
+    def get(self, request, *args, **kwargs):
+        # allauth's begin_registration, with reauthentication checked the
+        # same way, and user verification required whether or not the key
+        # will sign in on its own.
+        from allauth.account.internal.flows.reauthentication import raise_if_reauthentication_required
+        raise_if_reauthentication_required(request)
+        options = webauthn.begin_registration(request.user, 'passwordless' in request.GET)
+        return mfa_response.AddWebAuthnResponse(request, options)
+
+
+class AuthenticateWebAuthnView(mfa_views.AuthenticateWebAuthnView):
+    input_class = {'POST': AuthenticateWebAuthnInput}
+
+    def get(self, request, *args, **kwargs):
+        return mfa_response.WebAuthnRequestOptionsResponse(request, webauthn.begin_authentication(self.stage.login.user))
+
+
+class ReauthenticateWebAuthnView(mfa_views.ReauthenticateWebAuthnView):
+    input_class = {'POST': ReauthenticateWebAuthnInput}
+
+    def get(self, request, *args, **kwargs):
+        return mfa_response.WebAuthnRequestOptionsResponse(request, webauthn.begin_authentication(authenticated_user(request)))
+
+
+class LoginWebAuthnView(mfa_views.LoginWebAuthnView):
+    input_class = {'POST': LoginWebAuthnInput}
+
+    def get(self, request, *args, **kwargs):
+        return mfa_response.WebAuthnRequestOptionsResponse(request, webauthn.begin_authentication())
+
+
+# ---------------------------------------------------------------- the app
+
+class ManageTOTPView(mfa_views.ManageTOTPView):
+    def get(self, request, *args, **kwargs):
+        # allauth answers "not enrolled" with the secret and the otpauth URL;
+        # the SPA also needs a picture of it, and the control plane already
+        # holds the QR library the adapter uses. Drawn here rather than in
+        # the browser so the UI bundles nothing for it — the CSP admits no
+        # script from anywhere else.
+        response = super().get(request, *args, **kwargs)
+        if response.status_code == 404:
+            from allauth.mfa.adapter import get_adapter
+            import json
+            body = json.loads(response.content)
+            url = body.get('meta', {}).get('totp_url')
+            if url:
+                body['meta']['svg'] = get_adapter().build_totp_svg(url)
+                response.content = json.dumps(body)
+        return response
+
+
+# ---------------------------------------------------------------- the code, as a reauthentication
+
+class ReauthenticateInput(ReauthenticateForm, inputs.Input):
+    pass
+
+
+class ReauthenticateView(mfa_views.ReauthenticateView):
+    # allauth's view validates the code with its sign-in form, whose signal
+    # says nothing about this being a reauthentication; the audit row that
+    # docs/AUTH.md §7.4 wants ("this cookie proved the app again at 14:02")
+    # needs the form that says so.
+    input_class = ReauthenticateInput
+
+
+# ---------------------------------------------------------------- sessions
+
+class SessionsView(usersessions_views.SessionsView):
+    def delete(self, request, *args, **kwargs):
+        # Which sessions, before they are gone: the input has resolved the
+        # ids to rows that belong to this user and no other.
+        chosen = list(self.input.cleaned_data['sessions'])
+        user, own = request.user, request.session.session_key
+        response = super().delete(request, *args, **kwargs)
+        record(AuthEvent.Kind.SESSIONS_ENDED, request, user=user, count=len(chosen),
+               current=any(s.session_key == own for s in chosen))
+        return response

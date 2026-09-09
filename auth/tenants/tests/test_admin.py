@@ -10,6 +10,8 @@ from django.test import Client, RequestFactory, TestCase
 from accounts.admin import UserAdmin
 
 from ..models import Organization, Plan
+from accounts.tests.support import give_authenticator
+
 from .support import PASSWORD, User, user
 
 
@@ -27,6 +29,9 @@ class SuperuserFieldTests(TestCase):
         self.root = User.objects.create_superuser(email='root@example.com', password=PASSWORD)
         self.staff = user('staff@example.com', is_staff=True)
         self.staff.user_permissions.add(*Permission.objects.filter(content_type__app_label='accounts'))
+        # Staff hold an authenticator, or /admin/ sends them to enrol one.
+        give_authenticator(self.root)
+        give_authenticator(self.staff)
         self.model_admin = UserAdmin(User, admin.site)
 
     def as_(self, who):

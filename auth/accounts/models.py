@@ -108,6 +108,14 @@ class AuthEvent(models.Model):
         GOOGLE_REFUSED = 'google_refused', 'Google sign-in refused'
         GOOGLE_CONNECTED = 'google_connected', 'Google account connected'
         GOOGLE_DISCONNECTED = 'google_disconnected', 'Google account disconnected'
+        # The second factor (docs/AUTH.md §5). `detail.type` is the kind of
+        # authenticator; a failure is one wrong code, which is what a
+        # guessing campaign looks like from the log.
+        MFA_ENROLLED = 'mfa_enrolled', 'authenticator added'
+        MFA_REMOVED = 'mfa_removed', 'authenticator removed'
+        MFA_RESET = 'mfa_reset', 'recovery codes regenerated'
+        MFA_FAILED = 'mfa_failed', 'second factor refused'
+        SESSIONS_ENDED = 'sessions_ended', 'other sessions signed out'
 
     at = models.DateTimeField(default=timezone.now, db_index=True)
     # A CharField with choices rather than an enum column: later flows add

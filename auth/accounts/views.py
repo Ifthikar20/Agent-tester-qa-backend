@@ -36,7 +36,7 @@ from django.views.decorators.http import require_http_methods
 from tenants import plans
 from tenants.session import describe, selected
 
-from . import google, turnstile
+from . import google, mfa, turnstile
 from .events import LOGIN_AT, auth_events, record
 from .models import AuthEvent
 from .ratelimit import over
@@ -61,19 +61,16 @@ def whoami(request):
     browser can show itself; nothing the runner enforces may hang off it
     [authz-tenancy-6].
 
-    mfa.required is true today for one reason of the four in docs/AUTH.md
-    §5.4: the account has no usable password, which is what a Google-only
-    account is. Google is a single factor and can never satisfy a policy
-    that demands an authenticator [oauth-1] [oauth-6], so such an account
-    must enrol one before anything sensitive. The other three reasons
-    (staff, owner or admin of an organisation, a plan that says
-    mfa.required) and `enrolled` are the mfa flow's, which also brings the
-    middleware that turns `required` into a refusal.
+    The mfa block is accounts/mfa.py's answer — required (and the reasons,
+    so the enrolment page can say which of docs/AUTH.md §5.4's four it is)
+    and enrolled — computed from the database now, never from the session.
+    It is for display: the refusal that enforces it is the middleware's,
+    and it asks the same module.
     """
     return {
         'user': _shape(request.user),
         **describe(request),
-        'mfa': {'required': not request.user.has_usable_password(), 'enrolled': False},
+        'mfa': mfa.describe(request.user),
         'flags': {},
     }
 
@@ -113,6 +110,44 @@ def me(request):
     return JsonResponse(whoami(request))
 
 
+def step_up(events, has_authenticator, fallback):
+    """
+    (amr, auth_time, su) from the session's authentication events
+    (docs/AUTH.md §8), and the only place the arithmetic lives.
+
+      amr        every method the session actually used, sorted.
+      auth_time  the most recent STRONG event when the account holds an
+                 authenticator — a password proof is not "when this session
+                 last authenticated" for an account whose sign-in needs a
+                 second factor — else the most recent event of any kind.
+      su         auth_time + 600 when the strongest factor the account has
+                 was the one used at auth_time, otherwise 0: an account with
+                 an authenticator that has not shown it this session, and a
+                 password account signed in through Google alone, cannot
+                 allow an origin until they prove the stronger thing
+                 [mfa-recovery-2].
+
+    A session with no events at all — one that predates the list — gets
+    auth_time = when it began and su = 0, rather than a guess at how it
+    was authenticated.
+    """
+    if not events:
+        return [], fallback, 0
+    amr = sorted({e['method'] for e in events})
+    latest = max(e['at'] for e in events)
+    if has_authenticator:
+        strong = [e['at'] for e in events if e['method'] in mfa.STRONG]
+        if not strong:
+            return amr, latest, 0
+        auth_time = max(strong)
+        return amr, auth_time, auth_time + STEP_UP_SECONDS
+    # No authenticator: the password is the strongest factor there is, and
+    # the most recent event has to be it — a Google sign-in on a password
+    # account is one factor and a weaker one [oauth-6].
+    newest = max(events, key=lambda e: e['at'])
+    return amr, latest, (latest + STEP_UP_SECONDS if newest['method'] == 'password' else 0)
+
+
 @require_http_methods(['POST'])
 def executor_token(request):
     """
@@ -129,13 +164,9 @@ def executor_token(request):
     organisation's resolved plan, cut down to the keys the runner enforces.
 
     The rest of the claims come from the session's authentication events
-    (docs/AUTH.md §8): `amr` is the set of methods actually used, `auth_time`
-    the most recent one, and `su` — "step-up valid until" — is computed HERE
-    so the runner's check is nothing more than `now < su`. Every account today
-    has a password and nothing stronger, so the strongest factor it has was
-    used at auth_time and su is auth_time + 600. A session that predates the
-    events list gets `su: 0`: it cannot allow an origin until its owner signs
-    in again, which is the safe way round.
+    (docs/AUTH.md §8): `amr` is the set of methods actually used, and
+    `auth_time` and `su` — "step-up valid until" — are computed HERE, by
+    step_up() below, so the runner's check is nothing more than `now < su`.
 
     Rate limited per session key and written to the audit log with its jti:
     a token that never appears in the log was not minted here [token-5].
@@ -147,13 +178,13 @@ def executor_token(request):
     # and a deactivated account must never be one refactor away from a token.
     if not request.user.is_active:
         return JsonResponse({'error': 'Not signed in'}, status=401)
-    # TODO(mfa): "past MFA policy" (docs/AUTH.md §8.1). whoami() already
-    # says mfa.required for a Google-only account; once the mfa flow's
-    # middleware and authenticators exist, an account whose policy demands
-    # one and holds none is answered 403 {error: 'mfa_required'} here — the
-    # UI already routes that answer to /security/mfa. Refusing before there
-    # is any way to enrol would lock every Google-only account out of the
-    # runner with no way back in.
+    # "Past MFA policy" (docs/AUTH.md §8.1). The middleware has already
+    # refused this request for such an account; the check is repeated here
+    # because a token is the one thing that must never be a middleware
+    # ordering away from an account the policy names [mfa-recovery-1].
+    if mfa.blocked(request.user):
+        record(AuthEvent.Kind.MINT_REFUSED, request, user=request.user, reason='mfa_required')
+        return JsonResponse({'error': 'mfa_required'}, status=403)
 
     # The session key is the bucket: a stolen cookie mints against its own
     # limit and nobody else's, and a script minting on every call is stopped
@@ -167,14 +198,9 @@ def executor_token(request):
         return JsonResponse({'error': 'no_organisation'}, status=403)
     org = membership.organization
 
-    events = auth_events(request)
     now = int(time.time())
-    if events:
-        amr = sorted({e['method'] for e in events})
-        auth_time = max(e['at'] for e in events)
-        su = auth_time + STEP_UP_SECONDS
-    else:
-        amr, auth_time, su = [], int(request.session.get(LOGIN_AT) or now), 0
+    amr, auth_time, su = step_up(auth_events(request), mfa.enrolled(request.user),
+                                 fallback=int(request.session.get(LOGIN_AT) or now))
 
     jti = secrets.token_urlsafe(16)
     try:

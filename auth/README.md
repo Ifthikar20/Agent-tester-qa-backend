@@ -9,14 +9,16 @@ services with an opinion about the same rule is how a hard gate quietly becomes
 advisory, and the gate here decides where a real browser is pointed.
 
 The design it is being built towards is [docs/AUTH.md](../docs/AUTH.md). This
-directory is at the **google** step of that document's build order: the
+directory is at the **mfa** step of that document's build order: the
 foundation (settings profile, hashing, the audit log, the session clocks, the
 stores and edge), organisations, roles, invitations and entitlements (the
 control-plane half of §10), the Ed25519 executor token (§8), django-allauth
 for sign-up, sign-in, verification, recovery and the account changes (§4, §5
-and §7, the password parts), and now Google sign-in (§6). MFA is the next
-step; the runner does not partition its state by organisation yet — that is
-the runner-tenancy step.
+and §7), Google sign-in (§6), and now the second factor — an authenticator
+app, recovery codes and passkeys, the policy that says who must hold one,
+the strong reauthentication that gates every sensitive change, and the
+sessions list (§5, §7.2, §12). The runner does not partition its state by
+organisation yet — that is the runner-tenancy step.
 
 ## Why Django
 
@@ -27,7 +29,8 @@ prefix without a line changing on the runner side. Plus the admin, which is
 why adding a colleague is a form rather than a script someone has to write —
 and whose login form is gone: `/admin/` sends you to the app's sign-in and
 takes you back as a staff session, so staff meet the same rate limits,
-verification and (soon) MFA as everyone else.
+verification and second factor as everyone else — and are sent to enrol
+one before the admin draws a page.
 
 ## Running it
 
@@ -35,6 +38,7 @@ verification and (soon) MFA as everyone else.
 pip install -r requirements.txt
 cp .env.example .env
 python manage.py signing_key --new    # prints GC_SIGNING_KEY for .env, and the runner's line
+python manage.py mfa_key              # prints GC_MFA_KEY for .env (optional on a laptop; see .env.example)
 export $(grep -v '^#' .env | xargs)
 
 python manage.py migrate
@@ -54,9 +58,9 @@ VITE_AUTH_URL=http://localhost:8000 npm run build
 ```
 
 `npm run app -- --auth` from the repository root does all of that, keeping
-the keypair in `.ghostclick/`, and prints the control plane's mail — every
-sign-up code, invitation and reset link — into the same terminal, because on
-a laptop the mail backend is the console.
+the keypair and the second-factor key in `.ghostclick/`, and prints the
+control plane's mail — every sign-up code, invitation and reset link — into
+the same terminal, because on a laptop the mail backend is the console.
 
 Leave `VITE_AUTH_URL` unset and the UI runs with no login at all, against a
 runner that is also unauthenticated. That is the laptop case and it stays
@@ -130,10 +134,12 @@ the expired rows; the deploy runs it after every migrate.
 session, **minted token** (with the token's `jti`, so a token that never
 appears here was not minted here), sign-up, refused sign-up, verification,
 reauthentication, password change, reset request and reset, email change,
-breached password, new device, Turnstile demand, and refused, connected and
-disconnected Google identity — written by receivers on
-Django's own `user_logged_in`, `user_logged_out` and `user_login_failed`
-signals, on allauth's account signals, and by the mint view — so a view that
+breached password, new device, Turnstile demand, refused, connected and
+disconnected Google identity, and — for the second factor — every
+authenticator added or removed, recovery codes regenerated, every refused
+code, and other sessions signed out — written by receivers on Django's own
+`user_logged_in`, `user_logged_out` and `user_login_failed` signals, on
+allauth's account and mfa signals, and by the mint view — so a view that
 signs someone in or changes something cannot forget to log it. Each row has
 the address **as the edge reports it** (`accounts.events.client_ip`, the same
 arithmetic allauth uses for its rate limits, with `ALLAUTH_TRUSTED_PROXY_COUNT
@@ -144,8 +150,10 @@ The same receivers keep `request.session['gc_auth_events']`, the list of
 `{method, at}` the executor token's `amr`, `auth_time` and `su` are computed
 from: allauth's `authentication_step_completed` fires for a sign-in and for a
 reauthentication alike, and its method is written in the token's vocabulary
-(`password`, and `otp`, `recovery`, `webauthn`, `google` once those steps
-exist) `[mfa-recovery-2]`.
+(`password`, `otp`, `recovery`, `webauthn`, `google`) `[mfa-recovery-2]`.
+Enrolling an authenticator is written as a proof of it too — the code that
+enrolled the app came from the app — so the recovery codes can be shown in
+the same breath.
 
 ## Making an account
 
@@ -313,6 +321,104 @@ not make can be undone from the mailbox they still have; the reset mail says
 which address the account signs in with now `[mfa-recovery-3]`. Every
 reauthentication is appended to the session's events and to the log.
 
+## The second factor
+
+docs/AUTH.md §5 (the MFA parts), §7.2 and §12, on `allauth.mfa` with all
+three of its kinds — an authenticator app (TOTP, six digits, thirty
+seconds, **no** neighbouring window: `MFA_TOTP_TOLERANCE = 0`), the ten
+recovery codes made beside it, and passkeys, which also sign in on their own
+(`MFA_PASSKEY_LOGIN_ENABLED`); a passkey sign-in *is* the second factor and
+skips the challenge. A trusted-device cookie is the one allauth feature
+that skips the challenge for a password sign-in, so `MFA_TRUST_ENABLED` is
+off and stays off `[mfa-recovery-6]`.
+
+**Who must hold one** is `accounts/mfa.py`, computed from the database on
+every request and never from a flag in the session `[mfa-recovery-1]`:
+staff; the owner or admin of an organisation other than their own personal
+one (everybody owns that, and it has one seat — the rule is about the
+people a manager's session can act on); any member of an organisation on a
+plan whose resolved entitlements say `mfa.required`; and an account with no
+usable password, which is what a Google-only account is — Google is one
+factor and never satisfies the policy `[oauth-1] [oauth-6]`. While such an
+account holds nothing, `accounts.middleware.MfaRequired` answers
+`403 {"error": "mfa_required"}` to everything but enrolment
+(`account/authenticators/*`), the session endpoints, every kind of
+reauthentication, the password change, "who am I" and the read-only
+helpers; `/auth/executor-token` repeats the check itself, because a token
+must never be a middleware ordering away. `/auth/me` reports
+`mfa: {required, enrolled, reasons}` so the enrolment page can say why —
+except that being staff is never given as a reason, since there is no
+`isStaff` in what the browser is told `[authz-tenancy-6]`. For `/admin/`,
+which is HTML, `StaffMFARequired` redirects an unenrolled staff session to
+the app's enrolment page instead. `adduser --staff` says so.
+
+**Enrolling**: `GET account/authenticators/totp` answers a fresh secret,
+the `otpauth://` URL and — this project's addition — an SVG of it as a QR
+code, drawn here because the UI's CSP admits no script from anywhere else;
+a code from the app activates it, the recovery codes are generated beside
+it, and `GET account/authenticators/recovery-codes` hands them over **once**
+(`MFA_RECOVERY_CODES_SHOW_ONCE`), after which the endpoint only counts
+them. Every addition and removal is mailed to the account and logged.
+
+**Passkeys** `[mfa-recovery-5]`: the relying party is the host of
+`GC_PUBLIC_URL` (`GC_WEB_ORIGIN` on a laptop) and never the request's Host
+header (`accounts.adapters.MFAAdapter`); every ceremony — registration,
+sign-in, challenge, reauthentication — demands user verification
+(`accounts/webauthn.py`, whose `begin_*` set the requirement fido2 then
+enforces at completion), so an assertion whose UV flag is clear is refused
+and never becomes `webauthn` in `amr`; and the origin the browser wrote into
+`clientDataJSON` must equal the configured origin exactly before allauth
+reads the credential at all — fido2's own check would also admit a
+subdomain. fido2 refuses an `http://` origin other than localhost, so
+passkeys need `https://` anywhere real; an `http://ip` demo still has the
+app.
+
+**Strong reauthentication** `[mfa-recovery-2]`: the password change, the
+email change, every authenticator change, the recovery codes and a Google
+disconnect want a proof within `ACCOUNT_REAUTHENTICATION_TIMEOUT` (300 s).
+For an account that holds an authenticator, `accounts.middleware
+.StrongReauthentication` requires that proof to be a second factor — read
+from the session's `gc_auth_events`, not from a flag — and refuses a
+password reauthentication outright, before the password is looked at, with
+`401` and the `mfa_reauthenticate` flow pending and no `reauthenticate`
+flow listed. `POST auth/2fa/reauthenticate` (a code) and
+`GET/POST auth/webauthn/reauthenticate` (a passkey) are the proofs; each is
+appended to the session's events and to the log.
+
+**The token** (§8): `amr` is every method the session used; `auth_time`
+is the most recent *strong* event for an account that holds an
+authenticator, else the most recent event; `su` is `auth_time + 600` when
+the strongest factor the account has was the one used, otherwise `0` — a
+session that enrolled after signing in with the password, or a password
+account that signed in through Google, cannot allow an origin until it
+proves the stronger thing (`accounts.views.step_up`). A session whose
+password was right and whose code has not landed is not signed in and
+mints nothing.
+
+**At rest** `[ops-supply-2]`: TOTP secrets and recovery-code seeds are
+Fernet-encrypted with `GC_MFA_KEY` — required in production, derived from
+the fixed dev secret on a laptop when unset, checked to be a Fernet key at
+import; `manage.py mfa_key` prints one, and several keys comma-separated
+rotate (the first encrypts, every one decrypts). A row the key cannot open
+verifies no code and is logged, rather than raising. allauth's admin screen
+for authenticators is replaced by a read-only one (removal only, for
+someone locked out): the data column is ciphertext, but a form that could
+rewrite a second factor is still a form.
+
+**Sessions**: `allauth.usersessions` with `USERSESSIONS_TRACK_ACTIVITY`
+keeps a row per session with the last address and time it was seen;
+`GET auth/sessions` lists them and `DELETE auth/sessions {sessions: [id…]}`
+ends the chosen ones (only the account's own — the input resolves ids
+against the user), and this project logs it. A password change or reset
+still ends every session by walking the session table (`accounts/sessions.py`),
+which also covers rows from before the app existed. Backups should exclude
+this table along with `django_session`.
+
+**Rate limit**: a wrong code counts against allauth's `login_failed` —
+`10/m/ip` and `5/5m` per account — so six wrong codes from two addresses
+are refused on the sixth before any code is checked; and a code is good
+once, in its own thirty seconds.
+
 ## The surface
 
 Ours, under `/auth`:
@@ -347,11 +453,22 @@ the client; `HEADLESS_ONLY` means there is no HTML view of any of them):
 | `POST auth/provider/redirect` | a form: `provider=google`, `process=login\|connect`, `callback_url` → 302 to Google |
 | `GET/DELETE account/providers` | the Google identities that open this account; `{provider, account}` detaches one |
 | `GET /accounts/google/login/callback/` | where Google sends the browser back; not under `/_allauth/`, and the only path under `/accounts/` |
+| `POST auth/2fa/authenticate` | `{code}` — the app's code or a recovery code, after the password |
+| `GET/POST auth/webauthn/login` | a passkey signing in on its own: the request options, then `{credential}` |
+| `GET/POST auth/webauthn/authenticate` | a passkey answering the challenge after a password |
+| `POST auth/2fa/reauthenticate`, `GET/POST auth/webauthn/reauthenticate` | the second factor as the fresh proof a sensitive change wants |
+| `GET account/authenticators` | what the account holds |
+| `GET/POST/DELETE account/authenticators/totp` | the secret, URL and QR to enrol from (`404` + `meta`); `{code}` activates; remove |
+| `GET/POST account/authenticators/recovery-codes` | the codes, once; regenerate |
+| `GET/POST/PUT/DELETE account/authenticators/webauthn` | creation options (`?passwordless`); `{name, credential}` adds; rename; `{authenticators: [id…]}` removes |
+| `GET/DELETE auth/sessions` | every session the account has; `{sessions: [id…]}` ends the chosen ones |
 
-Three of those — login, signup, password/request — are this project's
-subclasses (`accounts/headless.py`), mounted at the same paths ahead of
-allauth's own: the Turnstile field, the invite-mode branch, and the
-previous-address lookup are the only additions.
+Several of those are this project's subclasses (`accounts/headless.py`),
+mounted at the same paths ahead of allauth's own: the Turnstile field, the
+invite-mode branch and the previous-address lookup on login, signup and
+password/request; user verification and the pinned origin on the four
+WebAuthn views; the QR code on the TOTP view; the audit row on the code
+reauthentication and on ending sessions.
 
 Django rotates the CSRF token on sign-in and sign-out, and allauth's JSON
 says nothing about it, so every answer from this service carries the fresh
@@ -365,7 +482,7 @@ SPA echoes whatever it last saw. `/auth/me` is the shape it draws from:
   "orgs": [{"slug": "ada", "name": "Ada", "role": "owner", "personal": true, "plan": "free"}, "…"],
   "entitlements": {"suites.max": 25, "runs.per_day": 500, "origins.max": 20, "vault.enabled": true,
                    "history.retention_days": 90, "members.max": 10, "mfa.required": false},
-  "mfa": {"required": false, "enrolled": false}, "flags": {} }
+  "mfa": {"required": true, "enrolled": false, "reasons": ["manages_organisation"]}, "flags": {} }
 ```
 
 There is no `isStaff`. Staff is a control-plane fact that opens `/admin/`,
@@ -487,11 +604,14 @@ and `email` the account; `org`, `role`, `ent` and `ent_v` the session's
 selected organisation, the role from its `Membership` row, the
 runner-enforced entitlements and their version; `amr` and `auth_time` the
 methods actually used in this session and when, read from the list of
-authentication events the sign-in receiver appends to the session; `su` —
-"step-up valid until" — is `auth_time + 600` when the strongest factor the
-account has was used at `auth_time`, which today is every password sign-in,
-and `0` for a session with no recorded event, and the runner checks nothing
-about it but `now < su` before it allows an origin; `sid` is a hash of the
+authentication events the sign-in receiver appends to the session, with
+`auth_time` the most recent second-factor event for an account that holds
+an authenticator; `su` — "step-up valid until" — is `auth_time + 600` when
+the strongest factor the account has was the one used, and `0` otherwise
+(a session with no recorded event, an enrolled account that has not shown
+its authenticator this session, a password account that came in through
+Google), and the runner checks nothing about it but `now < su` before it
+allows an origin; `sid` is a hash of the
 session key; `iat`, `exp` (at most 600 seconds later — `GC_TOKEN_TTL` is
 clamped to 60–600) and `jti`. Every one is copied from the database or the
 session into the signature; the runner reads them from the token and from
@@ -500,7 +620,7 @@ nothing else.
 ## Tests
 
 ```bash
-python manage.py test          # 303 tests, one module per concern in accounts/tests/ and tenants/tests/
+python manage.py test          # 352 tests, one module per concern in accounts/tests/ and tenants/tests/
 ```
 
 They never touch the network: `accounts/testing.py` is the test runner, and it
@@ -530,17 +650,10 @@ Python or Django is missing, because this directory is optional.
   shared browser and its one set of state. Partitioning `.ghostclick/` and
   `suites/` by organisation, the driving-org lock and the `402 entitlement`
   refusals are the runner-tenancy step of docs/AUTH.md.
-- **MFA.** The next step of docs/AUTH.md. Until it lands, `/auth/me` reports
-  `mfa.required` only for an account with no usable password (Google-only)
-  and `enrolled: false` for everyone; nothing refuses on it yet, because a
-  refusal with no way to enrol would lock those accounts out. The
-  reauthentication that gates a change is the password, and "the strongest
-  factor the account has" is the password. The settings that step pins
-  (`MFA_TRUST_ENABLED = False`, `MFA_TOTP_TOLERANCE = 0`) are already set so
-  they are not forgotten.
-- **A sessions page.** A password change or reset ends every session by
-  walking the session table (`accounts/sessions.py`); listing them, and
-  ending one, is allauth's usersessions app and comes with MFA.
+- **A purge of anything.** `AuthEvent` rows past 90 days, expired
+  invitations, previous addresses past their week, and the stale-address
+  purge on a schedule are the ops step's; the commands that exist are
+  idempotent and nothing runs them yet.
 - **Multi-tenancy on the runner.** The runner holds one browser and one run
   lock. Two people signed in still share it — a login says *who*, not *which
   runner*.

@@ -267,13 +267,14 @@ cp .env.prod.example .env.prod
 nano .env.prod          # see below — the URL, the keypair and three secrets
 ```
 
-`.env.prod` needs six values. The signing keypair comes from one command, run
-on your laptop in `auth/` (it needs Django and `cryptography` installed —
-`pip install -r auth/requirements.txt`), which prints both lines ready to
-paste, quotes included:
+`.env.prod` needs seven values. The signing keypair and the second-factor
+key come from two commands, run on your laptop in `auth/` (they need Django
+and `cryptography` installed — `pip install -r auth/requirements.txt`),
+which print the lines ready to paste, quotes included:
 
 ```bash
 cd auth && python manage.py signing_key --new     # GC_SIGNING_KEY and GC_AUTH_PUBLIC_KEYS
+cd auth && python manage.py mfa_key               # GC_MFA_KEY — authenticator secrets are encrypted with it
 ```
 
 Generate the other secrets by RUNNING these and pasting what they print — do
@@ -291,6 +292,7 @@ so that the file ends up holding literal values:
 PUBLIC_URL=http://<elastic-ip>   # or https://<hostname> once you have one
 GC_SIGNING_KEY='-----BEGIN PRIVATE KEY-----\nMC4C...\n-----END PRIVATE KEY-----'   # as printed, one line
 GC_AUTH_PUBLIC_KEYS='{"<kid>": "-----BEGIN PUBLIC KEY-----\nMCow...\n-----END PUBLIC KEY-----\n"}'
+GC_MFA_KEY=Zk9v...=              # as printed by mfa_key: 44 characters ending in =
 DJANGO_SECRET_KEY=9mKp...        # the OUTPUT of the first node command
 POSTGRES_PASSWORD=Lk2a...        # URL-safe: letters, digits, - and _
 REDIS_PASSWORD=p0Xn...
@@ -661,8 +663,16 @@ fine until a migration ever changes a column — none does today.
   session-affinity router, and it is a real project.
 - **Backups.** The volumes are on one EBS volume with no snapshot schedule.
   Fine for a demo; take an EBS snapshot before anything you care about. When a
-  backup does exist it should skip `django_session`: a session table in a
-  backup is a set of live credentials in a backup.
+  backup does exist it should skip `django_session` and
+  `usersessions_usersession`: a session table in a backup is a set of live
+  credentials in a backup. The authenticator table can be backed up: its
+  secrets are ciphertext under `GC_MFA_KEY`, which lives in `.env.prod` and
+  not in the database — so back up `.env.prod` separately or lose every
+  second factor with the box (people re-enrol; nothing else breaks).
+- **Passkeys on an `http://ip` demo.** WebAuthn needs a secure origin, and
+  fido2 refuses an http origin other than localhost, so passkeys work only
+  once `PUBLIC_URL` is `https://`. The authenticator app and recovery codes
+  work either way, so the policy can still be met on a demo.
 - **Mail.** `.env.prod.example` names the console backend, so verification
   codes, invitations, reset links and change notices go to the control
   plane's log until an `EMAIL_HOST` is set. Everything that makes or changes
@@ -693,7 +703,8 @@ fine until a migration ever changes a column — none does today.
 - [ ] Launched with the `cansee-deploy` key pair
 - [ ] Security group: 22 to **your IP only**; 80 and 443 to your audience
 - [ ] IMDSv2 required, hop limit 1
-- [ ] `.env.prod` has real values for all six — the keypair from `signing_key --new`, 48 random bytes for the rest
+- [ ] `.env.prod` has real values for all seven — the keypair from `signing_key --new`, `GC_MFA_KEY` from `mfa_key`, 48 random bytes for the rest
+- [ ] The first staff sign-in will be sent to enrol an authenticator before `/admin/` opens; have a phone with a TOTP app to hand
 - [ ] `GC_AUTH_PUBLIC_KEYS` holds the public key and `GC_SIGNING_KEY` the private one, not the other way round
 - [ ] `PUBLIC_URL` matches how you will actually reach the box
 - [ ] `GC_ADMIN_CIDRS` is your address, or you accept that `/admin/` is closed

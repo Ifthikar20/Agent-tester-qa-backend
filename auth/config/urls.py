@@ -18,12 +18,13 @@ from accounts import google, headless
 
 # Django's own admin login form is removed: an anonymous visit to /admin/ is
 # sent to the SPA's sign-in (LOGIN_URL), and only a session that came through
-# allauth's rate-limited, verified — and, once the mfa step lands,
-# MFA-enforcing — flow comes back as staff [credentials-1] [ops-supply-6].
+# allauth's rate-limited, verified, MFA-enforcing flow comes back as staff —
+# and accounts.middleware.StaffMFARequired sends staff with no authenticator
+# to enrol one first [credentials-1] [ops-supply-6].
 admin.autodiscover()
 admin.site.login = secure_admin_login(admin.site.login)
 
-# The three views this project adds a rule to, mounted at allauth's own paths
+# The views this project adds a rule to, mounted at allauth's own paths
 # AHEAD of allauth's include, so Django resolves the subclass first. Same
 # path, same client, same response shapes — accounts/headless.py says what
 # each adds.
@@ -32,6 +33,15 @@ OURS = [
     path(f'{HEADLESS}auth/login', headless.LoginView.as_api_view(client=Client.BROWSER)),
     path(f'{HEADLESS}auth/signup', headless.SignupView.as_api_view(client=Client.BROWSER)),
     path(f'{HEADLESS}auth/password/request', headless.RequestPasswordResetView.as_api_view(client=Client.BROWSER)),
+    # Passkeys: user verification on every ceremony and the origin pinned
+    # (docs/AUTH.md §5.7), on the four views that begin one.
+    path(f'{HEADLESS}auth/webauthn/authenticate', headless.AuthenticateWebAuthnView.as_api_view(client=Client.BROWSER)),
+    path(f'{HEADLESS}auth/webauthn/reauthenticate', headless.ReauthenticateWebAuthnView.as_api_view(client=Client.BROWSER)),
+    path(f'{HEADLESS}auth/webauthn/login', headless.LoginWebAuthnView.as_api_view(client=Client.BROWSER)),
+    path(f'{HEADLESS}auth/2fa/reauthenticate', headless.ReauthenticateView.as_api_view(client=Client.BROWSER)),
+    path(f'{HEADLESS}account/authenticators/webauthn', headless.ManageWebAuthnView.as_api_view(client=Client.BROWSER)),
+    path(f'{HEADLESS}account/authenticators/totp', headless.ManageTOTPView.as_api_view(client=Client.BROWSER)),
+    path(f'{HEADLESS}auth/sessions', headless.SessionsView.as_api_view(client=Client.BROWSER)),
 ]
 
 urlpatterns = [

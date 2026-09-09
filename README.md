@@ -97,11 +97,23 @@ With `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` set there is also
 Google identity that opens an existing account only when both sides have
 verified the address and nothing else already opens it, and one sentence
 for every refusal.
+A second factor — an authenticator app with recovery codes, or a passkey,
+which also signs in on its own — is asked for after the password at every
+sign-in once enrolled, and before every sensitive change: for an account
+that holds one the password is never enough to change the password, the
+address, the authenticators or the codes. Staff, the owners and admins of
+an organisation, members of a plan that says so and accounts that sign in
+only with Google must enrol one before the control plane lets them do
+anything else, and `/admin/` sends staff to enrol first. Authenticator
+secrets are encrypted at rest with `GC_MFA_KEY`, a key that is not
+Django's. Every session the account has is listed under Security, with
+where and when, and any of them can be ended from there.
 Passwords are Argon2id-hashed, at least 15 characters, and checked against
 Have I Been Pwned when set and again at every sign-in; every sign-in,
-sign-out, refused password, sign-up, verification and change is a row in an
-audit log; a session ends after 12 idle hours or 7 days, whichever comes
-first, and a password change or reset ends every session the account has.
+sign-out, refused password, refused code, sign-up, verification,
+enrolment and change is a row in an audit log; a session ends after 12
+idle hours or 7 days, whichever comes first, and a password change or
+reset ends every session the account has.
 Every account has a personal organisation, and organisations have owners,
 admins and members, invitations (mailed to the invitee, and consumed the
 moment the invited address is verified), and a plan that says what they may

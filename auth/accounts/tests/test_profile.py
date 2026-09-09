@@ -36,7 +36,12 @@ KEYS = [
     'ACCOUNT_LOGOUT_ON_PASSWORD_CHANGE', 'ACCOUNT_LOGIN_ON_PASSWORD_RESET', 'PASSWORD_RESET_TIMEOUT',
     'ACCOUNT_REAUTHENTICATION_TIMEOUT', 'MFA_TRUST_ENABLED', 'GC_SIGNUP_MODE', 'GC_SIGNUP_DOMAINS',
     'GC_TURNSTILE_SECRET', 'GC_TURNSTILE_SITE_KEY', 'AUTHENTICATION_BACKENDS',
+    'MFA_SUPPORTED_TYPES', 'MFA_PASSKEY_LOGIN_ENABLED', 'MFA_RECOVERY_CODES_SHOW_ONCE', 'MFA_ADAPTER',
+    'GC_WEBAUTHN_ORIGIN', 'USERSESSIONS_TRACK_ACTIVITY', 'GC_MFA_KEY',
 ]
+
+# A Fernet key: 32 url-safe base64 bytes. Fixed, so the tests can say which one.
+MFA_KEY = 'x8m2Xz4c3l4p9RxwXOSczw1vGi6Rq0Tlpi7GRUq0-rQ='
 
 PRODUCTION = {
     'DJANGO_DEBUG': '0',
@@ -47,6 +52,7 @@ PRODUCTION = {
     'EMAIL_HOST': 'smtp.example.com',
     # As an env file carries it: one line, backslash-n between the PEM lines.
     'GC_SIGNING_KEY': keys.PRIVATE_ONE_LINE,
+    'GC_MFA_KEY': MFA_KEY,
 }
 
 
@@ -192,6 +198,39 @@ class RefusalTests(SimpleTestCase):
 
     def test_something_that_is_not_a_pem_is_refused_even_on_a_laptop(self):
         self.refuses({'DJANGO_DEBUG': '1', 'GC_SIGNING_KEY': 'not-a-real-secret-just-for-tests'}, 'GC_SIGNING_KEY')
+
+    def test_a_missing_mfa_key_is_refused(self):
+        # Without it every TOTP secret would be stored in the clear, which
+        # is the row a database dump would then carry [ops-supply-2].
+        self.refuses({**PRODUCTION, 'GC_MFA_KEY': ''}, 'GC_MFA_KEY', 'mfa_key')
+
+    def test_something_that_is_not_a_fernet_key_is_refused_even_on_a_laptop(self):
+        self.refuses({'DJANGO_DEBUG': '1', 'GC_MFA_KEY': 'not-a-fernet-key'}, 'GC_MFA_KEY')
+        # And a rotation set is every key checked, not just the first.
+        self.refuses({'DJANGO_DEBUG': '1', 'GC_MFA_KEY': f'{MFA_KEY},short'}, 'GC_MFA_KEY')
+
+    def test_the_mfa_rules_are_the_spec_s(self):
+        got = json.loads(load(PRODUCTION).stdout)
+        self.assertEqual(got['MFA_SUPPORTED_TYPES'], ['totp', 'recovery_codes', 'webauthn'])
+        self.assertTrue(got['MFA_PASSKEY_LOGIN_ENABLED'])
+        self.assertTrue(got['MFA_RECOVERY_CODES_SHOW_ONCE'])
+        self.assertFalse(got['MFA_TRUST_ENABLED'])
+        self.assertEqual(got['MFA_TOTP_TOLERANCE'], 0)
+        self.assertEqual(got['MFA_ADAPTER'], 'accounts.adapters.MFAAdapter')
+        self.assertTrue(got['USERSESSIONS_TRACK_ACTIVITY'])
+        # The passkey origin is the public URL, so the RP ID is its host.
+        self.assertEqual(got['GC_WEBAUTHN_ORIGIN'], 'https://app.example.com')
+        self.assertEqual(got['GC_MFA_KEY'], MFA_KEY)
+
+    def test_on_a_laptop_the_mfa_key_is_derived_and_stable(self):
+        # Nothing set: the same key every start, so an authenticator enrolled
+        # yesterday still decrypts today, and never the empty string.
+        a = json.loads(load({'DJANGO_DEBUG': '1'}).stdout)['GC_MFA_KEY']
+        b = json.loads(load({'DJANGO_DEBUG': '1'}).stdout)['GC_MFA_KEY']
+        self.assertEqual(a, b)
+        self.assertEqual(len(a), 44)
+        self.assertEqual(json.loads(load({'DJANGO_DEBUG': '1', 'GC_WEB_ORIGIN': 'http://localhost:3000'}).stdout)['GC_WEBAUTHN_ORIGIN'],
+                         'http://localhost:3000')
 
     def test_a_sign_up_mode_that_is_not_one_of_the_three_is_refused(self):
         self.refuses({**PRODUCTION, 'GC_SIGNUP_MODE': 'anyone'}, 'GC_SIGNUP_MODE')

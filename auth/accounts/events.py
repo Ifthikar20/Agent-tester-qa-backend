@@ -20,6 +20,7 @@ from datetime import timedelta
 
 from allauth.account import signals as allauth_signals
 from allauth.account.models import EmailAddress
+from allauth.mfa import signals as mfa_signals
 from allauth.socialaccount import signals as social_signals
 from django.conf import settings
 from django.contrib.auth.signals import user_logged_in, user_logged_out, user_login_failed
@@ -285,3 +286,48 @@ def google_connected(sender, request, sociallogin, **kwargs):
 def google_disconnected(sender, request, socialaccount, **kwargs):
     record(AuthEvent.Kind.GOOGLE_DISCONNECTED, request, user=socialaccount.user,
            provider=socialaccount.provider, uid=socialaccount.uid)
+
+
+# ---------------------------------------------------------------- the second factor
+#
+# The proofs themselves (a TOTP code, a recovery code, a passkey assertion)
+# reach the session's events through `proved` above: allauth's mfa flows
+# call record_authentication like every other sign-in path, and its
+# `type` is the method in the token's vocabulary. What is left to note is
+# the authenticator's own life — added, removed, the codes regenerated —
+# and each refused code, which is the row a guessing campaign leaves.
+
+def _kind_of(authenticator):
+    return str(getattr(authenticator, 'type', '') or '')
+
+
+@receiver(mfa_signals.authenticator_added)
+def authenticator_added(sender, request, user, authenticator, **kwargs):
+    """
+    Enrolling IS a proof: the app was enrolled with a code it produced,
+    and a passkey with an assertion under user verification — the same
+    thing a challenge asks for. Noting it as a strong event lets the
+    recovery codes be shown in the same breath (docs/AUTH.md §5) rather
+    than after a second, identical, proof. The recovery codes that are
+    generated beside an authenticator prove nothing and are not noted.
+    """
+    kind = _kind_of(authenticator)
+    record(AuthEvent.Kind.MFA_ENROLLED, request, user=user, type=kind)
+    if kind in METHODS and kind != 'recovery_codes' and request is not None and hasattr(request, 'session'):
+        note(request, METHODS[kind])
+
+
+@receiver(mfa_signals.authenticator_removed)
+def authenticator_removed(sender, request, user, authenticator, **kwargs):
+    record(AuthEvent.Kind.MFA_REMOVED, request, user=user, type=_kind_of(authenticator))
+
+
+@receiver(mfa_signals.authenticator_reset)
+def authenticator_reset(sender, request, user, authenticator, **kwargs):
+    record(AuthEvent.Kind.MFA_RESET, request, user=user, type=_kind_of(authenticator))
+
+
+@receiver(mfa_signals.authentication_failed)
+def second_factor_refused(sender, request, user, authenticator, **kwargs):
+    record(AuthEvent.Kind.MFA_FAILED, request, user=user, type=_kind_of(authenticator),
+           reauthentication=bool(kwargs.get('reauthentication')))

@@ -13,7 +13,7 @@ from accounts.models import AuthEvent
 
 from .. import invitations
 from ..models import Invitation, Membership, Role, hash_token
-from .support import PASSWORD, Api, member, org, token_from_mail, user
+from .support import PASSWORD, Api, give_authenticator, member, org, token_from_mail, user
 
 
 def issue(inviter, email, role):
@@ -193,6 +193,9 @@ class ManageEndpointTests(TestCase):
         self.owner = member(self.acme, user('owner@acme.example'), Role.OWNER)
         self.admin = member(self.acme, user('admin@acme.example'), Role.ADMIN)
         self.plain = member(self.acme, user('member@acme.example'), Role.MEMBER)
+        # Managers of an organisation hold an authenticator (docs/AUTH.md §5.4).
+        give_authenticator(self.owner.user)
+        give_authenticator(self.admin.user)
 
     def as_(self, email):
         api = Api()
@@ -243,6 +246,7 @@ class ManageEndpointTests(TestCase):
         inv, _ = issue(self.owner, 'bob@acme.example', Role.MEMBER)
         globex = org('globex', plan='team')
         other = member(globex, user('owner@globex.example'), Role.OWNER)
+        give_authenticator(other.user)
         stranger = Api()
         stranger.login('owner@globex.example')
         stranger.post('/auth/org', {'org': 'globex'})

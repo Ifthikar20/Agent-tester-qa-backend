@@ -22,5 +22,10 @@ redis==8.1.0
 # DATABASE_URL -> DATABASES, and the Postgres driver it names.
 dj-database-url==3.1.2
 psycopg[binary]==3.3.5
-# Ed25519 for the executor token: the one primitive the standard library lacks.
+# Ed25519 for the executor token: the one primitive the standard library
+# lacks — and Fernet, which encrypts the second factor's secrets at rest.
 cryptography==50.0.1
+# Passkeys (allauth.mfa's WebAuthn), and the QR code an authenticator app
+# is enrolled from.
+fido2==2.2.1
+qrcode==8.2

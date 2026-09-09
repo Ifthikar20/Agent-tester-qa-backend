@@ -30,7 +30,7 @@ from .. import google
 from ..adapters import app_url
 from ..events import AUTH_EVENTS
 from ..models import AuthEvent, EmailAddressAdded
-from .support import HEADLESS, PASSWORD, Api, make_user
+from .support import HEADLESS, PASSWORD, Api, give_authenticator, make_user, prove_strong
 
 User = get_user_model()
 
@@ -140,10 +140,17 @@ class SignInTests(GoogleCase):
     def test_the_token_carries_google_as_the_method(self):
         from . import keys
         api, _ = self.sign_in(payload())
+        # A Google-only account mints nothing until it holds an authenticator
+        # (docs/AUTH.md §6.5); with one, Google is still one factor and not
+        # the strongest the account has, so su is 0 [oauth-6].
         with override_settings(GC_SIGNING_KEY=keys.PRIVATE_PEM):
+            self.assertEqual(api.post('/auth/executor-token').json(), {'error': 'mfa_required'})
+            give_authenticator(User.objects.get(email='ada@example.com'))
             r = api.post('/auth/executor-token')
         self.assertEqual(r.status_code, 200, r.content)
-        self.assertEqual(keys.claims_of(r.json()['token'])['amr'], ['google'])
+        claims = keys.claims_of(r.json()['token'])
+        self.assertEqual(claims['amr'], ['google'])
+        self.assertEqual(claims['su'], 0)
 
     def test_google_tokens_are_not_stored(self):
         self.sign_in(payload())
@@ -171,7 +178,7 @@ class SignInTests(GoogleCase):
 
     def test_a_google_only_account_is_flagged_mfa_required(self):
         api, _ = self.sign_in(payload())
-        self.assertEqual(api.get('/auth/me').json()['mfa'], {'required': True, 'enrolled': False})
+        self.assertEqual(api.get('/auth/me').json()['mfa'], {'required': True, 'enrolled': False, 'reasons': ['no_password']})
         # A password account is not, on this ground.
         make_user('bob@example.com')
         bob = Api()
@@ -413,6 +420,10 @@ class ConnectTests(GoogleCase):
         # No password and no other identity: disconnecting would leave an
         # account nothing can open.
         api, _ = self.sign_in(payload(email='solo@example.com', sub='9009'))
+        # Enrolled and freshly proven, as the policy wants before anything
+        # sensitive (docs/AUTH.md §6.5); the refusal under test is the next one.
+        give_authenticator(User.objects.get(email='solo@example.com'))
+        prove_strong(api)
         r = api.delete(f'{HEADLESS}/account/providers', {'provider': 'google', 'account': '9009'})
         self.assertEqual(r.status_code, 400, r.content)
         self.assertEqual(r.json()['errors'][0]['code'], 'no_password')

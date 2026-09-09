@@ -320,6 +320,10 @@ if [ ! -f .env.prod ]; then
   printf "GC_SIGNING_KEY='%s'\n" "$private_line" >> .env.prod.tmp
   printf "GC_AUTH_PUBLIC_KEYS='{\"%s\": \"%s\"}'\n" "$kid" "$public_line" >> .env.prod.tmp
   mv .env.prod.tmp .env.prod
+  # The second-factor key: 32 random bytes as url-safe base64, which is what
+  # a Fernet key is (44 characters, ending in '=').
+  mfa_key=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '\n')
+  sed -i "s|^GC_MFA_KEY=.*|GC_MFA_KEY=$mfa_key|"              .env.prod
   # sed with a | delimiter: base64 can contain / but never |.
   sed -i "s|^DJANGO_SECRET_KEY=.*|DJANGO_SECRET_KEY=$(gen)|"  .env.prod
   sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(gen)|"  .env.prod

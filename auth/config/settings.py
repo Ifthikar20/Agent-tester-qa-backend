@@ -54,6 +54,12 @@ Environment (see .env.example):
                       redirect URI is <GC_PUBLIC_URL>/accounts/google/login/callback/.
                       Set both and "Continue with Google" appears; unset,
                       the provider is not offered and its callback is a 404.
+  GC_MFA_KEY          the Fernet key TOTP secrets and recovery-code seeds are
+                      encrypted with at rest, separate from DJANGO_SECRET_KEY.
+                      `manage.py mfa_key` prints one. Required when DEBUG is
+                      off; on a laptop it is derived from the fixed dev secret
+                      when unset. Several keys, comma-separated, rotate: the
+                      first encrypts and every one decrypts.
 """
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -131,6 +137,12 @@ INSTALLED_APPS = [
     # admin could edit.
     'allauth.socialaccount',
     'allauth.socialaccount.providers.google',
+    # The second factor (docs/AUTH.md §5): an authenticator app, recovery
+    # codes and passkeys, with the secrets encrypted at rest by
+    # accounts.adapters.MFAAdapter; and the list of an account's sessions,
+    # so a person can see and end the ones that are not theirs.
+    'allauth.mfa',
+    'allauth.usersessions',
     'allauth.headless',
     'accounts',
     'tenants',
@@ -152,9 +164,20 @@ MIDDLEWARE = [
     # Directly after authentication and before any view: a session past its
     # absolute lifetime must never reach code that trusts request.user.
     'accounts.middleware.AbsoluteSessionLifetime',
+    # Only now is the session known to be live, so only now is it worth a
+    # row in the sessions list (the page that lists them, and last-seen).
+    'allauth.usersessions.middleware.UserSessionsMiddleware',
     # And a session whose password Have I Been Pwned knows may do one thing:
     # change it.
     'accounts.middleware.PasswordChangeRequired',
+    # Staff without an authenticator are sent to enrol one before /admin/
+    # draws a page; everyone the policy names is refused everything but
+    # enrolment (docs/AUTH.md §5.4); and an account that holds an
+    # authenticator changes nothing sensitive on the strength of its
+    # password alone (§7.2).
+    'accounts.middleware.StaffMFARequired',
+    'accounts.middleware.MfaRequired',
+    'accounts.middleware.StrongReauthentication',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -396,14 +419,72 @@ ACCOUNT_RATE_LIMITS = {
     'change_password': '5/m/user',
     'manage_email': '10/m/user',
 }
+GC_MINT_RATE = '12/10m'       # per session key, on POST /auth/executor-token
+GC_ACCEPT_RATE = '10/m/ip'    # invitation acceptance
+
+# ---------------------------------------------------------------- the second factor
+#
+# docs/AUTH.md §5 (the MFA parts) and §7.2, on allauth.mfa. Three kinds of
+# authenticator: an app that makes TOTP codes, the recovery codes that are
+# generated beside it, and passkeys — which also sign in on their own
+# (PASSKEY_LOGIN_ENABLED), a sign-in that IS the second factor and so skips
+# the challenge stage. Who must hold one is accounts/mfa.py; what an
+# account holding one may do on its password alone is nothing sensitive
+# (accounts.middleware.StrongReauthentication).
+MFA_ADAPTER = 'accounts.adapters.MFAAdapter'
+MFA_SUPPORTED_TYPES = ['totp', 'recovery_codes', 'webauthn']
+MFA_PASSKEY_LOGIN_ENABLED = True
+# Sign-up is by password or by Google and then proven by a code; a passkey
+# is something an account adds, not something an account is made of.
+MFA_PASSKEY_SIGNUP_ENABLED = False
+MFA_TOTP_ISSUER = 'ghostclick'
 # A TOTP code is good for its thirty seconds and no neighbouring window: the
 # tolerance exists for clock drift, and the drift a phone has is zero.
 MFA_TOTP_TOLERANCE = 0
+# Recovery codes are shown at the moment they are made and never again: a
+# page that can list them on demand is a page a stolen session can read.
+MFA_RECOVERY_CODES_SHOW_ONCE = True
 # A trusted-device cookie is the one allauth feature that skips the
 # second-factor stage, so it is off by name and stays off [mfa-recovery-6].
 MFA_TRUST_ENABLED = False
-GC_MINT_RATE = '12/10m'       # per session key, on POST /auth/executor-token
-GC_ACCEPT_RATE = '10/m/ip'    # invitation acceptance
+# The origin a WebAuthn ceremony is bound to, and the RP ID is its host.
+# The public URL in production; the UI's origin on a laptop, because that
+# is the page the browser performs the ceremony on. fido2 refuses an http
+# origin that is not localhost, so passkeys need https anywhere real; an
+# http://ip demo still has TOTP.
+MFA_WEBAUTHN_ALLOW_INSECURE_ORIGIN = False
+GC_WEBAUTHN_ORIGIN = PUBLIC_URL or WEB_ORIGIN
+# Every session an account holds is a row, with the last address and time
+# it was seen, so the Sessions page can say "this one, from there, an hour
+# ago" and end it.
+USERSESSIONS_TRACK_ACTIVITY = True
+
+# TOTP secrets and recovery-code seeds are encrypted in the database with
+# this key and not with DJANGO_SECRET_KEY [ops-supply-2]: a database dump
+# and a settings file are two different things to steal, and a key that
+# signs cookies has no business also unlocking every second factor. Several
+# keys, comma-separated, are a rotation — the first encrypts, all decrypt.
+# Required in production; on a laptop, derived from the (fixed, public) dev
+# secret so `manage.py runserver` with nothing set still works and tests
+# run. Any value that is set is checked to be a Fernet key at import.
+GC_MFA_KEY = os.environ.get('GC_MFA_KEY', '').strip()
+if not GC_MFA_KEY:
+    if not DEBUG:
+        raise ImproperlyConfigured(
+            'GC_MFA_KEY is required when DJANGO_DEBUG is off: TOTP secrets and recovery codes are '
+            'encrypted with it. `manage.py mfa_key` prints one.'
+        )
+    import base64
+    import hashlib
+    GC_MFA_KEY = base64.urlsafe_b64encode(hashlib.sha256(f'mfa:{SECRET_KEY}'.encode()).digest()).decode('ascii')
+for _key in GC_MFA_KEY.split(','):
+    try:
+        from cryptography.fernet import Fernet as _Fernet
+        _Fernet(_key.strip())
+    except (ValueError, TypeError):
+        raise ImproperlyConfigured(
+            'GC_MFA_KEY is not a Fernet key (32 url-safe base64 bytes). `manage.py mfa_key` prints one.'
+        )
 
 # ---------------------------------------------------------------- accounts
 #

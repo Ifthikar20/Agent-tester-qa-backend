@@ -133,6 +133,14 @@ grep -qE "^GC_AUTH_PUBLIC_KEYS='?\{.*BEGIN PUBLIC KEY" .env.prod || {
 grep -qE '^GC_AUTH_PUBLIC_KEYS=.*PRIVATE KEY' .env.prod && {
   echo "  GC_AUTH_PUBLIC_KEYS contains a PRIVATE key. The runner must never hold one."; exit 1; }
 
+# The key second factors are encrypted with. A Fernet key is 44 characters
+# of url-safe base64 ending in '='; the control plane refuses to start
+# without one, and a deploy that then comes up unhealthy is a worse place
+# to learn it than here.
+grep -qE "^GC_MFA_KEY='?[A-Za-z0-9_-]{43}=" .env.prod || {
+  echo "  .env.prod has no GC_MFA_KEY that looks like a Fernet key."
+  echo "  'cd auth && python manage.py mfa_key' prints one. Refusing to deploy."; exit 1; }
+
 # The shared HMAC secret is gone. A line for it is not ignored: the runner
 # refuses to boot with it in the environment, and a value still in this file
 # is a signing key still on the box.
@@ -143,9 +151,9 @@ grep -qE '^GC_AUTH_SECRET=' .env.prod && {
 
 # The placeholder check is the one that catches a copied example file. A
 # literal CHANGE_ME is long enough to pass every length test above.
-grep -qE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' .env.prod && {
+grep -qE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|GC_MFA_KEY|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' .env.prod && {
   echo "  .env.prod still has CHANGE_ME placeholders. Fill them in first:"
-  grep -nE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' .env.prod | sed 's/^/    /'
+  grep -nE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|GC_MFA_KEY|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' .env.prod | sed 's/^/    /'
   exit 1; }
 
 # A '\$(' in the file is command substitution that never ran. Compose reads

@@ -59,7 +59,7 @@ else bad('and the deploy refuses one on the host', 'nothing catches a hand-edite
  *     argument that decides whether the shipped UI has a sign-in at all, so an
  *     empty value ships a login-less app and a 401-free deploy looks fine.
  */
-for (const key of ['GC_SIGNING_KEY', 'GC_AUTH_PUBLIC_KEYS', 'DJANGO_SECRET_KEY', 'PUBLIC_URL', 'POSTGRES_PASSWORD', 'REDIS_PASSWORD']) {
+for (const key of ['GC_SIGNING_KEY', 'GC_AUTH_PUBLIC_KEYS', 'GC_MFA_KEY', 'DJANGO_SECRET_KEY', 'PUBLIC_URL', 'POSTGRES_PASSWORD', 'REDIS_PASSWORD']) {
   const uses = [...compose.matchAll(new RegExp(`\\$\\{${key}([^}]*)\\}`, 'g'))].map((m) => m[1]);
   if (!uses.length) bad(`${key} is used by compose`, 'not referenced at all');
   else if (uses.every((u) => u.startsWith(':?'))) ok(`${key} is required, not defaulted`, `${uses.length} use${uses.length > 1 ? 's' : ''}`);
@@ -78,6 +78,15 @@ if (/GC_AUTH_PUBLIC_KEYS:/.test(runnerEnv) && !/GC_SIGNING_KEY/.test(runnerEnv))
 else bad('the runner is given public keys and no private one', 'a runner that can sign is a runner that can authorise itself');
 if (/GC_SIGNING_KEY:/.test(controlEnv)) ok('and the control plane is given the private key');
 else bad('and the control plane is given the private key');
+// The second-factor key (docs/AUTH.md §12): the control plane's alone, and
+// the deploy refuses a file without one, because the settings module would
+// refuse to start and the deploy would look like a crashed container.
+if (/GC_MFA_KEY:/.test(controlEnv) && !/GC_MFA_KEY/.test(runnerEnv)) ok('the second-factor key reaches the control plane only');
+else bad('the second-factor key reaches the control plane only', 'TOTP secrets are encrypted with it; the runner has no business holding it');
+if (/GC_MFA_KEY=/.test(deploy) && /mfa_key/.test(deploy)) ok('and the deploy refuses a .env.prod without one', 'naming manage.py mfa_key');
+else bad('and the deploy refuses a .env.prod without one');
+if (/^GC_MFA_KEY=CHANGE_ME/m.test(example)) ok('.env.prod.example names it as a placeholder');
+else bad('.env.prod.example names it as a placeholder');
 // Turnstile: the secret is the control plane's alone; the public site key
 // reaches both, because the runner's CSP has to admit the widget's host
 // exactly when the control plane will ask for the widget.
