@@ -1,16 +1,18 @@
 """
 Who may sign up, decided in one place.
 
-The account adapter (a password sign-up) and, in the google flow, the social
-adapter (a Google sign-up) both ask here and nowhere else, so the two paths
-cannot answer differently for the same address [oauth-5]. Three modes, set
-by GC_SIGNUP_MODE and never by editing this file:
+The account adapter (a password sign-up) and the social adapter (a Google
+sign-up) both ask here and nowhere else, so the two paths cannot answer
+differently for the same address [oauth-5]. Three modes, set by
+GC_SIGNUP_MODE and never by editing this file:
 
   invite   the address must hold a live invitation (tenants.Invitation)
   open     anyone; Turnstile stands in front of it when configured
   domain   the address's domain — or, for Google, the id_token's `hd`, which
            is the workspace's word rather than the string after the @ — must
-           be one of GC_SIGNUP_DOMAINS, exactly
+           be one of GC_SIGNUP_DOMAINS, exactly. A Google account with no
+           `hd` at all is a consumer account whatever its address says, and
+           domain mode refuses it: the suffix is never read for Google.
 
 A refusal carries a reason for the audit log and a flag saying whether the
 reason may be shown. A domain rule is public policy ("sign up with your
@@ -51,9 +53,11 @@ def has_live_invitation(email):
 
 def signup_allowed(email, hd=None):
     """
-    May `email` sign up? `hd` is Google's hosted-domain claim, present only
-    for a Google sign-up; a password sign-up passes None and the domain is
-    read from the address.
+    May `email` sign up? `hd` is Google's hosted-domain claim: a password
+    sign-up passes None and the domain is read from the address; a Google
+    sign-up passes the claim, or '' when the id_token carried none — and
+    '' is refused in domain mode, because a Google account without `hd` is
+    not a workspace account no matter what follows the @.
     """
     email = (email or '').strip().lower()
     if not email or '@' not in email:
@@ -62,10 +66,10 @@ def signup_allowed(email, hd=None):
     if current == 'open':
         return ALLOWED
     if current == 'domain':
-        domain = (hd or email.rsplit('@', 1)[1]).lower()
-        if domain in domains():
+        domain = email.rsplit('@', 1)[1] if hd is None else hd.strip().lower()
+        if domain and domain in domains():
             return ALLOWED
-        return Decision(False, f'{domain} is not a sign-up domain', public=True)
+        return Decision(False, f'{domain or "a Google account without a hosted domain"} is not a sign-up domain', public=True)
     # invite
     if has_live_invitation(email):
         return ALLOWED

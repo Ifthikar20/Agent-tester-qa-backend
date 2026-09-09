@@ -7,10 +7,17 @@ request reaches the subclass first:
 
   auth/login             a Turnstile token is demanded from an address that
                          has tripped the failed-login limit [credentials-1]
-  auth/signup            a Turnstile token in open mode; and in invite mode
-                         an address nobody invited is sent down the "already
-                         exists" branch, so the answer — and its timing — is
-                         the one an existing address gets [credentials-3]
+  auth/signup            a Turnstile token in open mode; the sign-up policy
+                         (accounts/policy.py) for the refusals that may be
+                         said out loud; and in invite mode an address nobody
+                         invited is sent down the "already exists" branch, so
+                         the answer — and its timing — is the one an existing
+                         address gets [credentials-3]. The policy is applied
+                         HERE rather than in the adapter's clean_email
+                         because allauth runs that hook on every address it
+                         meets, Google's included, and a Google address is
+                         judged by the social adapter with the id_token's
+                         hd, never by the string after the @
   auth/password/request  an address the account used until a week ago still
                          identifies it, so an email change can be undone
                          from the old mailbox [mfa-recovery-3]
@@ -70,7 +77,12 @@ class SignupInput(TurnstileInput, allauth_inputs.SignupInput):
         email = super().validate_unique_email(value)
         if not self.account_already_exists:
             decision = policy.signup_allowed(email)
-            if not decision.allowed and not decision.public:
+            if not decision.allowed and decision.public:
+                # A domain rule is policy, not a secret: said out loud.
+                from allauth.core import context
+                record(AuthEvent.Kind.SIGNUP_REFUSED, context.request, email=email, reason=decision.reason)
+                raise ValidationError(f'Sign-up is not open to that address: {decision.reason}.', code='signup_closed')
+            if not decision.allowed:
                 # Answered exactly as an existing address is: no account, a
                 # "check your mail" response, and the adapter's mail says
                 # what actually happened (AccountAdapter

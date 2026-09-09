@@ -9,14 +9,14 @@ services with an opinion about the same rule is how a hard gate quietly becomes
 advisory, and the gate here decides where a real browser is pointed.
 
 The design it is being built towards is [docs/AUTH.md](../docs/AUTH.md). This
-directory is at the **accounts** step of that document's build order: the
+directory is at the **google** step of that document's build order: the
 foundation (settings profile, hashing, the audit log, the session clocks, the
 stores and edge), organisations, roles, invitations and entitlements (the
-control-plane half of §10), the Ed25519 executor token (§8), and now
-django-allauth for sign-up, sign-in, verification, recovery and the account
-changes (§4, §5 and §7, the password parts). Google sign-in and MFA are the
-next two steps; the runner does not partition its state by organisation yet —
-that is the runner-tenancy step.
+control-plane half of §10), the Ed25519 executor token (§8), django-allauth
+for sign-up, sign-in, verification, recovery and the account changes (§4, §5
+and §7, the password parts), and now Google sign-in (§6). MFA is the next
+step; the runner does not partition its state by organisation yet — that is
+the runner-tenancy step.
 
 ## Why Django
 
@@ -130,7 +130,8 @@ the expired rows; the deploy runs it after every migrate.
 session, **minted token** (with the token's `jti`, so a token that never
 appears here was not minted here), sign-up, refused sign-up, verification,
 reauthentication, password change, reset request and reset, email change,
-breached password, new device and Turnstile demand — written by receivers on
+breached password, new device, Turnstile demand, and refused, connected and
+disconnected Google identity — written by receivers on
 Django's own `user_logged_in`, `user_logged_out` and `user_login_failed`
 signals, on allauth's account signals, and by the mint view — so a view that
 signs someone in or changes something cannot forget to log it. Each row has
@@ -209,7 +210,85 @@ to the mailbox ("you already have an account", "sign-up is by invitation").
 The existing-address branch also pays an Argon2id hash so the two cannot be
 told apart by the clock, and a test asserts the medians are within ten
 milliseconds `[credentials-3]`. A domain-mode refusal is said out loud, because
-"sign up with your @acme.example address" is policy, not a secret.
+"sign up with your @acme.example address" is policy, not a secret. The policy
+is applied in the sign-up input (`accounts/headless.py`) rather than in the
+adapter's `clean_email`, because allauth runs that hook on every address it
+meets — Google's included — and a Google address is judged by the social
+adapter with the id_token's `hd`, never by the string after the @.
+
+## Sign in with Google
+
+docs/AUTH.md §6, on allauth's `socialaccount` with the `google` provider
+alone, configured from `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (both or
+neither; the settings module refuses one without the other, and unset there
+is no button, no provider and no callback — `GET /auth/config` says
+`google: false`). The client is not a database row: the admin's Social
+applications screen is unregistered, so the secret lives in the environment
+like every other one and there are never two clients to choose between.
+
+The flow: the SPA POSTs `provider=google`, `process=login|connect` and a
+hard-coded `callback_url` — its own origin plus `/app/login` (or
+`/app/security` for a connect) — to `/_allauth/browser/v1/auth/provider/redirect`,
+as a form, with the CSRF token as a field, because the answer is a 302 to
+Google that only a navigation can follow. A `GET` starts nothing
+(`SOCIALACCOUNT_LOGIN_ON_GET` is off, and the GET login URL is not mounted at
+all). Google comes back to `/accounts/google/login/callback/` — the only path
+this project mounts under `/accounts/`, so One Tap's csrf-exempt token
+endpoint does not exist here and the edge's exact route for the callback is a
+second wall rather than the only one. The code is exchanged over PKCE, the
+id_token is the only thing read, and no Google token is stored
+(`SOCIALACCOUNT_STORE_TOKENS`). The rules allauth has no setting for are in
+`accounts/adapters.py`:
+
+- **`callback_url`** must have the app's scheme and host — `GC_PUBLIC_URL`
+  in production, `GC_WEB_ORIGIN` on a laptop — and a path under `/app/`.
+  Not `ALLOWED_HOSTS`, and not a relative path `[oauth-4]`.
+- **Sign-up** asks `accounts/policy.py` exactly as a password sign-up does,
+  with `hd` read from the id_token — a Google account with no `hd` is a
+  consumer account whatever its address ends in, and domain mode refuses it —
+  and draws on the same `signup` rate-limit bucket `[oauth-5]`. An admitted
+  address Google has verified is verified here on Google's word, so the
+  invitations bound to it become memberships in the same moment, as they
+  would at a code. An address Google has not verified gets a code.
+- **An existing account** is opened by a Google identity in two cases only:
+  the identity is already connected (the `sub` is known), or Google says the
+  address is verified **and** the account's own `EmailAddress` is verified
+  **and** no other Google identity is attached to the account — in which
+  case the identity is connected, and from then on it is the `sub` that
+  matters `[oauth-2]`. An address that someone merely typed into an account
+  is a claim and opens nothing; a second `sub` for an address that already
+  has one is refused. A refused match is never turned into a second account.
+- **Every refusal is one sentence.** allauth names each failure in the
+  redirect it answers with, and the names say things about other people's
+  accounts, so `accounts/google.py` wraps the callback: whatever went wrong —
+  a foreign or replayed `state`, an unsafe `callback_url`, a policy refusal,
+  a link that may not be made — the browser is sent to `/app/login?error=refused`
+  (or `/app/security` for a connect), the SPA shows "We could not sign you
+  in with Google. Sign in the way you usually do, then connect Google from
+  Settings.", and the real reason and the address go to the audit log
+  (`google_refused`, or `signup_refused` with `method: google`)
+  `[credentials-3]`. Only a cancel keeps its own word; it is the person's
+  own doing and says nothing about any account.
+- **A Google-only account** has no usable password and therefore no way to
+  reauthenticate; `/auth/me` reports `mfa.required: true` for it, and the
+  MFA step turns that into the demand to enrol an authenticator before
+  anything sensitive `[oauth-1]`. Google is one factor and never satisfies
+  `mfa.required` `[oauth-6]`; the token's `amr` says `google`.
+- **Connected accounts** under Security list the identities
+  (`GET account/providers`), connect another (the same form, `process=connect`),
+  and disconnect one (`DELETE account/providers`, behind a reauthentication;
+  refused when it is the last way into an account with no password).
+
+`manage.py purge_unverified_emails` deletes unverified *secondary*
+addresses older than fifteen minutes — the lifetime of the code that would
+have proven them — because such a row is a claim on an address that blocks
+its real owner's sign-up `[oauth-2]` (§6.6). `accounts.EmailAddressAdded`
+stamps every `EmailAddress` row when it is made, since allauth's row has no
+date. In this configuration the code-verified email change never leaves such
+a row behind (the new address stays in the session until the code is
+entered), so the purge is a guard for rows made by hand in the admin or by
+a later flow rather than a routine that finds work; it is meant to run
+every few minutes and nothing schedules it yet.
 
 Sign-in is one answer for a wrong password and an unknown address; allauth's
 limits (`ACCOUNT_RATE_LIMITS`: 30 a minute per address, 10 failures a minute
@@ -241,7 +320,7 @@ Ours, under `/auth`:
 | | |
 |---|---|
 | `GET /auth/csrf` | a CSRF token the SPA echoes in `X-CSRFToken` |
-| `GET /auth/config` | `{signup, domains, turnstile}` — what the sign-up page needs before anyone types |
+| `GET /auth/config` | `{signup, domains, turnstile, google}` — what the sign-up page needs before anyone types |
 | `GET /auth/me` | who am I, and for which organisation |
 | `POST /auth/org` | `{org}` — act for another organisation this session, after a membership check |
 | `GET /auth/invitations` | the selected organisation's invitations (owner or admin) |
@@ -265,6 +344,9 @@ the client; `HEADLESS_ONLY` means there is no HTML view of any of them):
 | `POST auth/password/request`, `POST auth/password/reset` | `{email}` → the link; `{key, password}` → done, not signed in |
 | `POST account/password/change` | `{current_password, new_password}` → every session ended |
 | `GET/POST/PUT/DELETE account/email` | the address, and changing it |
+| `POST auth/provider/redirect` | a form: `provider=google`, `process=login\|connect`, `callback_url` → 302 to Google |
+| `GET/DELETE account/providers` | the Google identities that open this account; `{provider, account}` detaches one |
+| `GET /accounts/google/login/callback/` | where Google sends the browser back; not under `/_allauth/`, and the only path under `/accounts/` |
 
 Three of those — login, signup, password/request — are this project's
 subclasses (`accounts/headless.py`), mounted at the same paths ahead of
@@ -418,14 +500,17 @@ nothing else.
 ## Tests
 
 ```bash
-python manage.py test          # 273 tests, one module per concern in accounts/tests/ and tenants/tests/
+python manage.py test          # 303 tests, one module per concern in accounts/tests/ and tenants/tests/
 ```
 
 They never touch the network: `accounts/testing.py` is the test runner, and it
 stubs the Have I Been Pwned client so a test can say "three breaches" or "the
 API is down" and assert what happens; the Turnstile verifier is patched the
-same way, and mail goes to Django's in-memory outbox, where the tests read
-the codes and links back out. The production-profile tests import the
+same way, mail goes to Django's in-memory outbox, where the tests read the
+codes and links back out, and Google is stubbed at the two calls that would
+reach it — the token exchange and the id_token — so `test_google.py` drives
+the real redirect endpoint, callback, session and database with whatever
+id_token payload a case needs. The production-profile tests import the
 settings module in a subprocess with a chosen environment, because the rules
 they check are the ones that raise at import. `accounts/tests/support.py`
 holds the client every signed-in test uses: it speaks allauth's JSON and
@@ -445,12 +530,14 @@ Python or Django is missing, because this directory is optional.
   shared browser and its one set of state. Partitioning `.ghostclick/` and
   `suites/` by organisation, the driving-org lock and the `402 entitlement`
   refusals are the runner-tenancy step of docs/AUTH.md.
-- **Google sign-in and MFA.** The next two steps of docs/AUTH.md. Until MFA
-  lands, `/auth/me` reports `mfa: {required: false, enrolled: false}` for
-  everyone, the reauthentication that gates a change is the password, and
-  "the strongest factor the account has" is the password. The settings those
-  steps pin (`MFA_TRUST_ENABLED = False`, `MFA_TOTP_TOLERANCE = 0`) are
-  already set so they are not forgotten.
+- **MFA.** The next step of docs/AUTH.md. Until it lands, `/auth/me` reports
+  `mfa.required` only for an account with no usable password (Google-only)
+  and `enrolled: false` for everyone; nothing refuses on it yet, because a
+  refusal with no way to enrol would lock those accounts out. The
+  reauthentication that gates a change is the password, and "the strongest
+  factor the account has" is the password. The settings that step pins
+  (`MFA_TRUST_ENABLED = False`, `MFA_TOTP_TOLERANCE = 0`) are already set so
+  they are not forgotten.
 - **A sessions page.** A password change or reset ends every session by
   walking the session table (`accounts/sessions.py`); listing them, and
   ending one, is allauth's usersessions app and comes with MFA.

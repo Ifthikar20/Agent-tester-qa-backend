@@ -1,8 +1,19 @@
+from allauth.socialaccount.models import SocialApp, SocialToken
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth.forms import AdminPasswordChangeForm
 
-from .models import AuthEvent, PreviousEmail, User
+from .models import AuthEvent, EmailAddressAdded, PreviousEmail, User
+
+# The Google client is configured from the environment (config/settings.py
+# SOCIALACCOUNT_PROVIDERS) and nowhere else. allauth also lets an admin add
+# one as a row, and would then refuse to choose between the two; a form that
+# takes a client secret is also a second place for that secret to live. No
+# tokens are stored (SOCIALACCOUNT_STORE_TOKENS), so that table is empty and
+# a screen for it would only invite the question. SocialAccount stays: which
+# Google identity opens which account is exactly what an operator looks up.
+admin.site.unregister(SocialApp)
+admin.site.unregister(SocialToken)
 
 
 @admin.register(User)
@@ -76,4 +87,22 @@ class PreviousEmailAdmin(admin.ModelAdmin):
     readonly_fields = ['user', 'email', 'replaced_by', 'replaced_at', 'until']
 
     def has_add_permission(self, request):
+        return False
+
+
+@admin.register(EmailAddressAdded)
+class EmailAddressAddedAdmin(admin.ModelAdmin):
+    """
+    Read-only: the stamp says when a claim on an address was made, and the
+    purge command is what acts on it. An operator who wants a claim gone
+    now deletes the address itself under allauth's Email addresses.
+    """
+    list_display = ['address', 'at']
+    search_fields = ['address__email', 'address__user__email']
+    readonly_fields = ['address', 'at']
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
         return False

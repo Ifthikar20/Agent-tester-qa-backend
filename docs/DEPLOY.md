@@ -361,6 +361,40 @@ change sends — set `EMAIL_HOST` before anyone but you signs in.
 sign-in and comes back once you are a staff session, so staff go through the
 same rate limits and verification as everyone else.
 
+### Sign in with Google
+
+Optional, and off until `.env.prod` has both `GOOGLE_CLIENT_ID` and
+`GOOGLE_CLIENT_SECRET` (docs/AUTH.md §6). Make an OAuth client in the Google
+Cloud console — APIs & Services → Credentials → OAuth client ID, type "Web
+application" — with the authorised redirect URI set to exactly
+
+```
+<PUBLIC_URL>/accounts/google/login/callback/
+```
+
+and `PUBLIC_URL` as the authorised JavaScript origin. That path is the only
+thing under `/accounts/` the edge routes and the only thing the control plane
+mounts there: the sign-in is started by a CSRF-protected POST under
+`/_allauth/`, a `GET` can never start one, and Google's One Tap endpoint does
+not exist in this deployment. Then `bash scripts/deploy.sh`; the button
+appears on the sign-in and sign-up pages and "Connect a Google account" under
+Security.
+
+What it does and does not do: a Google identity is one factor, never two. Who
+may make an account through it is still `GC_SIGNUP_MODE` — in `domain` mode
+the Google Workspace (`hd` in the id_token) must match, and a consumer Google
+account with a matching address is refused. A Google sign-in opens an
+existing account only when Google says the address is verified, the account's
+own address is verified, and no other Google identity is attached; otherwise
+the person is told, in one sentence for every reason, to sign in the usual
+way and connect Google from Security. No Google tokens are stored. An account
+made through Google has no password, and `/auth/me` says `mfa.required` for
+it; the MFA step turns that into a demand to enrol.
+
+Every few minutes, `manage.py purge_unverified_emails` removes unverified
+secondary addresses older than fifteen minutes — a claim on an address that
+was never proven. Nothing schedules it yet (see "Deliberately not done").
+
 Every account gets a personal organisation on the `free` plan the moment it
 is made, and `migrate` gave one to every account that existed before the
 rule. Plans and organisations are edited in `/admin/`; a database restored
@@ -588,6 +622,8 @@ From `/opt/ghostclick` on the host.
 | Who signed in, from where, who signed up, what changed | `/admin/` → Auth events, from an allowed address |
 | Which old address may still reset which account this week | `/admin/` → Previous emails |
 | Let an address sign up | the owner or admin of an organisation invites it from the app; or `GC_SIGNUP_MODE=open` / `domain` in `.env.prod` |
+| Which Google identity opens which account | `/admin/` → Social accounts, from an allowed address |
+| Remove stale unverified address claims (run it on a schedule) | `... exec -T control python manage.py purge_unverified_emails` |
 | Which origins are allowed | `docker run --rm -v ghostclick_ghostclick-state:/s alpine cat /s/origins.json` |
 | A database shell | `... exec postgres psql -U ghostclick` |
 | Container status | `./scripts/gc ps` |
@@ -634,6 +670,16 @@ fine until a migration ever changes a column — none does today.
 - **Turnstile by default.** The keys are optional because a demo has no
   Cloudflare account; with `GC_SIGNUP_MODE=open` on a public host they are
   not optional in any sense that matters.
+- **Scheduling `purge_unverified_emails`.** docs/AUTH.md §6.6 wants it every
+  few minutes; the command exists and is idempotent, and a cron line (or a
+  compose sidecar) for it, `clearsessions` and the audit-log purge is the ops
+  step's. Until then unverified secondary addresses linger, which blocks
+  nothing that matters: a Google sign-in never links to an unverified
+  address anyway.
+- **Verifying the Google console side.** The flow is tested end to end with
+  Google stubbed at the token exchange; the redirect URI registered in the
+  console has to be the exact path above, with the trailing slash, and the
+  first real sign-in is the test of that.
 - **Key rotation on a schedule.** `signing_key --new`, add the new public key
   to `GC_AUTH_PUBLIC_KEYS` beside the old one, restart the runner, switch
   `GC_SIGNING_KEY`, restart the control plane, and drop the old public key
@@ -653,4 +699,5 @@ fine until a migration ever changes a column — none does today.
 - [ ] `GC_ADMIN_CIDRS` is your address, or you accept that `/admin/` is closed
 - [ ] `GC_SIGNUP_MODE` is what you mean — unset is invitation-only — and open mode has Turnstile keys
 - [ ] `EMAIL_HOST` is set, or you accept reading sign-up codes out of the control plane's log
+- [ ] If Google is wanted: both `GOOGLE_*` values, and the console's redirect URI is `<PUBLIC_URL>/accounts/google/login/callback/`
 - [ ] All four volumes declared in the compose file before the first `up`

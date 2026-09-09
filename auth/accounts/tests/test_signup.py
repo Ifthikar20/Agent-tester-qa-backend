@@ -271,9 +271,15 @@ class DomainSignupTests(TestCase):
         self.assertTrue(policy.signup_allowed('bob@acme.example', hd='acme.example').allowed)
         self.assertFalse(policy.signup_allowed('bob@acme.example', hd='gmail.com').allowed)
         self.assertTrue(policy.signup_allowed('bob@personal.example', hd='acme.example').allowed)
+        # A Google account with no hd at all is a consumer account, whatever
+        # its address ends in: '' is "Google said nothing", not "use the
+        # suffix". Only None (a password sign-up) reads the address.
+        self.assertFalse(policy.signup_allowed('bob@acme.example', hd='').allowed)
+        self.assertTrue(policy.signup_allowed('bob@acme.example', hd=None).allowed)
 
     def test_config_names_the_domains(self):
-        self.assertEqual(Api().get('/auth/config').json(), {'signup': 'domain', 'domains': ['acme.example'], 'turnstile': None})
+        self.assertEqual(Api().get('/auth/config').json(),
+                         {'signup': 'domain', 'domains': ['acme.example'], 'turnstile': None, 'google': False})
 
 
 class PolicyTests(TestCase):

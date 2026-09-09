@@ -14,7 +14,7 @@ from allauth.headless.constants import Client
 from django.contrib import admin
 from django.urls import include, path
 
-from accounts import headless
+from accounts import google, headless
 
 # Django's own admin login form is removed: an anonymous visit to /admin/ is
 # sent to the SPA's sign-in (LOGIN_URL), and only a session that came through
@@ -43,4 +43,11 @@ urlpatterns = [
     path('auth/', include('tenants.urls')),
     *OURS,
     path('_allauth/', include('allauth.headless.urls')),
+    # Google's callback, and ONLY the callback (docs/AUTH.md §6). allauth's
+    # provider URLs would also mount /accounts/google/login/ (a sign-in
+    # started by a GET) and /accounts/google/login/token/ (One Tap, which is
+    # csrf-exempt by design); neither exists here at all, so the edge's
+    # exact route for this one path is a second wall and not the only one.
+    # The name is the one allauth reverses to build the redirect_uri.
+    path('accounts/google/login/callback/', google.callback, name='google_callback'),
 ]

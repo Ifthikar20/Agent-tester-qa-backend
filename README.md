@@ -92,6 +92,11 @@ JSON: sign-up is by invitation unless `GC_SIGNUP_MODE` says `open` or
 `domain`, an address is proven by a six-digit code before it can do
 anything, and Cloudflare Turnstile stands in front of open sign-up and of
 any address that has tripped the failed-sign-in limit when a key is set.
+With `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` set there is also
+"Continue with Google": the same sign-up policy, one factor and not two, a
+Google identity that opens an existing account only when both sides have
+verified the address and nothing else already opens it, and one sentence
+for every refusal.
 Passwords are Argon2id-hashed, at least 15 characters, and checked against
 Have I Been Pwned when set and again at every sign-in; every sign-in,
 sign-out, refused password, sign-up, verification and change is a row in an
@@ -109,7 +114,9 @@ On a laptop the control plane's mail is printed to the terminal `npm run app
 -- --auth` runs in, codes and links included; `bash scripts/adduser.sh
 you@example.com` makes an account whose address counts as verified, and
 `GC_SIGNUP_MODE=open npm run app -- --auth` lets you sign up through the
-page instead.
+page instead. `GOOGLE_CLIENT_ID=… GOOGLE_CLIENT_SECRET=… npm run app --
+--auth` adds the Google button, for a client whose redirect URI is
+`http://localhost:8000/accounts/google/login/callback/`.
 
 Deployed, the same three services sit behind one Caddy on one URL
 (`PUBLIC_URL`), from which every host, origin and cookie rule is derived, with

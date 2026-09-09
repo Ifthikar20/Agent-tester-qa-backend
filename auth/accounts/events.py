@@ -19,12 +19,15 @@ import time
 from datetime import timedelta
 
 from allauth.account import signals as allauth_signals
+from allauth.account.models import EmailAddress
+from allauth.socialaccount import signals as social_signals
 from django.conf import settings
 from django.contrib.auth.signals import user_logged_in, user_logged_out, user_login_failed
+from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.utils import timezone
 
-from .models import AuthEvent, PreviousEmail
+from .models import AuthEvent, EmailAddressAdded, PreviousEmail
 
 # The session key under which the sign-in time is kept. Read by
 # accounts.middleware.AbsoluteSessionLifetime.
@@ -193,7 +196,11 @@ def refused(sender, credentials, request, **kwargs):
 
 @receiver(allauth_signals.user_signed_up)
 def signed_up(sender, request, user, **kwargs):
-    record(AuthEvent.Kind.SIGNUP, request, user=user, mode=getattr(settings, 'GC_SIGNUP_MODE', 'invite'))
+    # allauth passes the SocialLogin for a Google sign-up and nothing for a
+    # password one; the row says which, because "who signed up through
+    # Google" is a question the log should answer without a join.
+    method = 'google' if kwargs.get('sociallogin') is not None else 'password'
+    record(AuthEvent.Kind.SIGNUP, request, user=user, mode=getattr(settings, 'GC_SIGNUP_MODE', 'invite'), method=method)
 
 
 @receiver(allauth_signals.email_confirmed)
@@ -248,3 +255,33 @@ def email_changed(sender, request, user, from_email_address, to_email_address, *
     )
     record(AuthEvent.Kind.EMAIL_CHANGED, request, user=user,
            previous=from_email_address.email, current=to_email_address.email)
+
+
+@receiver(post_save, sender=EmailAddress)
+def address_added(sender, instance, created, **kwargs):
+    """
+    Stamp when an address was added, so the purge of stale unverified
+    claims (docs/AUTH.md §6.6, `manage.py purge_unverified_emails`) has a
+    clock to read. On the model's own signal rather than in the views that
+    add addresses — allauth adds them from sign-up, the email change and a
+    Google sign-in, and a fourth path would forget.
+    """
+    if created:
+        EmailAddressAdded.objects.get_or_create(address=instance)
+
+
+# ---------------------------------------------------------------- google
+
+@receiver(social_signals.social_account_added)
+def google_connected(sender, request, sociallogin, **kwargs):
+    # Fired for a connect from Settings and for the auto-connect that a
+    # verified-to-verified email match performs on sign-in; either way an
+    # identity now opens this account, and that belongs in its log.
+    record(AuthEvent.Kind.GOOGLE_CONNECTED, request, user=sociallogin.user,
+           provider=sociallogin.account.provider, uid=sociallogin.account.uid)
+
+
+@receiver(social_signals.social_account_removed)
+def google_disconnected(sender, request, socialaccount, **kwargs):
+    record(AuthEvent.Kind.GOOGLE_DISCONNECTED, request, user=socialaccount.user,
+           provider=socialaccount.provider, uid=socialaccount.uid)

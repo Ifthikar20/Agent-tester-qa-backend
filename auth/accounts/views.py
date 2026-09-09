@@ -36,7 +36,7 @@ from django.views.decorators.http import require_http_methods
 from tenants import plans
 from tenants.session import describe, selected
 
-from . import turnstile
+from . import google, turnstile
 from .events import LOGIN_AT, auth_events, record
 from .models import AuthEvent
 from .ratelimit import over
@@ -59,13 +59,21 @@ def whoami(request):
     There is no isStaff and there will not be one. Staff is a control-plane
     fact that opens /admin/, and a flag the browser was shown is a flag the
     browser can show itself; nothing the runner enforces may hang off it
-    [authz-tenancy-6]. The mfa block is a placeholder until the mfa flow
-    computes it from the authenticators the account holds.
+    [authz-tenancy-6].
+
+    mfa.required is true today for one reason of the four in docs/AUTH.md
+    §5.4: the account has no usable password, which is what a Google-only
+    account is. Google is a single factor and can never satisfy a policy
+    that demands an authenticator [oauth-1] [oauth-6], so such an account
+    must enrol one before anything sensitive. The other three reasons
+    (staff, owner or admin of an organisation, a plan that says
+    mfa.required) and `enrolled` are the mfa flow's, which also brings the
+    middleware that turns `required` into a refusal.
     """
     return {
         'user': _shape(request.user),
         **describe(request),
-        'mfa': {'required': False, 'enrolled': False},
+        'mfa': {'required': not request.user.has_usable_password(), 'enrolled': False},
         'flags': {},
     }
 
@@ -87,12 +95,14 @@ def config(request):
     What the sign-up and sign-in pages need before anyone has typed anything.
     The mode decides which words the page shows; the site key is public by
     definition (it is rendered into every visitor's page) and null when
-    Turnstile is not configured, which is the SPA's cue not to load it.
+    Turnstile is not configured, which is the SPA's cue not to load it; and
+    `google` says whether a "Continue with Google" button has anywhere to go.
     """
     return JsonResponse({
         'signup': settings.GC_SIGNUP_MODE,
         'domains': settings.GC_SIGNUP_DOMAINS if settings.GC_SIGNUP_MODE == 'domain' else [],
         'turnstile': turnstile.site_key(),
+        'google': google.configured(),
     })
 
 
@@ -137,6 +147,13 @@ def executor_token(request):
     # and a deactivated account must never be one refactor away from a token.
     if not request.user.is_active:
         return JsonResponse({'error': 'Not signed in'}, status=401)
+    # TODO(mfa): "past MFA policy" (docs/AUTH.md §8.1). whoami() already
+    # says mfa.required for a Google-only account; once the mfa flow's
+    # middleware and authenticators exist, an account whose policy demands
+    # one and holds none is answered 403 {error: 'mfa_required'} here — the
+    # UI already routes that answer to /security/mfa. Refusing before there
+    # is any way to enrol would lock every Google-only account out of the
+    # runner with no way back in.
 
     # The session key is the bucket: a stolen cookie mints against its own
     # limit and nobody else's, and a script minting on every call is stopped

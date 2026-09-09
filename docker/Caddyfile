@@ -62,7 +62,9 @@
 	#
 	# Not /accounts/* wholesale: allauth's One Tap token endpoint lives there,
 	# is csrf-exempt, and stays unrouted. Only the Google callback is let
-	# through, and only at its full path.
+	# through, and only at its full path. (The control plane mounts nothing
+	# else under /accounts/ either — the sign-in is STARTED by a POST under
+	# /_allauth/ — so this line is the second wall, not the only one.)
 	@control path /auth/* /_allauth/* /accounts/google/login/callback/ /admin /admin/*
 	handle @control {
 		# The admin, from the operator's addresses only. GC_ADMIN_CIDRS is

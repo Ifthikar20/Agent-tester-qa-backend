@@ -159,10 +159,11 @@ becomes the check that the published package version matches.
 
 ## What is deliberately still open
 
-- **SSO.** The reason Django is here. Sign-up, sign-in, verification, reset
-  and the account changes are django-allauth's now, behind `/_allauth/`;
-  Google and MFA are the next two steps of docs/AUTH.md and slot in behind
-  the same prefix without the runner noticing.
+- **SSO.** The reason Django is here. Sign-up, sign-in, verification, reset,
+  the account changes and Google sign-in are django-allauth's now, behind
+  `/_allauth/` (plus the one Google callback under `/accounts/`); MFA is the
+  next step of docs/AUTH.md and slots in behind the same prefix without the
+  runner noticing.
 - **RBAC on the runner.** The control plane now has organisations, roles and
   plans, and the token carries `org`, `role` and `ent`; the runner does not
   read them yet, so anyone who can sign in still drives everything. Reading

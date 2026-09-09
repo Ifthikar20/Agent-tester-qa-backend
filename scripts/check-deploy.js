@@ -85,6 +85,13 @@ if (/GC_TURNSTILE_SECRET:/.test(controlEnv) && !/GC_TURNSTILE_SECRET/.test(runne
 else bad('the Turnstile secret reaches the control plane only');
 if (/GC_TURNSTILE_SITE_KEY:/.test(controlEnv) && /GC_TURNSTILE_SITE_KEY:/.test(runnerEnv)) ok('and the site key reaches both', 'one .env.prod line, two readers');
 else bad('and the site key reaches both', 'the CSP and the page would disagree about the widget');
+// Google: the client secret is the control plane's alone. The runner never
+// talks to Google, and a secret in a container that holds a browser other
+// people drive is a secret one page away from leaving.
+if (/GOOGLE_CLIENT_SECRET:/.test(controlEnv) && !/GOOGLE_/.test(runnerEnv)) ok('the Google client reaches the control plane only');
+else bad('the Google client reaches the control plane only', 'the runner has no business holding it');
+if (/^# GOOGLE_CLIENT_ID=/m.test(example) && /^# GOOGLE_CLIENT_SECRET=/m.test(example) && /accounts\/google\/login\/callback\//.test(example)) ok('.env.prod.example names both halves and the redirect URI');
+else bad('.env.prod.example names both halves and the redirect URI', 'an operator would have to guess the callback path');
 if (/GC_SIGNUP_MODE: \$\{GC_SIGNUP_MODE:-invite\}/.test(controlEnv)) ok('sign-up is by invitation unless .env.prod says otherwise');
 else bad('sign-up is by invitation unless .env.prod says otherwise', 'an open sign-up page on a public host by default');
 if (/probe \/_allauth\/browser\/v1\/auth\/session +401/.test(deploy)) ok('the smoke check reaches allauth through the edge');

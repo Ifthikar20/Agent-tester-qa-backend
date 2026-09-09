@@ -49,6 +49,11 @@ Environment (see .env.example):
                       and sign-in from an address that has tripped the failed
                       login limit, require a widget token. Unset, nothing
                       asks for one.
+  GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+                      An OAuth client from the Google Cloud console whose
+                      redirect URI is <GC_PUBLIC_URL>/accounts/google/login/callback/.
+                      Set both and "Continue with Google" appears; unset,
+                      the provider is not offered and its callback is a 404.
 """
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -120,6 +125,12 @@ INSTALLED_APPS = [
     # under /_allauth/. Nothing here re-implements a login form.
     'allauth',
     'allauth.account',
+    # Google sign-in (docs/AUTH.md §6). Only the google provider is
+    # installed; there is no django.contrib.sites, so the client comes from
+    # the environment (SOCIALACCOUNT_PROVIDERS below) and not from a row an
+    # admin could edit.
+    'allauth.socialaccount',
+    'allauth.socialaccount.providers.google',
     'allauth.headless',
     'accounts',
     'tenants',
@@ -426,7 +437,11 @@ ACCOUNT_EMAIL_UNKNOWN_ACCOUNTS = True
 ACCOUNT_EMAIL_NOTIFICATIONS = True
 ACCOUNT_EMAIL_SUBJECT_PREFIX = '[ghostclick] '
 # Changing the address is: add the new one, verify it by code, and the old
-# one is replaced — two addresses at most, and only during the change.
+# one is replaced — two addresses at most, and only during the change. The
+# cap matters to Google sign-in too [oauth-2]: an unverified address parked
+# on an account is a claim on it, and `manage.py purge_unverified_emails`
+# deletes such claims fifteen minutes after they were made (docs/AUTH.md
+# §6.6), which is also how long the verification code lives.
 ACCOUNT_CHANGE_EMAIL = True
 ACCOUNT_MAX_EMAIL_ADDRESSES = 2
 # Recovery (docs/AUTH.md §7). A reset link is good for an hour and, because
@@ -461,7 +476,7 @@ HEADLESS_FRONTEND_URLS = {
 LOGIN_URL = HEADLESS_FRONTEND_URLS['account_login']
 
 # Who may sign up (docs/AUTH.md §4). One policy, accounts/policy.py, read by
-# the account adapter and, later, the social one, so the two paths cannot
+# the account adapter and the social one alike, so the two paths cannot
 # drift [oauth-5]:
 #   invite   only an address with a live invitation
 #   open     anyone, behind Turnstile when it is configured
@@ -483,6 +498,57 @@ GC_TURNSTILE_SITE_KEY = os.environ.get('GC_TURNSTILE_SITE_KEY', '').strip()
 if bool(GC_TURNSTILE_SECRET) != bool(GC_TURNSTILE_SITE_KEY):
     raise ImproperlyConfigured('GC_TURNSTILE_SECRET and GC_TURNSTILE_SITE_KEY are set together or not at all')
 GC_TURNSTILE_HOURS = 1
+
+# ---------------------------------------------------------------- google
+#
+# Sign in with Google (docs/AUTH.md §6): an OAuth code flow with PKCE, the
+# id_token as the only thing read from Google, and the rules that allauth
+# has no setting for in accounts.adapters.SocialAccountAdapter. The client
+# is configured here from the environment, so it is set the way every other
+# production value is set and the admin holds no copy of the secret.
+# Without both halves the APPS list is empty, allauth offers no provider,
+# and the whole feature is absent rather than half-present.
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '').strip()
+GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '').strip()
+if bool(GOOGLE_CLIENT_ID) != bool(GOOGLE_CLIENT_SECRET):
+    raise ImproperlyConfigured('GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are set together or not at all')
+SOCIALACCOUNT_PROVIDERS = {'google': {
+    'APPS': [{'client_id': GOOGLE_CLIENT_ID, 'secret': GOOGLE_CLIENT_SECRET, 'key': ''}] if GOOGLE_CLIENT_ID else [],
+    'SCOPE': ['profile', 'email'],
+    # Always ask which account: a person with two Google accounts must not
+    # be signed in as whichever one the browser happened to hold.
+    'AUTH_PARAMS': {'prompt': 'select_account'},
+    # PKCE binds the code to the session that started the flow, so a code
+    # intercepted on the way back is worthless without the verifier.
+    'OAUTH_PKCE_ENABLED': True,
+    # Google's word that an address is verified may sign an EXISTING account
+    # in — but only under the adapter's conditions (the local address is
+    # verified too, and no other Google identity is already attached), and
+    # then the Google identity is connected so the link is by `sub` from
+    # then on [oauth-2].
+    'EMAIL_AUTHENTICATION': True,
+    'EMAIL_AUTHENTICATION_AUTO_CONNECT': True,
+}}
+# The same two, at the top level: allauth reads EMAIL_AUTHENTICATION from
+# the provider's dict but AUTO_CONNECT only from here, and a link that is
+# not connected is a link that has to be re-judged by address every time.
+SOCIALACCOUNT_EMAIL_AUTHENTICATION = True
+SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True
+SOCIALACCOUNT_ADAPTER = 'accounts.adapters.SocialAccountAdapter'
+# A Google sign-up needs no form: the address and name come from the
+# id_token, and whether the address may sign up at all is accounts/policy.py.
+SOCIALACCOUNT_AUTO_SIGNUP = True
+# Google's access and refresh tokens are not kept: nothing here calls a
+# Google API after the sign-in, so a stored token would be a credential
+# with no purpose and a database row worth stealing [oauth-4].
+SOCIALACCOUNT_STORE_TOKENS = False
+# A GET must never start a sign-in: an <img src> on any page could otherwise
+# begin an OAuth flow in the visitor's browser. The only way in is the
+# CSRF-protected POST to the headless redirect endpoint.
+SOCIALACCOUNT_LOGIN_ON_GET = False
+# The provider identity is the id_token's `sub`; the email is display and,
+# under the conditions above, the link to an existing account.
+SOCIALACCOUNT_QUERY_EMAIL = True
 
 # ---------------------------------------------------------------- the executor
 #

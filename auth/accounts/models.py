@@ -103,6 +103,11 @@ class AuthEvent(models.Model):
         EMAIL_CHANGED = 'email_changed', 'email address changed'
         NEW_DEVICE = 'new_device', 'signed in from an unseen device'
         TURNSTILE_DEMANDED = 'turnstile_demanded', 'address must now solve Turnstile'
+        # Google (docs/AUTH.md §6). A refusal carries the real reason in
+        # `detail`; the browser was told one sentence for all of them.
+        GOOGLE_REFUSED = 'google_refused', 'Google sign-in refused'
+        GOOGLE_CONNECTED = 'google_connected', 'Google account connected'
+        GOOGLE_DISCONNECTED = 'google_disconnected', 'Google account disconnected'
 
     at = models.DateTimeField(default=timezone.now, db_index=True)
     # A CharField with choices rather than an enum column: later flows add
@@ -157,3 +162,31 @@ class PreviousEmail(models.Model):
         now = timezone.now()
         rows = cls.objects.filter(email__iexact=email, until__gt=now).select_related('user')
         return [r.user for r in rows if r.user.is_active]
+
+
+class EmailAddressAdded(models.Model):
+    """
+    When an address was added to an account — the one fact allauth's
+    EmailAddress row does not keep, and the one the purge in docs/AUTH.md
+    §6.6 needs.
+
+    An unverified address parked on an account is a claim on it: it blocks
+    the real owner's sign-up (addresses are unique) and it is the row a
+    Google sign-in would have linked to, were linking not restricted to
+    verified addresses [oauth-2]. The code that would verify it lives for
+    fifteen minutes; after that the claim is stale and
+    `manage.py purge_unverified_emails` removes it, secondary addresses
+    only — a sign-up's own primary address stays until the person either
+    verifies it or is answered like an existing account next time.
+
+    One row per EmailAddress, made by a receiver on its creation and gone
+    with it (CASCADE). An address from before this rule has no row and is
+    treated as old, which is the safe direction for a claim.
+    """
+    GRACE_MINUTES = 15
+
+    address = models.OneToOneField('account.EmailAddress', on_delete=models.CASCADE, related_name='added')
+    at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    def __str__(self):
+        return f'{self.address.email} added {self.at:%Y-%m-%d %H:%M}'

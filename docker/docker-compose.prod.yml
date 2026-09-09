@@ -169,6 +169,11 @@ services:
       # refuses one without the other). The secret is this container's only.
       GC_TURNSTILE_SECRET: ${GC_TURNSTILE_SECRET:-}
       GC_TURNSTILE_SITE_KEY: ${GC_TURNSTILE_SITE_KEY:-}
+      # Sign in with Google (docs/AUTH.md §6), both halves or neither. This
+      # container only: the runner never talks to Google, and the UI learns
+      # whether the button exists from GET /auth/config.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
     volumes:
       - control-static:/app/staticfiles
     expose: ["8000"]
