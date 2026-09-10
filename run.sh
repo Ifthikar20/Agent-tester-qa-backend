@@ -2,7 +2,7 @@
 #
 # Start ghostclick, with the sign-in.
 #
-#   GC_WEB_DIR=../poc-qa-stack/dist bash run.sh
+#   bash run.sh                both repositories: builds ../poc-qa-stack, starts the rest
 #
 #   bash run.sh                the runner, the UI and the control plane — you sign in
 #   bash run.sh --open         no sign-in at all, the one-person-one-laptop shape
@@ -13,12 +13,15 @@
 #
 # One Ctrl-C stops whatever it started.
 #
-# GC_WEB_DIR is not optional and is not something this repository can supply.
-# The UI is the poc-qa-stack repository (docs/BOUNDARY.md); build it there
-# and name the build here. With the sign-in it has to have been built knowing
-# where to sign in — `VITE_AUTH_URL=http://localhost:8000 npm run build` over
-# there — because that address is baked into the bundle and no flag on this
-# side can put it in afterwards. scripts/app.js checks both and says so.
+# The UI is the poc-qa-stack repository (docs/BOUNDARY.md), and this is the one
+# command for both. Clone it beside this one and run.sh builds it on every run,
+# with the sign-in address this run needs baked in — the address has to be in
+# the bundle, and a build reused from a run with different flags would be the
+# wrong app. GC_UI_REPO names a checkout that is not beside this one.
+#
+# GC_WEB_DIR=<a build> still wins, and is how a deployment does it: name a build
+# made elsewhere and nothing gets built here. scripts/app.js does the work and
+# says which of the two it took.
 #
 # THE DEFAULT IS THE SIGN-IN, and that is the one thing here worth arguing
 # about, because it inverts `npm start`. Two different questions have two
@@ -133,6 +136,16 @@ check_port "$PORT" "the runner"
 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'not a git checkout')
 printf '\n  %-12s->  %s\n' 'checkout' "$(pwd)"
 printf '  %-12s->  %s\n'   'branch'   "$BRANCH"
+# Where the app will come from, said before the build rather than after it, so
+# a missing UI checkout is the first thing on screen rather than the last.
+UI_REPO="${GC_UI_REPO:-../poc-qa-stack}"
+if [ -n "${GC_WEB_DIR:-}" ]; then
+  printf '  %-12s->  %s\n' 'ui' "$GC_WEB_DIR  (GC_WEB_DIR, used as given)"
+elif [ -f "$UI_REPO/package.json" ]; then
+  printf '  %-12s->  %s\n' 'ui' "built from $UI_REPO on every run"
+else
+  printf '  %-12s->  %s\n' 'ui' "none — clone poc-qa-stack beside this one, or set GC_WEB_DIR"
+fi
 if [ "$WANT_AUTH" = 1 ]; then
   printf '  %-12s->  on — sign in at http://localhost:%s/app/  (bash run.sh --open for none)\n' 'sign-in' "$PORT"
   printf '  %-12s->  bash scripts/adduser.sh you@example.com\n' 'no account?'

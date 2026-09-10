@@ -6,34 +6,34 @@ Fifteen minutes, most of it waiting for a browser to download.
 
 ghostclick is two repositories. This one is the runner and the Django control
 plane; the app is `poc-qa-stack`, and this one is *pointed at* its build
-(docs/BOUNDARY.md). So there are two clones and one build before the one
+(docs/BOUNDARY.md). Clone them side by side, and the application is one
 command:
 
 ```bash
-git clone <ghostclick>     ghostclick
-git clone <poc-qa-stack> poc-qa-stack
+git clone https://github.com/Ifthikar20/poc-qa-stack-backend poc-qa-stack-backend
+git clone https://github.com/Ifthikar20/poc-qa-stack         poc-qa-stack
 
-# the UI, built knowing where it will sign in
-cd poc-qa-stack && npm install && VITE_AUTH_URL=http://localhost:8000 npm run build
-
-# the application
-cd ../ghostclick
-GC_WEB_DIR=../poc-qa-stack/dist bash run.sh      # → http://localhost:3000
+cd poc-qa-stack-backend
+bash run.sh                                        # → http://localhost:3000
 ```
 
-`run.sh` installs what is missing, downloads the browser if it has to, migrates
-the control plane, generates the signing keypair and starts everything — and
-says which of those it skipped, because a setup script that works silently is
-one you cannot debug when it does not. It also prints the checkout and the
-branch it is starting, which is worth reading twice if you keep more than one
-worktree.
+`run.sh` installs what is missing on both sides, downloads the browser if it
+has to, migrates the control plane, generates the signing keypair, builds the UI
+in `../poc-qa-stack` and starts everything — and says which of those it
+skipped, because a setup script that works silently is one you cannot debug
+when it does not. It also prints the checkout, the branch, and where the UI is
+coming from, which is worth reading twice if you keep more than one worktree.
 
-What it will not do is build the UI. It cannot: that source is not in this
-repository. `GC_WEB_DIR` is checked first, before any of the slow work, and a
-missing or wrong one is refused with the command that fixes it rather than
-discovered later from a blank page. With `--auth` it also reads the build and
-warns if `VITE_AUTH_URL` is not in it — that address is baked in at build time,
-so a bundle built without it shows no login however this side is configured.
+The UI is rebuilt on every run, with the sign-in address that run needs baked
+in. That address has to be in the bundle, so a build reused from a run with
+different flags would be the wrong app — a login page that talks to nothing, or
+no login at all. The build takes about a quarter of a second.
+
+The UI checkout somewhere else? `GC_UI_REPO=/path/to/poc-qa-stack bash run.sh`.
+A build made somewhere else, as a deployment does it?
+`GC_WEB_DIR=/path/to/dist bash run.sh`, and nothing is built here. Neither one
+found is refused before any of the slow work, with the command that fixes it,
+rather than discovered later from a blank page.
 
 It starts **with the sign-in**, because the application has one. You will land
 on a login page and you will not have an account yet; the next section makes

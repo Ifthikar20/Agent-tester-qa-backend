@@ -224,8 +224,13 @@ else bad('a typo is refused by name', `exit ${typo.status} — a misspelled flag
  * No UI, no start — and said before any of the slow work, because the whole
  * value of refusing here rather than at the first page load is that it costs
  * seconds instead of an install, a browser download and a migration.
+ *
+ * GC_UI_REPO is pinned to a directory that does not exist. Without it this
+ * would look for ../poc-qa-stack, and on any machine laid out the way SETUP.md
+ * says — which is most of them — that is a real checkout, so the run would
+ * build it and succeed, and this assertion would fail for being right.
  */
-const noWeb = run(['--setup'], { GC_WEB_DIR: undefined });
+const noWeb = run(['--setup'], { GC_WEB_DIR: undefined, GC_UI_REPO: join(web, 'no-such-ui-checkout') });
 const saidNoWeb = `${noWeb.stdout ?? ''}${noWeb.stderr ?? ''}`;
 if (noWeb.status === 1 && /GC_WEB_DIR/.test(saidNoWeb)) ok('without a built UI it refuses by name', 'GC_WEB_DIR, exit 1');
 else bad('without a built UI it refuses by name', `exit ${noWeb.status}: ${saidNoWeb.slice(0, 120).replace(/\s+/g, ' ')}`);
@@ -238,6 +243,32 @@ else bad('and refuses before doing any of the slow work', 'it installed somethin
 const notABuild = run(['--setup'], { GC_WEB_DIR: ROOT });
 if (notABuild.status === 1 && /index\.html/.test(`${notABuild.stdout}${notABuild.stderr}`)) ok('and a source tree is not a build', 'no index.html in it');
 else bad('and a source tree is not a build', `exit ${notABuild.status}`);
+
+/**
+ * No GC_WEB_DIR, but a UI checkout to build: the one command for both repos.
+ *
+ * A stand-in for poc-qa-stack whose build writes dist/index.html and bakes
+ * whatever VITE_AUTH_URL it was handed into it. So one run proves two things:
+ * the launcher builds the sibling and serves what it built, and it ERASES a
+ * sign-in address inherited from the shell when this run has no sign-in —
+ * uiNote reads a localhost address back out of the bundle and warns if one
+ * survived, which is exactly the stale-login bug a reused build would ship.
+ */
+const sibling = mkdtempSync(join(tmpdir(), 'gc-ui-repo-'));
+mkdirSync(join(sibling, 'node_modules'));   // present, so nothing gets installed
+writeFileSync(join(sibling, 'package.json'),
+  JSON.stringify({ name: 'stub-ui', private: true, scripts: { build: 'node build.js' } }));
+writeFileSync(join(sibling, 'build.js'), [
+  "const fs = require('fs');",
+  "fs.mkdirSync('dist', { recursive: true });",
+  "fs.writeFileSync('dist/index.html', '<!doctype html><title>stub</title><!-- ' + (process.env.VITE_AUTH_URL || 'no sign-in address') + ' -->');",
+].join('\n'));
+const built = run(['--setup'], { GC_WEB_DIR: undefined, GC_UI_REPO: sibling, VITE_AUTH_URL: 'http://localhost:1234' });
+const saidBuilt = `${built.stdout ?? ''}${built.stderr ?? ''}`;
+if (built.status === 0 && /built from/.test(saidBuilt)) ok('with no GC_WEB_DIR it builds the UI checkout beside it', 'one command, both repositories');
+else bad('with no GC_WEB_DIR it builds the UI checkout beside it', `exit ${built.status}: ${saidBuilt.slice(-220).replace(/\s+/g, ' ')}`);
+if (built.status === 0 && /no sign-in/.test(saidBuilt) && !/WARNING/.test(saidBuilt)) ok('and erases a sign-in address inherited from the shell', 'no stale login baked in');
+else bad('and erases a sign-in address inherited from the shell', 'VITE_AUTH_URL from the shell leaked into a build with no sign-in');
 
 /**
  * Idempotent, and provably so: the second run must be as clean as the first.

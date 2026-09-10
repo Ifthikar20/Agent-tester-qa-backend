@@ -215,29 +215,91 @@ export function uiNote(index, wanted) {
 }
 
 /**
- * The built UI, and everything that can be wrong with the way it was named.
+ * The built UI: named, or found and built, and everything that can be wrong.
+ *
+ * Three ways in, most explicit first:
+ *
+ *   GC_WEB_DIR=<a build>   used as given. Someone named it on purpose, so this
+ *                          only checks that it is a build.
+ *   a sibling checkout     ../poc-qa-stack, or wherever GC_UI_REPO says. Built
+ *                          here with the sign-in address this run needs, which
+ *                          is what makes `bash run.sh` one command for both
+ *                          repositories instead of a recipe across two.
+ *   neither                refuse, and say both ways out.
+ *
+ * Rebuilt on every run rather than reusing a dist/ that is already there,
+ * because the sign-in address is baked into the bundle: run with --open, then
+ * with the sign-in, and a reused build is the previous run's app — a login page
+ * that talks to nothing, or no login page at all. The build takes about a
+ * quarter of a second; serving the wrong one costs an afternoon.
+ *
+ * This reaches into another repository, which the runner itself never does.
+ * That is deliberate and confined to this launcher: a developer's laptop may
+ * know where the sibling checkout conventionally lives. The server still serves
+ * only the directory it is handed (docs/BOUNDARY.md), and a deployment still
+ * names its build explicitly.
  *
  * Checked before anything slow, because the alternative is finding out after
  * the install, the browser download and the migration — and finding out from a
  * blank page rather than from the terminal that is already open.
  */
-function webDir(opts) {
-  const given = process.env.GC_WEB_DIR;
-  if (!given) {
-    fail(`GC_WEB_DIR is not set, and the UI is a different repository now.
-
-    Build it there, then point this at the result:
-
-      cd ../poc-qa-stack && npm install && ${opts.auth ? `VITE_AUTH_URL=http://localhost:${opts.authPort} ` : ''}npm run build
-      cd -  &&  GC_WEB_DIR=../poc-qa-stack/dist npm run app${opts.auth ? ' -- --auth' : ''}
-
-    Or run the runner with the API and no app:  npm run serve`);
+function webDir(opts, env = process.env, root = ROOT) {
+  const given = env.GC_WEB_DIR;
+  if (given) {
+    const dir = resolve(given);
+    if (!existsSync(join(dir, 'index.html'))) {
+      fail(`GC_WEB_DIR names ${dir}, which has no index.html.\n\n    That is a source tree or an empty directory, not a build. The build is\n    the poc-qa-stack repository's dist/, after \`npm run build\` there.`);
+    }
+    return dir;
   }
-  const dir = resolve(given);
-  if (!existsSync(join(dir, 'index.html'))) {
-    fail(`GC_WEB_DIR names ${dir}, which has no index.html.\n\n    That is a source tree or an empty directory, not a build. The build is\n    the poc-qa-stack repository's dist/, after \`npm run build\` there.`);
+
+  const repo = resolve(env.GC_UI_REPO || join(root, '..', 'poc-qa-stack'));
+  if (!existsSync(join(repo, 'package.json'))) {
+    fail(`No UI to serve: GC_WEB_DIR is not set, and there is no UI checkout at
+    ${repo}
+
+    The UI is its own repository. Clone it beside this one and run again:
+
+      git clone https://github.com/Ifthikar20/poc-qa-stack ${join(root, '..', 'poc-qa-stack')}
+      bash run.sh
+
+    Or build it wherever it is and name the build:
+
+      GC_WEB_DIR=/path/to/poc-qa-stack/dist bash run.sh
+
+    GC_UI_REPO=/path/to/poc-qa-stack names a checkout that is not beside this one.
+    npm run serve runs the runner with the API and no app at all.`);
   }
-  return dir;
+  return buildSibling(repo, opts, env);
+}
+
+/** Install the sibling UI once, build it for this run, and hand back its dist/. */
+function buildSibling(repo, opts, env) {
+  // Installed only when missing: a clean install is the slow part, and a
+  // node_modules that is already there belongs to that checkout, not to us.
+  if (!existsSync(join(repo, 'node_modules'))) {
+    step('ui', `installing the UI's dependencies in ${repo}`);
+    const lock = existsSync(join(repo, 'package-lock.json'));
+    const inst = quiet('npm', [lock ? 'ci' : 'install'], { cwd: repo, env: { ...env } });
+    if (!inst.ok) fail(`installing the UI in ${repo} failed:\n${inst.out.split('\n').slice(-12).join('\n')}`);
+  }
+
+  const buildEnv = { ...env };
+  // ERASED, not emptied, when there is no sign-in: vite bakes "" into the
+  // bundle for an empty value and omits the key for a missing one, so the two
+  // are different builds of the same source. And VITE_API_URL is erased
+  // always, because the runner started below serves this app from its own
+  // origin, so any base inherited from the shell would point it elsewhere.
+  delete buildEnv.VITE_AUTH_URL;
+  delete buildEnv.VITE_API_URL;
+  if (opts.auth) buildEnv.VITE_AUTH_URL = `http://localhost:${opts.authPort}`;
+
+  const r = quiet('npm', ['run', 'build'], { cwd: repo, env: buildEnv });
+  if (!r.ok) fail(`building the UI in ${repo} failed:\n${r.out.split('\n').slice(-12).join('\n')}`);
+  const dist = join(repo, 'dist');
+  if (!existsSync(join(dist, 'index.html'))) fail(`the UI in ${repo} built, but ${dist} has no index.html.`);
+  step('ui', `built from ${repo}${opts.auth ? ` to sign in at ${buildEnv.VITE_AUTH_URL}` : ', no sign-in'}`);
+  return dist;
 }
 
 /** What the browser would load from a build: index.html and the assets it names. */
@@ -386,9 +448,12 @@ const HELP = `
     npm run app -- --headed      drive a real browser window you can watch
     npm run app -- --port 3100   somewhere else
 
-  The UI is the poc-qa-stack repository. Build it there and name the build:
+  The UI is the poc-qa-stack repository. Clone it beside this one and it is
+  built on every run, with the sign-in address that run needs:
 
-    GC_WEB_DIR=../poc-qa-stack/dist npm run app -- --auth
+    ../poc-qa-stack                         found and built automatically
+    GC_UI_REPO=/path/to/poc-qa-stack        a checkout somewhere else
+    GC_WEB_DIR=/path/to/dist                a build made elsewhere; nothing is built
 `;
 
 // ---------------------------------------------------------------- main

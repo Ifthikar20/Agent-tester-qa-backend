@@ -44,16 +44,19 @@ broken deploy rather than as an unset variable. So absence is said instead: the
 banner reports `NO UI` and `/app/` answers a sentence naming the variable.
 
 ```bash
-bash run.sh                       # the whole application, with the sign-in ← the one you want
+bash run.sh                       # both repositories, one command ← the one you want
 bash run.sh --open                # no sign-in at all, the one-laptop shape
 npm run app -- --auth             # the same as run.sh, if you would rather call node
 npm run app -- --fast             # runs skip the performance
-npm start                         # the application: refuses without a built UI
+npm start                         # the runner alone: refuses without GC_WEB_DIR
 npm run serve                     # the server alone: happy with no UI, and says so
 npm run check:all                 # every check, in one command
 ```
 
-Everything above except `npm run serve` wants `GC_WEB_DIR` set.
+`bash run.sh` and `npm run app` find the UI checkout at `../poc-qa-stack`
+(or `GC_UI_REPO`) and build it on every run, so cloning the two side by side
+is the whole setup. A `GC_WEB_DIR` you set yourself always wins, and nothing is
+built. `npm start` never builds anything and wants `GC_WEB_DIR`.
 
 ## Two services, one repository
 
