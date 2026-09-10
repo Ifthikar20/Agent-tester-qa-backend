@@ -111,7 +111,11 @@ if ('GC_AUTH_PUBLIC_KEYS' in offEnv.runner && offEnv.runner.GC_AUTH_PUBLIC_KEYS 
 else bad('and one in the shell is erased too', 'an exported GC_AUTH_PUBLIC_KEYS would be inherited');
 if (offEnv.runner.GC_DEMO === undefined && offEnv.runner.GC_BLOCK_PRIVATE === undefined) ok('nor a demo or reach flag', 'the laptop defaults stand');
 else bad('nor a demo or reach flag');
-if (offEnv.build.VITE_AUTH_URL === '') ok('so the UI is built with no sign-in', 'VITE_AUTH_URL=""');
+// Erased, not set to '': the two produce different bundles (vite omits the
+// key from import.meta.env when it is unset and bakes `""` when it is not),
+// and web/dist is committed as the output of `npm run build` — which sets
+// nothing. src/config.js reads both as the same empty string.
+if ('VITE_AUTH_URL' in offEnv.build && offEnv.build.VITE_AUTH_URL === undefined) ok('so the UI is built with no sign-in', 'VITE_AUTH_URL erased, as a plain `npm run build` leaves it');
 else bad('so the UI is built with no sign-in', String(offEnv.build.VITE_AUTH_URL));
 
 /**

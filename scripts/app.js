@@ -146,7 +146,16 @@ export function envFor(opts, keys, base = {}, root = ROOT) {
     },
     // Baked into the bundle, so it is a BUILD variable, not a runtime one —
     // which is why turning auth on has to rebuild the UI.
-    build: { ...base, ...(opts.auth ? { VITE_AUTH_URL: authUrl } : { VITE_AUTH_URL: '' }) },
+    //
+    // ERASED without --auth rather than set to '', for the same reason as the
+    // runner's names above and one more: `VITE_AUTH_URL=''` and an unset
+    // VITE_AUTH_URL produce DIFFERENT bytes (vite leaves the key out of
+    // import.meta.env when it is unset, and bakes `""` when it is not), so
+    // building into the committed web/dist with it set made that directory
+    // stop reproducing from `npm run build` — which is the command the
+    // repository says produced it. src/config.js reads both as the same empty
+    // string, so nothing about the built app changes.
+    build: { ...base, ...(opts.auth ? { VITE_AUTH_URL: authUrl } : { VITE_AUTH_URL: undefined }) },
   };
 }
 
