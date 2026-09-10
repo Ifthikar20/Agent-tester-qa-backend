@@ -14,7 +14,7 @@
  *   node scripts/check-vocabulary.js       (no browser, no server)
  */
 import assert from 'node:assert';
-import { VERBS, OP_NAMES, parseAction, showAction, labelAction } from '../vocabulary.js';
+import { VERBS, OP_NAMES, parseAction, showAction, labelAction, checkAction } from '../vocabulary.js';
 import { parse, toFlow, asFlowchart } from '../flow.js';
 import { OPS } from '../ops.js';
 
@@ -110,6 +110,20 @@ const unrun = OP_NAMES.filter((n) => !OPS[n]);
 const undeclared = Object.keys(OPS).filter((n) => !OP_NAMES.includes(n));
 if (unrun.length || undeclared.length) bad('the table and the runners match', [...unrun, ...undeclared].join(', '));
 else ok('the table and the runners match', OP_NAMES.join(' '));
+
+// Every sample is a step someone could write, so each must pass its own row's
+// check. `scroll` returned the target instead of `true` for a named scroll, and
+// validate() took the target for the refusal — so every `scroll to <target>` a
+// recording produced was turned away at save as "Step 4: text:…".
+const refused = [];
+for (const v of VERBS) {
+  for (const step of SAMPLES[key(v)] ?? []) {
+    const why = checkAction(step);
+    if (why !== true) refused.push(`${key(v)} → ${JSON.stringify(why)}`);
+  }
+}
+if (refused.length) bad('every sample passes its own check', refused.join('; '));
+else ok('every sample passes its own check');
 
 // A step the table does not know must STOP, not vanish. This is the actual bug
 // that motivated the table: `showOp`'s `default: return null` meant toFlow

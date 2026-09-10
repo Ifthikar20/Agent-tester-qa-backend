@@ -41,7 +41,7 @@
  * this file and flow.js is pinned in scripts/copies.js, and a grammar that has
  * changed without this moving fails there.
  */
-export const LANGUAGE_VERSION = 1;
+export const LANGUAGE_VERSION = 2;
 
 // ------------------------------------------------------------------ literals
 
@@ -139,7 +139,10 @@ export const VERBS = [
     ],
     show: (s) => `scroll to ${s.to ?? showTarget(s.target)}`,
     label: (s, t) => (s.to ? `scroll ${s.to}` : `scroll to ${t(s.target, 12)}`),
-    check: (s) => s.target || s.to === 'top' || s.to === 'bottom'
+    // Boolean(), not the target itself: checkAction treats anything but `true`
+    // as the reason a step is invalid, so returning `s.target` refused every
+    // named scroll at save, giving its own target as the reason.
+    check: (s) => Boolean(s.target) || s.to === 'top' || s.to === 'bottom'
       || 'scroll needs a target, or "top"/"bottom"',
   },
 

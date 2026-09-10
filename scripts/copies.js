@@ -70,4 +70,4 @@ export const languageDigest = () => createHash('sha256')
  * change with no bump would make this a hash of whatever happens to be there,
  * which proves nothing to anybody.
  */
-export const PINNED = { version: 1, digest: '15032f2a2d928662' };
+export const PINNED = { version: 2, digest: 'dd3892701f7fbe35' };
