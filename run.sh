@@ -116,7 +116,7 @@ freeing() {
   esac
 }
 
-check_port() {
+check_port() {   # port, what uses it, the flag that moves it
   busy "$1" && return 0
   die "port $1 is already in use — $2 cannot start there.
 
@@ -124,11 +124,15 @@ check_port() {
       $(freeing "$1")
 
     Or use another port:
-      bash run.sh --port $(( $1 + 100 ))"
+      bash run.sh $3 $(( $1 + 100 ))"
 }
 
-check_port "$PORT" "the runner"
-[ "$WANT_AUTH" = 1 ] && check_port "$AUTH_PORT" "the control plane"
+# The flag is passed in because the two ports are moved by different flags:
+# --port moves the runner and --auth-port the control plane. This used to say
+# --port for both, so a busy 8000 was answered with `bash run.sh --port 8100`,
+# a command that moves the wrong service and fails on 8000 all over again.
+check_port "$PORT" "the runner" --port
+[ "$WANT_AUTH" = 1 ] && check_port "$AUTH_PORT" "the control plane" --auth-port
 
 # ---- say which copy of the code this is -------------------------------------
 # `git worktree list` on this repository routinely shows three checkouts on
