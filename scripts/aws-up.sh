@@ -33,6 +33,15 @@ KEY_NAME=${KEY_NAME:-ghostclick-deploy}
 KEY_FILE=${KEY_FILE:-./ghostclick-deploy.pem}
 REPO_URL=${REPO_URL:-https://github.com/Ifthikar20/poc-qa-stack}
 BRANCH=${BRANCH:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)}
+# The UI is a second repository (docs/BOUNDARY.md) and this box needs its
+# build, so it needs to be told where that repository is. Deliberately not
+# defaulted, and deliberately not guessed at from REPO_URL by appending a
+# suffix: a guessed clone URL either fails with git's error rather than this
+# script's, or — worse — succeeds against somebody else's repository of that
+# name. The one thing this cannot invent is the address of code it does not
+# have.
+WEB_REPO_URL=${WEB_REPO_URL:-}
+WEB_BRANCH=${WEB_BRANCH:-main}
 REMOTE_DIR=/opt/ghostclick
 
 step() { printf '\n  %s\n' "$*"; }
@@ -123,6 +132,18 @@ case "$HTTP_CIDR" in
   */*) ;;
   *) die "HTTP_CIDR=$HTTP_CIDR has no /prefix — a single machine is $HTTP_CIDR/32" ;;
 esac
+
+# Asked for here, at the top, with nothing yet created. The box needs the UI
+# and this repository cannot build one, so without an address to clone it from
+# the run would get as far as `compose up` — ten minutes and an EC2 instance
+# later — and stop on GC_WEB_DIR being unset.
+[ -n "$WEB_REPO_URL" ] || die "set WEB_REPO_URL to the ghostclick-web repository:
+
+    WEB_REPO_URL=https://github.com/<you>/ghostclick-web HTTP_CIDR=$HTTP_CIDR bash scripts/aws-up.sh
+
+  The app is a separate repository now (docs/BOUNDARY.md). This box clones it,
+  builds it against its own public address, and the runner is pointed at the
+  result. WEB_BRANCH picks a branch; the default is main." 
 
 step "account $ACCT in $REGION"
 ok "ssh  from $SSH_CIDR"
@@ -298,7 +319,7 @@ ok "in"
 # script's output or your shell history.
 step "installing docker, cloning, generating secrets, building"
 ok "the first build downloads a Playwright image — expect 5-10 minutes"
-$SSH "REPO_URL='$REPO_URL' BRANCH='$BRANCH' PUBLIC_IP='$IP' ADMIN_CIDR='$SSH_CIDR' bash -s" <<'REMOTE'
+$SSH "REPO_URL='$REPO_URL' BRANCH='$BRANCH' WEB_REPO_URL='$WEB_REPO_URL' WEB_BRANCH='$WEB_BRANCH' PUBLIC_IP='$IP' ADMIN_CIDR='$SSH_CIDR' bash -s" <<'REMOTE'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -365,6 +386,34 @@ if [ -d /opt/ghostclick/.git ]; then
 else
   git clone --quiet --branch "$BRANCH" "$REPO_URL" /opt/ghostclick
 fi
+
+# ---- the UI, from the other repository --------------------------------------
+#
+# Built here rather than shipped, because a build made anywhere else would have
+# to be built against THIS box's address: VITE_AUTH_URL is baked into the
+# bundle, and http://<this-elastic-ip> is not known until the instance exists.
+#
+# Built inside a container rather than on the host, so the box needs no node,
+# no npm and no toolchain of a language it otherwise never runs — and so that
+# the build cannot leave anything behind on a host whose only job is running
+# containers. The image is the one the runner's Dockerfile used to build the UI
+# with, pinned by digest for the same reason it was there.
+sudo mkdir -p /opt/ghostclick-web && sudo chown ubuntu:ubuntu /opt/ghostclick-web
+if [ -d /opt/ghostclick-web/.git ]; then
+  git -C /opt/ghostclick-web fetch --quiet origin "$WEB_BRANCH"
+  git -C /opt/ghostclick-web reset --hard --quiet "origin/$WEB_BRANCH"
+else
+  git clone --quiet --branch "$WEB_BRANCH" "$WEB_REPO_URL" /opt/ghostclick-web
+fi
+echo "  building the UI for http://$PUBLIC_IP"
+UI_BUILDER=node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+sudo docker run --rm -v /opt/ghostclick-web:/src -w /src \
+  -e VITE_AUTH_URL="http://$PUBLIC_IP" "$UI_BUILDER" \
+  sh -c 'npm ci --ignore-scripts && npm run build'
+[ -f /opt/ghostclick-web/dist/index.html ] || {
+  echo "  the UI build produced no dist/index.html — refusing to deploy a runner with nothing to serve"
+  exit 1; }
+
 cd /opt/ghostclick
 
 if [ ! -f .env.prod ]; then
@@ -402,6 +451,9 @@ if [ ! -f .env.prod ]; then
   sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(gen)|"  .env.prod.new
   sed -i "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=$(gen)|"        .env.prod.new
   sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=http://$PUBLIC_IP|"     .env.prod.new
+  # Where the build above landed. Bind-mounted read-only into the runner at
+  # /app/ui by docker-compose.prod.yml.
+  sed -i "s|^GC_WEB_DIR=.*|GC_WEB_DIR=/opt/ghostclick-web/dist|" .env.prod.new
   # The admin, from the same address the ssh rule admits.
   sed -i "s|^# GC_ADMIN_CIDRS=.*|GC_ADMIN_CIDRS=$ADMIN_CIDR|"  .env.prod.new
   sudo install -m 600 -o root -g root .env.prod.new .env.prod

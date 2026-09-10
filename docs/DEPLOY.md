@@ -68,8 +68,16 @@ change first for real multi-user use.
 From a laptop with the AWS CLI logged in:
 
 ```bash
-HTTP_CIDR=<your-ip>/32 bash scripts/aws-up.sh
+WEB_REPO_URL=<ghostclick-web> HTTP_CIDR=<your-ip>/32 bash scripts/aws-up.sh
 ```
+
+`WEB_REPO_URL` is the UI's repository. ghostclick is two repositories now
+(docs/BOUNDARY.md): this one holds the runner and the control plane, and it
+cannot build an app. The box clones the UI, builds it against its own public
+address in a throwaway `node` container — so nothing on the host needs a
+toolchain — and the runner is pointed at the result. It is asked for at the
+top, with nothing yet created, because the alternative is finding out after an
+EC2 instance and ten minutes of image build.
 
 `HTTP_CIDR` is who may reach the app on 80 and 443, and it has no default:
 the default used to be the internet, and a browser that fetches URLs on your
@@ -79,10 +87,10 @@ purpose, and the script says what that means before it continues.
 
 It creates the key pair, security group, a t3.medium with an encrypted volume
 and IMDSv2 required (hop limit 1), and an Elastic IP; installs Docker; writes
-the sudoers line the deploy user runs the stack through; clones this repo;
-generates every secret **on the box**, into a root-owned `.env.prod`, where
-they stay; builds; and does not report success until five checks pass from
-outside the instance. It prints the URL. Roughly ten minutes, almost all of
+the sudoers line the deploy user runs the stack through; clones both repos and
+builds the UI against the box's own address; generates every secret **on the
+box**, into a root-owned `.env.prod`, where they stay; builds; and does not
+report success until five checks pass from outside the instance. It prints the URL. Roughly ten minutes, almost all of
 it the first image build.
 
 Then make yourself an account and sign in:
@@ -249,7 +257,7 @@ how you actually reach the box — exactly as you would type it in the browser.
 
 | who reads it | as | for |
 |---|---|---|
-| the UI, **at build time** | `VITE_AUTH_URL` | where to sign in — its own origin |
+| the UI, **at build time, in `ghostclick-web`** | `VITE_AUTH_URL` | where to sign in — its own origin |
 | Caddy | the site address | which host to answer for; whether to get a certificate |
 | Django | `GC_PUBLIC_URL` | `ALLOWED_HOSTS`, the CSRF origin, and whether cookies are `Secure` and `__Host-` prefixed |
 | the runner | `GC_WEB_ORIGIN` | the origin allowed to call `/api`, and the only origin a socket is accepted from |
@@ -264,8 +272,36 @@ Caddy answers an empty page for a host it does not serve, and Django answers 400
 for one it does not allow. `scripts/deploy.sh` sends every probe with the public
 name pinned to `127.0.0.1` (`curl --resolve`), which is the request a browser
 would make, certificate check included. And because the UI is baked with it,
-changing `PUBLIC_URL` is a rebuild — the compose file passes it as a build
-argument and the image is rebuilt when it changes.
+changing `PUBLIC_URL` means rebuilding the UI — in the other repository, since
+that is where the bundle is made. The runner's image does not change and does
+not need to; `scripts/deploy.sh` reads the build in `GC_WEB_DIR` and refuses to
+deploy one that never mentions the `PUBLIC_URL` it is being deployed against.
+
+### The UI is a directory, not part of the image
+
+`GC_WEB_DIR` in `.env.prod` names a built app on the host, and
+`docker-compose.prod.yml` bind-mounts it read-only into the runner at
+`/app/ui`. The image ships a placeholder page there for the case where nobody
+has mounted anything — it says what is missing, because an empty directory
+would answer 404 on the app's own address, which reads as a broken deploy and
+sends you into the runner's logs, where everything is fine.
+
+Which also means a forgotten mount answers 200 and passes every probe in the
+smoke table below. So `scripts/deploy.sh` refuses before starting anything:
+`GC_WEB_DIR` unset, a directory with no `index.html` (docker creates a missing
+bind-mount path and mounts it empty, so a typo looks like a working deploy),
+and a bundle that never mentions `PUBLIC_URL`.
+
+Releasing a new UI does not touch this repository:
+
+```bash
+cd /opt/ghostclick-web && git pull
+sudo docker run --rm -v "$PWD:/src" -w /src -e VITE_AUTH_URL=<PUBLIC_URL>   node:22-slim sh -c 'npm ci --ignore-scripts && npm run build'
+cd /opt/ghostclick && ./scripts/gc restart runner
+```
+
+The runner reads the directory per request, so even the restart is only for
+tidiness — `/api/version` re-stamps the build time on its own.
 
 ### Giving it a hostname
 
@@ -575,7 +611,7 @@ Look for these two lines. If `auth` says OFF, stop and fix it before anything
 else:
 
 ```
-  serving     ->  /app/web/dist
+  serving     ->  /app/ui  (GC_WEB_DIR)
   auth        ->  on — an EdDSA token from the control plane is required; keys: <kid>
   extension   ->  no origin listed in GC_EXTENSION_ORIGINS — the recorder cannot hand off to this runner
   reach       ->  the driven page cannot reach loopback, private or link-local addresses

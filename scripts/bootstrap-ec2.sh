@@ -108,7 +108,17 @@ cat <<'NEXT'
     git clone <repo-url> /opt/ghostclick
     cd /opt/ghostclick
     sudo install -m 600 -o root -g root .env.prod.example .env.prod
-    sudoedit .env.prod        # PUBLIC_URL, the keypair, the three secrets, the two store passwords
+    sudoedit .env.prod        # PUBLIC_URL, GC_WEB_DIR, the keypair, the three secrets, the two store passwords
+
+  And the UI, which is a second repository and is not built by the first:
+
+    git clone <ghostclick-web-url> /opt/ghostclick-web
+    cd /opt/ghostclick-web
+    sudo docker run --rm -v "$PWD:/src" -w /src -e VITE_AUTH_URL=<PUBLIC_URL>       node:22-slim sh -c 'npm ci --ignore-scripts && npm run build'
+
+  GC_WEB_DIR is that dist/. The runner is pointed at it; nothing here builds
+  it, and the address in VITE_AUTH_URL is baked into the bundle, so it has to
+  be the PUBLIC_URL this box answers on.
 
   root-owned and 0600: the signing key in it is read by compose under sudo
   (scripts/gc) and by nothing running as you. Then from your laptop:

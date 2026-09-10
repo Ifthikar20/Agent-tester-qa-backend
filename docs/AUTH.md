@@ -47,6 +47,16 @@ control plane at all: its trust anchor is delivered in its environment
 Laptop mode stays supported: with no `GC_AUTH_PUBLIC_KEYS` on the runner and no
 `VITE_AUTH_URL` in the UI, there is no login and the banner says `auth -> OFF`.
 
+Those two switches are in two repositories now (docs/BOUNDARY.md), which is
+worth stating because it means neither side can enforce the pair. The runner's
+gate is a runtime variable; the UI's login is baked into a bundle built
+elsewhere. A gated runner served a bundle with no sign-in shows a console that
+is refused on every call and offers no way in; an open runner served a bundle
+with one shows a login that succeeds and is then ignored. `scripts/app.js`
+reads the build it is handed and says which it has; `scripts/deploy.sh`
+refuses. Neither can fix it, because the address was decided at build time in
+the other repository.
+
 ---
 
 ## 1. Transport, cookies, hosts

@@ -4,16 +4,20 @@ A browser-automation PoC: a synthetic cursor visibly glides across a live
 headless-Chrome feed and clicks things, driven by a small DSL — against any
 allowlisted URL, with the script rendered as a mermaid diagram.
 
-**New here? [SETUP.md](SETUP.md) walks through it end to end** — server, your
-own app, credentials, the extension, and a first recording.
+This repository is the **runner** and the **control plane**. The app is a
+second repository, `ghostclick-web`, and this one is *pointed at* its build
+(`GC_WEB_DIR`) rather than building it — see [docs/BOUNDARY.md](docs/BOUNDARY.md).
+
+**New here? [SETUP.md](SETUP.md) walks through it end to end** — both clones,
+your own app, credentials, the extension, and a first recording.
 
 ```bash
 npm install
 npx playwright install chromium   # skip if your sandbox already ships one
-npm start                         # builds the UI if it changed, then serves it
+GC_WEB_DIR=../ghostclick-web/dist npm start
 
 npm run check                     # end-to-end, against a running server
-npm run check:freshness           # the UI rebuilds, and nothing serves a stale one
+npm run check:freshness           # a UI deployed under a running runner is served, and re-stamped
 npm run check:runner              # a command is never dropped, the lock always clears
 npm run check:suites              # onboarding, the origin gate, suite runs
 npm run check:recording           # repeated links, scrolling, jump-to-top, timeouts
@@ -28,36 +32,38 @@ npm run check:teach               # demonstrate by hand, then replay what it wro
 npm run check:fidelity            # does the replay reproduce it? would coordinates have?
 npm run check:shared              # the picker, the hand-off, every copy of the language
 npm run check:auth                # forgeries refused, Python signs it, Node checks it
-npm run check:boundary            # the three projects can still be split apart
+npm run check:boundary            # no bundler crept back, and the UI is still a directory
 npm run check:diagram             # generated mermaid vs. the real parser
 ```
 
-The UI is a Vue 3 app in `web/`, built to `web/dist/`. That build is **not** in
-git: it is generated, and committing it meant every change to a component
-arrived as itself plus a wall of regenerated bundles. `npm start` **builds it
-when it is missing or when a source file is newer**, so one command always gives
-you the latest. A start with nothing to do says `up to date` and costs nothing.
+`GC_WEB_DIR` names a built UI — `ghostclick-web`'s `dist/`, a CI artefact, a
+read-only mount in a container. There is no default: one would name a path this
+repository cannot produce, so it could only ever be a directory that is not
+there, and that arrives as a 404 on the app's own address, which reads as a
+broken deploy rather than as an unset variable. So absence is said instead: the
+banner reports `NO UI` and `/app/` answers a sentence naming the variable.
 
 ```bash
 bash run.sh                       # the whole application, with the sign-in ← the one you want
 bash run.sh --open                # no sign-in at all, the one-laptop shape
 npm run app -- --auth             # the same as run.sh, if you would rather call node
 npm run app -- --fast             # runs skip the performance
-npm start                         # just the runner, if setup is already done
-npm run serve                     # run only, never build
-npm run dev                       # Vite in front of it, on :5173
-npm run build                     # → web/dist/, generated and gitignored
+npm start                         # the application: refuses without a built UI
+npm run serve                     # the server alone: happy with no UI, and says so
 npm run check:all                 # every check, in one command
 ```
 
-## Three projects, one repository
+Everything above except `npm run serve` wants `GC_WEB_DIR` set.
 
-`web/` (the UI) and `auth/` (the control plane) are **separate projects** that
-happen to live here. Neither reads a file outside itself, the server is
-*pointed* at a built UI directory (`GC_WEB_DIR`) rather than owning the path,
-and the control plane is reached over HTTP and joined to the runner by one
-signed token. That is what makes splitting them into their own repositories a
-`git mv`; `npm run check:boundary` is what stops it quietly ceasing to be true.
+## Two services, one repository
+
+`auth/` (the control plane) is a **separate project** that happens to live
+here. It reads no file outside itself, nothing the runner loads reads a file
+from it, and the two are joined by one signed token and one HTTP call. That is
+what would make splitting it a `git filter-repo` too; `npm run check:boundary`
+is what stops that quietly ceasing to be true — and it matters more than it did
+for the UI, because the UI's half of the boundary is now held up by the
+repository itself and this one is held up by nothing else.
 See [docs/BOUNDARY.md](docs/BOUNDARY.md).
 
 ## Signing in, when you want to
@@ -73,10 +79,14 @@ keys it trusts, every time. `npm run app -- --auth` does all of this; by hand:
 cd auth && python manage.py signing_key --new      # prints both lines below, once
 
 # the control plane                                    # the runner
-GC_SIGNING_KEY='…' python manage.py runserver 8000     GC_AUTH_PUBLIC_KEYS='{"<kid>": "…"}' GC_WEB_ORIGIN=http://localhost:3000 GC_AUTH_ORIGIN=http://localhost:8000 npm start
-# the UI
+GC_SIGNING_KEY='…' python manage.py runserver 8000     GC_AUTH_PUBLIC_KEYS='{"<kid>": "…"}' GC_WEB_ORIGIN=http://localhost:3000 GC_AUTH_ORIGIN=http://localhost:8000 GC_WEB_DIR=../ghostclick-web/dist npm start
+# the UI, in the other repository
 VITE_AUTH_URL=http://localhost:8000 npm run build
 ```
+
+That last line is not a convenience — the address is baked into the bundle, so
+a UI built without it has no login at all and nothing on this side can add one.
+`npm run app -- --auth` reads the build it is given and says so before starting.
 
 The runner cannot mint: it holds public keys and nothing else, refuses to
 start if the old shared `GC_AUTH_SECRET` is still in its environment, and
@@ -740,15 +750,20 @@ The sidebar shows the commit and when the UI was built, so "am I on the latest?"
 is answerable by looking. Both were read once, at boot.
 
 The commit is fine that way. The build time is not: express serves the built UI
-directory straight off disk, so a `vite build` in another terminal changes what the
+directory straight off disk, so a build in another terminal changes what the
 browser gets without this process noticing. The stamp then reports a UI older
 than the one it is actually serving — and a version stamp that is confidently
 wrong is worse than no stamp at all, because its entire job is to be trusted at
 a glance.
 
+The split made this the normal case rather than the awkward one. The two
+numbers now come from two repositories on two clocks, and a UI release writes
+into that directory while this process runs, with nothing to tell it.
+`check:freshness` deploys a second build underneath a running server and
+asserts both the page and the stamp move.
+
 The commit and the start time stay fixed for the process; the build time is
-`stat`ed per request. `check:freshness` already asserted the build is not older
-than its source and caught this the moment a rebuild happened mid-session.
+`stat`ed per request.
 
 ## A recording that began with a redirect
 
@@ -1533,14 +1548,12 @@ silently inside someone else's docs.
 | `suites.js` | the suite model — one origin, pages, expectations, cases |
 | `home.js` | where the runner points at startup — pure, so it can be tested |
 | `runs.js` | run history, scoped by suite; defects grouped out of it |
-| `web/` | the Vue 3 app: onboarding, suites, console, dashboard — its own project |
-| `web/dist/` | its build — generated, gitignored; `npm start` makes it |
-| `web/src/config.js` | where the backend is: same origin, or `VITE_API_URL` |
-| `web/src/lang/` | the frontend's checked copy of the vocabulary |
+| `GC_WEB_DIR` | not a file: the built app, made in `ghostclick-web` and served from wherever this names |
+| `scripts/copies.js` | who holds a copy of the case language, and the version the UI checks itself against |
 | `auth/` | Django: users, sessions, SSO later — identity and nothing else |
 | `auth/accounts/tokens.py` | mints the HS256 token the runner accepts, stdlib only |
 | `auth.js` | verifies it — verify-only, so the runner cannot authorise itself |
-| `docs/BOUNDARY.md` | the four rules that keep frontend and backend separable |
+| `docs/BOUNDARY.md` | the seam between the two repositories, and what still needs a check |
 | `docs/DEPLOY.md` | putting it on AWS, and why auth is not optional once you do |
 | `Dockerfile`, `docker/` | the runner image, the compose stack, the Caddyfile |
 | `scripts/deploy.sh` | deploy from your laptop; refuses without a real auth secret |

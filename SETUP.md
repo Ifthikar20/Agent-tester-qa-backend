@@ -4,18 +4,36 @@ Fifteen minutes, most of it waiting for a browser to download.
 
 ## 1 · Run the server
 
+ghostclick is two repositories. This one is the runner and the Django control
+plane; the app is `ghostclick-web`, and this one is *pointed at* its build
+(docs/BOUNDARY.md). So there are two clones and one build before the one
+command:
+
 ```bash
-git clone -b claude/ghostclick-automation-poc-mb76oz https://github.com/Ifthikar20/poc-qa-stack
-cd poc-qa-stack
-bash run.sh                         # → http://localhost:3000
+git clone <ghostclick>     ghostclick
+git clone <ghostclick-web> ghostclick-web
+
+# the UI, built knowing where it will sign in
+cd ghostclick-web && npm install && VITE_AUTH_URL=http://localhost:8000 npm run build
+
+# the application
+cd ../ghostclick
+GC_WEB_DIR=../ghostclick-web/dist bash run.sh      # → http://localhost:3000
 ```
 
-That is the whole thing. `run.sh` installs what is missing, downloads the
-browser if it has to, migrates the control plane, generates the signing keypair,
-builds the UI and starts everything — and says which of those it skipped,
-because a setup script that works silently is one you cannot debug when it does
-not. It also prints the checkout and the branch it is starting, which is worth
-reading twice if you keep more than one worktree.
+`run.sh` installs what is missing, downloads the browser if it has to, migrates
+the control plane, generates the signing keypair and starts everything — and
+says which of those it skipped, because a setup script that works silently is
+one you cannot debug when it does not. It also prints the checkout and the
+branch it is starting, which is worth reading twice if you keep more than one
+worktree.
+
+What it will not do is build the UI. It cannot: that source is not in this
+repository. `GC_WEB_DIR` is checked first, before any of the slow work, and a
+missing or wrong one is refused with the command that fixes it rather than
+discovered later from a blank page. With `--auth` it also reads the build and
+warns if `VITE_AUTH_URL` is not in it — that address is baked in at build time,
+so a bundle built without it shows no login however this side is configured.
 
 It starts **with the sign-in**, because the application has one. You will land
 on a login page and you will not have an account yet; the next section makes
@@ -25,8 +43,8 @@ one-person-one-laptop shape and what `npm start` does.
 Add `--auth` and it also sets up and starts the Django control plane in
 `auth/`: pip, the migration, a signing keypair generated once into
 `.ghostclick/signing-key.pem` (the private half, for the control plane) and
-`.ghostclick/auth-public-keys.json` (the public half, for the runner), and
-the UI rebuilt knowing where to sign in. One Ctrl-C stops everything. It will not create an account for you — it tells you
+`.ghostclick/auth-public-keys.json` (the public half, for the runner). One
+Ctrl-C stops everything. It will not create an account for you — it tells you
 to run `createsuperuser`, because a script that quietly makes an admin login
 with a password it chose has put a login on your machine that you do not know
 about.
@@ -46,22 +64,25 @@ The longer way still works, and is what `npm run app` does for you:
 ```bash
 npm install
 npx playwright install chromium
-npm start
+GC_WEB_DIR=../ghostclick-web/dist npm start
 ```
 
 It prints what it starts with:
 
 ```
   ghostclick  ->  http://localhost:3000
-  serving     ->  /path/to/poc-qa-stack/web/dist
+  serving     ->  /path/to/ghostclick-web/dist  (GC_WEB_DIR)
   allowed     ->  http://localhost:3000
   secrets     ->  QA_PASS, QA_USER
   driving     ->  nothing yet — open a URL in the console
 ```
 
 `serving` is the built UI it is handing out. It is a directory the server is
-pointed at, not one it owns — `GC_WEB_DIR` moves it, which is how the same
-backend serves a UI deployed from its own repository.
+pointed at, not one it owns, which is what lets the app be released on its own
+clock. With no `GC_WEB_DIR` the line says `NO UI` and `/app/` answers a
+sentence saying which variable to set — `npm run serve` is that mode on
+purpose, because the API, the socket and the recorder hand-off are all useful
+with no app in front of them.
 
 There is also a `pace` line. A replay glides the pointer, pauses before each
 click and types a character at a time, so that a feed running at roughly ten
@@ -85,18 +106,20 @@ on whatever you ran last, and `HOME_URL` overrides it.
 
 Open `http://localhost:3000`. It lands on **Test suites**.
 
-`npm start` builds the UI if anything changed and then serves it, so one
-command always runs the latest. It says which:
+`npm start` finds the build, says which one it is and when it was made, and
+then serves it:
 
 ```
-  ui          ->  up to date
+  ui          ->  /path/to/ghostclick-web/dist  (built 2026-09-06 16:43)
   version     ->  0b8c46a, ui built 2026-09-06 16:43
 ```
 
-The same commit is at the bottom of the sidebar. If it is not the one you
-expect, you are looking at an old UI — worth checking before chasing a bug you
-have already fixed. (`npm run dev` puts Vite in front of it on :5173 for working
-on the UI itself; `npm run serve` runs without building.)
+Two numbers now, because there are two repositories: the commit is this one,
+the build time is the other one's. Both are at the bottom of the sidebar. If
+either is not what you expect you are looking at an old half — worth checking
+before chasing a bug you have already fixed. Nothing here rebuilds the UI, so
+after changing it, rebuild in `ghostclick-web` and reload: the runner reads the
+directory per request and needs no restart.
 
 **Scrolling the page you are driving:** point at the canvas and use your wheel
 or trackpad, or the ↑ Top / ↓ Bottom buttons. Clicks and keystrokes there go to

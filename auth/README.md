@@ -52,20 +52,28 @@ Then point the UI at it and give the runner the PUBLIC half of the key — the
 needs to know:
 
 ```bash
-# in the repository root
+# in the UI's repository — the address is baked into the bundle
+cd ../ghostclick-web && VITE_AUTH_URL=http://localhost:8000 npm run build
+
+# back in this repository's root
+cd -
 GC_AUTH_PUBLIC_KEYS='{"<kid>": "-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----\n"}' \
-GC_WEB_ORIGIN=http://localhost:3000 GC_AUTH_ORIGIN=http://localhost:8000 npm start
-VITE_AUTH_URL=http://localhost:8000 npm run build
+GC_WEB_ORIGIN=http://localhost:3000 GC_AUTH_ORIGIN=http://localhost:8000 \
+GC_WEB_DIR=../ghostclick-web/dist npm start
 ```
 
-`npm run app -- --auth` from the repository root does all of that, keeping
-the keypair and the second-factor key in `.ghostclick/`, and prints the
-control plane's mail — every sign-up code, invitation and reset link — into
-the same terminal, because on a laptop the mail backend is the console.
+The build comes first because it is the one step nothing on this side can do
+or undo: `VITE_AUTH_URL` decides at build time whether the app has a login at
+all, so a bundle built without it shows none however this runner is
+configured. `npm run app -- --auth` from the repository root does the rest —
+keeping the keypair and the second-factor key in `.ghostclick/`, reading the
+build it is pointed at and warning when the two disagree, and printing the
+control plane's mail (every sign-up code, invitation and reset link) into the
+same terminal, because on a laptop the mail backend is the console.
 
-Leave `VITE_AUTH_URL` unset and the UI runs with no login at all, against a
-runner that is also unauthenticated. That is the laptop case and it stays
-supported — `npm start` on its own should not require a second service.
+Leave `VITE_AUTH_URL` unset over there and the UI runs with no login at all,
+against a runner that is also unauthenticated. That is the laptop case and it
+stays supported — `npm start` on its own should not require a second service.
 
 ## Two profiles, one switch
 
