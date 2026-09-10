@@ -20,6 +20,7 @@ import { NoSuchSuite, originOf, pageCheckFlow } from './suites.js';
 import { discover, links } from './targets.js';
 import { parse } from './parse.js';
 import { parseFlow, flatten, toFlow } from './flow.js';
+import { LANGUAGE_VERSION } from './vocabulary.js';
 import { toMermaid } from './diagram.js';
 import { Recorder } from './recorder.js';
 import { NavigationLog } from './navlog.js';
@@ -629,7 +630,18 @@ const buildTime = () => {
   if (!APP) return null;                                                     // no UI to date
   try { return statSync(APP).mtime.toISOString(); } catch { return null; }   // pointed at nothing
 };
-app.get('/api/version', (_req, res) => res.json({ ...identity, built: buildTime() }));
+/**
+ * `language` is the third answer, and it is here because of the split.
+ *
+ * The UI holds its own copy of the case grammar and is built in another
+ * repository on another schedule, so nothing at build time can tell it that
+ * this runner has learnt a verb its copy has never heard of — the step just
+ * renders as nothing. This is the one moment the two halves are in the same
+ * room, so the runner says which version of the language it speaks and a
+ * consumer that finds a number it does not recognise can say so out loud
+ * instead of drawing a blank (scripts/copies.js).
+ */
+app.get('/api/version', (_req, res) => res.json({ ...identity, built: buildTime(), language: LANGUAGE_VERSION }));
 
 /**
  * How much of the plan this organisation has used, counted by the runner

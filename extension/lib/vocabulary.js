@@ -23,6 +23,26 @@
  * sets ever differ.
  */
 
+/**
+ * Which version of this language this is.
+ *
+ * Three projects parse this grammar and, since the split, one of them is in
+ * another repository: the UI renders steps from its own copy of this file.
+ * Nothing imports across, so drift cannot fail loudly — a verb added here is
+ * simply a step the UI draws as nothing at all, on a day nobody changed the
+ * UI.
+ *
+ * So the language carries a number. The runner reports it at /api/version,
+ * which gives a consumer holding a copy something to compare itself against
+ * and somewhere to say "this runner speaks a language I do not" — the check
+ * that a published package would otherwise do at install time.
+ *
+ * `npm run check:shared` is what stops the number going stale: the digest of
+ * this file and flow.js is pinned in scripts/copies.js, and a grammar that has
+ * changed without this moving fails there.
+ */
+export const LANGUAGE_VERSION = 1;
+
 // ------------------------------------------------------------------ literals
 
 /** Strip one layer of surrounding single quotes. */

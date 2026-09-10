@@ -1,17 +1,13 @@
-# The committed build is bytes, not text.
+# The case language is hashed, so its line endings are a fact about it.
 #
-# web/dist is in git — that is the whole reason `npm start` needs no bundler —
-# and vite names every chunk by a hash of its CONTENT. With line-ending
-# normalisation on, a rebuild on a checkout where core.autocrlf is true
-# produces a different hash for the same source than a rebuild on one where it
-# is not, so the directory grew a second copy of all 22 chunks and index.html
-# named only one set. Forty-four files where twenty-two are reachable, and
-# nothing to tell you which half is dead.
-#
-# -text turns normalisation off for everything under it: what vite wrote is
-# what git stores and what the next checkout gets, whatever anyone's
-# core.autocrlf says.
-web/dist/** -text
+# vocabulary.js and flow.js carry a version number, and `npm run check:shared`
+# proves that number still describes their bytes (scripts/copies.js). The
+# digest is taken over LF-normalised text — a hash that came out differently on
+# Windows would be a check people turn off — and these two lines are the other
+# half of that promise: normalisation stays ON for them, so what git stores is
+# what the digest was computed from, on every machine.
+vocabulary.js text eol=lf
+flow.js text eol=lf
 
 # The shell scripts the deployment runs on a Linux host. A CRLF shebang line
 # is `/usr/bin/env bash\r`, which is not a program, and the error names a file

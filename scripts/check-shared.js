@@ -4,12 +4,18 @@
  *   npm start &
  *   node scripts/check-shared.js
  *
- * Two things, in one file because they are the same worry:
+ * Three things, in one file because they are the same worry:
  *
  *   the copies    every vendored copy of the case language is byte-identical to
  *                 the original (scripts/copies.js says who has one and why).
  *                 Three projects parse this grammar; a copy that has drifted is
  *                 a case the recorder writes and the executor cannot read.
+ *   the version   the copy that is not in this repository any more. The UI
+ *                 holds one, in ghostclick-web, and nothing that runs here can
+ *                 read it — so what is checked is the number the UI compares
+ *                 itself against: that it still describes the bytes the grammar
+ *                 actually has, and that the runner reports it to anyone who
+ *                 asks.
  *   the extension the picker's click suppression, the replay, and the hand-off
  *                 endpoint, tested against a real page — the parts that only
  *                 work because they share code with the server.
@@ -18,7 +24,8 @@ import { chromium } from 'playwright';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { toFlow } from '../flow.js';
-import { COPIES } from './copies.js';
+import { LANGUAGE_VERSION } from '../vocabulary.js';
+import { COPIES, PINNED, languageDigest } from './copies.js';
 
 const BASE = process.env.BASE_URL || 'http://localhost:3000';
 const root = (p) => fileURLToPath(new URL(`../${p}`, import.meta.url));
@@ -27,10 +34,10 @@ const ok = (label, detail = '') => console.log(`  ok    ${label.padEnd(46)} ${de
 
 // ---------------------------------------------------------------- the copies
 console.log('\n— one source of truth ————————————————————————————————————');
-// The extension parses and writes cases with no server; the Vue app renders
-// steps with no server. Both hold a copy, and both drift the moment the
-// original is edited, which is the entire point of checking rather than
-// remembering. `npm run sync:lang` is the fix, and this is what tells you.
+// The extension parses and writes cases with no server, so it holds a copy,
+// and the copy drifts the moment the original is edited — which is the entire
+// point of checking rather than remembering. `npm run sync:lang` is the fix,
+// and this is what tells you.
 for (const { from, to } of COPIES) {
   let copy;
   try { copy = readFileSync(root(to), 'utf8'); }
@@ -45,6 +52,40 @@ if (!readFileSync(root('recorder.js'), 'utf8').includes('extension/lib/propose.j
   fail('recorder.js no longer reads the shared proposer');
 }
 ok('recorder.js injects the same proposer the extension loads');
+
+// ---------------------------------------------------------------- the version
+console.log('\n— and a number for the copy this repository cannot see ————');
+
+/**
+ * The UI's copy went to ghostclick-web with the UI. The byte-for-byte check
+ * above cannot follow it there, and a check that quietly stopped covering a
+ * consumer is worse than one that was never written, so this is what took its
+ * place: the grammar carries a version, and the version has to describe the
+ * grammar.
+ *
+ * The failure it catches is the ordinary one — a verb added, a syntax changed,
+ * and LANGUAGE_VERSION left where it was. That is invisible from here and, over
+ * there, is a step the app draws as nothing at all on a day nobody touched the
+ * app.
+ */
+const digest = languageDigest();
+if (LANGUAGE_VERSION !== PINNED.version) {
+  fail(`vocabulary.js says version ${LANGUAGE_VERSION} and scripts/copies.js is pinned to ${PINNED.version} — run \`npm run sync:lang\``);
+}
+if (digest !== PINNED.digest) {
+  fail(`the case language has changed but LANGUAGE_VERSION is still ${LANGUAGE_VERSION}.\n`
+    + `        ${digest} now, ${PINNED.digest} when the version was set.\n`
+    + '        Bump it in vocabulary.js, run `npm run sync:lang`, and tell ghostclick-web.');
+}
+ok(`language version ${LANGUAGE_VERSION} describes the grammar it names`, digest);
+
+// And the runner tells anyone who asks, because a number nothing publishes is
+// a number the other repository has no way to compare itself against.
+const version = await fetch(`${BASE}/api/version`).then((r) => r.json());
+if (version.language !== LANGUAGE_VERSION) {
+  fail(`GET /api/version says language ${JSON.stringify(version.language)}, not ${LANGUAGE_VERSION} — the UI has nothing to check itself against`);
+}
+ok('and GET /api/version reports it', `language: ${version.language}`);
 
 // ---------------------------------------------------------------- the picker
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
