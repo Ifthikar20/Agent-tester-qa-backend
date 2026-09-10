@@ -9,9 +9,19 @@
 # host, nothing to leak, and no reason to open port 22 to GitHub's ranges.
 name: checks
 
+# Runs on every push and pull request — but not every job does.
+#
+# The browser suite (`checks`) is parked behind `if:` below rather than the
+# whole workflow being parked, because three of the four jobs here need
+# neither a browser nor a running server and are the ones that catch most
+# regressions: the Django suite, the supply-chain assertions, and the image
+# builds. Parking the workflow to keep one job from failing threw those away
+# too, and a repository whose default branch runs no CI at all is worse than
+# one with a job you know is pending.
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 # The token this workflow is handed can read the repository and nothing
 # else. Nothing here writes to it, and a job that could — through a
@@ -25,6 +35,18 @@ concurrency:
 
 jobs:
   checks:
+    # On request only, and honestly so. Two things must be fixed first:
+    #
+    #   1. A `container:` job runs its steps as root, and Chromium refuses to
+    #      start as root without --no-sandbox — which Dockerfile:39-41 explains
+    #      is exactly the trade this project will not make. It needs
+    #      `options: --user pwuser` and a chowned workspace, or a plain runner
+    #      with `playwright install`.
+    #   2. Most of these checks talk to a running server (scripts/check.js
+    #      opens ws://localhost:3000). Nothing here starts one.
+    #
+    # A job that is red on every push teaches people to ignore red.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # The exact image Dockerfile pins, digest included. If they ever drift,

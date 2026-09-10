@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { VirtualCursor, sleep } from './cursor.js';
 import { OPS, validate, PACE, paceOf } from './ops.js';
 import { normalizeUrl } from './origins.js';
+import { iconFor } from './icons.js';
 import { chooseHome } from './home.js';
 import { bearer, verify } from './auth.js';
 import { AUTH_ON, DEMO, PUBLIC_KEYS, KEY_ERROR, WEB_ORIGIN, EXTENSION_ORIGINS, EXTENSION_ERROR, TURNSTILE, csp } from './mode.js';
@@ -465,6 +466,38 @@ app.get('/api/hero', (_req, res) => {
   res.json({ images });
 });
 
+/**
+ * The favicon of a site you have added.
+ *
+ * Served from our own origin rather than pointed at from the sidebar, so that
+ * opening the app does not make your browser announce, to every site in your
+ * suite list, that you are looking at it. The bytes are fetched once by the
+ * server and cached — see icons.js, where every guard on that fetch is written
+ * down, because it is the only outbound request this process makes.
+ *
+ * 404 rather than a placeholder image when a site has no icon: the sidebar
+ * draws a monogram in that case, and it can do that better than we can.
+ *
+ * Behind the /api gate like everything else, and it consults the CALLER'S
+ * allowlist rather than a global one: each organisation has its own now
+ * (docs/AUTH.md §10), so this cannot be used to warm or read icons for
+ * origins that belong to somebody else.
+ */
+app.get('/api/sites/icon', async (req, res) => {
+  const origin = String(req.query.origin ?? '');
+  try {
+    const icon = await iconFor(origin, req.space.origins.list());
+    if (!icon) return res.status(404).json({ ok: false, error: 'no icon' });
+    // A day in the browser, since the server-side entry lasts a week anyway;
+    // private, because which sites are in your sidebar is not for a shared cache.
+    res.set('Cache-Control', 'private, max-age=86400');
+    res.type(icon.type).send(icon.body);
+  } catch (err) {
+    if (err.refused) return res.status(403).json({ ok: false, error: err.message });
+    res.status(502).json({ ok: false, error: 'could not reach that site' });
+  }
+});
+
 // ------------------------------------------------------------ suites (API)
 /**
  * Onboarding a project happens over HTTP, not the socket, because it is
@@ -615,6 +648,7 @@ app.get('/api/state', (req, res) => {
     usage: usage(req),
   });
 });
+
 
 app.get('/api/origins', (req, res) => res.json({ origins: req.space.origins.list() }));
 app.post('/api/origins', (req, res) => {

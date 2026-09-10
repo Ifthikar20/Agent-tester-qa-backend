@@ -22,7 +22,16 @@ COPY . .
 
 # The accounts live in Postgres, not in this image; the only thing written at
 # runtime is the collected static tree, on a volume.
-RUN useradd -m app && chown -R app:app /app
+#
+# That mountpoint is created HERE, and it is the whole point of the line rather
+# than a tidiness habit: Docker creates a missing mountpoint as root, this
+# container runs as `app`, and collectstatic into a root-owned /app/staticfiles
+# fails with EACCES — which `set -e` in the deploy turns into a dead first
+# deploy. The runner's Dockerfile says the same thing about /app/.ghostclick.
+#
+# Only staticfiles, where this once also made /app/db: the accounts moved to
+# Postgres, so there is no database directory in this image to own.
+RUN mkdir -p /app/staticfiles && useradd -m app && chown -R app:app /app
 USER app
 
 EXPOSE 8000

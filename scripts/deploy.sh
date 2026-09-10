@@ -422,6 +422,58 @@ probe /api/recording   401 "the extension hand-off is gated" POST
 # allowlist is not being applied.
 probe /admin/          403 "the admin is behind the allowlist"
 
+# ---- and now the other direction ------------------------------------------
+#
+# Every probe above asserts that something is REFUSED, and a deployment nobody
+# can sign in to passes all of them: a control plane with the wrong key, a
+# bundle built against the wrong origin, a migration that never ran — each
+# answers 401 exactly as a healthy one does. These two fail when access does
+# not WORK.
+RESOLVE="\$HOST:\$PORT:127.0.0.1"
+
+# CSRF has to reach the browser before a sign-in can start, and a missing
+# Set-Cookie here is a login that 403s for everyone. The probe above cannot
+# see it: the body is identical either way.
+if curl -s -m 10 -i --resolve "\$RESOLVE" "\$PUBLIC_URL/auth/csrf" | grep -qi '^set-cookie:.*csrftoken'; then
+  printf '    %-34s %s\n' "sign-in can actually start" "csrftoken set"
+else
+  printf '    %-34s %s\n' "sign-in can actually start" "NO csrftoken — every login 403s"; FAIL=1
+fi
+
+# The whole round trip, when the operator supplies an account to do it with.
+# Skipped LOUDLY rather than silently: a check that quietly does not run is one
+# everybody believes is passing.
+if [ -n "\${SMOKE_EMAIL:-}" ] && [ -n "\${SMOKE_PASSWORD:-}" ]; then
+  jar=\$(mktemp)
+  csrf=\$(curl -s -m 10 -c "\$jar" --resolve "\$RESOLVE" "\$PUBLIC_URL/auth/csrf" \
+         | grep -o '"csrfToken":"[^"]*"' | cut -d'"' -f4)
+  code=\$(curl -s -m 15 -b "\$jar" -c "\$jar" --resolve "\$RESOLVE" \
+           -H "X-CSRFToken: \$csrf" -H 'Content-Type: application/json' \
+           -d "{\"email\":\"\$SMOKE_EMAIL\",\"password\":\"\$SMOKE_PASSWORD\"}" \
+           -o /dev/null -w '%{http_code}' \
+           "\$PUBLIC_URL/_allauth/browser/v1/auth/login")
+  if [ "\$code" = 200 ]; then
+    # django rotates the CSRF token on sign-in; the one above is dead now.
+    csrf=\$(curl -s -m 10 -b "\$jar" -c "\$jar" --resolve "\$RESOLVE" "\$PUBLIC_URL/auth/csrf" \
+           | grep -o '"csrfToken":"[^"]*"' | cut -d'"' -f4)
+    tok=\$(curl -s -m 10 -b "\$jar" -c "\$jar" --resolve "\$RESOLVE" -X POST \
+            -H "X-CSRFToken: \$csrf" "\$PUBLIC_URL/auth/executor-token" \
+            | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+    api=\$(curl -s -m 10 --resolve "\$RESOLVE" -H "Authorization: Bearer \$tok" \
+            -o /dev/null -w '%{http_code}' "\$PUBLIC_URL/api/state")
+    if [ -n "\$tok" ] && [ "\$api" = 200 ]; then
+      printf '    %-34s %s\n' "sign in, mint, drive" "the runner answered 200 to a real token"
+    else
+      printf '    %-34s %s\n' "sign in, mint, drive" "signed in, but /api/state said \$api"; FAIL=1
+    fi
+  else
+    printf '    %-34s %s\n' "sign in, mint, drive" "login answered \$code"; FAIL=1
+  fi
+  rm -f "\$jar"
+else
+  printf '    %-34s %s\n' "sign in, mint, drive" "SKIPPED — set SMOKE_EMAIL and SMOKE_PASSWORD"
+fi
+
 [ "\$FAIL" = 0 ] || { echo; echo "  smoke checks failed — rolling back is: bash scripts/deploy.sh rollback"; exit 1; }
 REMOTE
 

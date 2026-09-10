@@ -512,6 +512,46 @@ else bad('and the production npm set');
 if (/for image in ghostclick-runner:ci ghostclick-control:ci/.test(workflow) && /db\.sqlite3/.test(workflow) && /\.pem/.test(workflow)) ok('and asks both images for secrets they must not hold', 'env files, the vault, PEMs, the account database');
 else bad('and asks both images for secrets they must not hold', 'the control image was never asked');
 
+/**
+ * Every named-volume mountpoint is created in the image before its USER line.
+ *
+ * Docker creates a missing mountpoint as ROOT. Both application containers run
+ * as a non-root user, so a volume mounted at a path the image never made
+ * arrives root-owned and the first write to it fails with EACCES — which, in a
+ * deploy that runs under `set -e`, is a dead deploy at whichever step happened
+ * to write there first. That is exactly how `control-static` killed the first
+ * deploy: collectstatic could not write into /app/staticfiles.
+ *
+ * The rule is asserted generally rather than for that one path, because the
+ * next volume somebody adds will have the same problem and nobody will
+ * remember this paragraph.
+ */
+console.log('\n— volumes land somewhere writable ——————————————————————');
+{
+  const images = { runner: read('../Dockerfile'), control: read('../auth/Dockerfile') };
+  const volumesBlock = /^volumes:\n(?:\s{2}\S+:.*\n?)+/m.exec(compose)?.[0] ?? '';
+  const named = new Set(volumesBlock.split('\n').slice(1)
+    .map((l) => l.trim().replace(/:$/, '')).filter(Boolean));
+
+  // Slice each service by the next top-level service key, so adding a service
+  // does not silently take another's mounts with it.
+  const heads = [...compose.matchAll(/^ {2}([a-z-]+):$/gm)];
+  for (const [i, h] of heads.entries()) {
+    const svc = h[1];
+    if (!(svc in images)) continue;                       // only the ones we build
+    const body = compose.slice(h.index, heads[i + 1]?.index ?? compose.length);
+    const df = images[svc];
+    const userAt = df.search(/^USER /m);
+    for (const m of body.matchAll(/^\s+- ([a-z-]+):(\/\S+?)(?::ro)?$/gm)) {
+      const [, vol, path] = m;
+      if (!named.has(vol)) continue;                      // a bind mount owns itself
+      const madeAt = df.search(new RegExp(`mkdir -p [^&\n]*${path.replace(/\//g, '\\/')}(\\s|$)`, 'm'));
+      if (userAt === -1 || (madeAt !== -1 && madeAt < userAt)) ok(`${svc} creates ${path} before USER`, vol);
+      else bad(`${svc} creates ${path} before USER`, `${vol} mounts root-owned and the first write fails`);
+    }
+  }
+}
+
 console.log(failures
   ? `\n  ${failures} FAILED\n`
   : '\n  OK — no secret reaches an image layer, no placeholder or unexpanded\n'
