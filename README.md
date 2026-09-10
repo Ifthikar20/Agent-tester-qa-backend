@@ -38,8 +38,9 @@ when a source file is newer than the build**, so one command always gives you
 the latest. A start with nothing to do says `up to date` and costs nothing.
 
 ```bash
-npm run app                       # everything, from a fresh clone ← the one you want
-npm run app -- --auth             # and the Django control plane, with sign-in
+bash run.sh                       # the whole application, with the sign-in ← the one you want
+bash run.sh --open                # no sign-in at all, the one-laptop shape
+npm run app -- --auth             # the same as run.sh, if you would rather call node
 npm run app -- --fast             # runs skip the performance
 npm start                         # just the runner, if setup is already done
 npm run serve                     # run only, never build

@@ -7,13 +7,20 @@ Fifteen minutes, most of it waiting for a browser to download.
 ```bash
 git clone -b claude/ghostclick-automation-poc-mb76oz https://github.com/Ifthikar20/poc-qa-stack
 cd poc-qa-stack
-npm run app                         # → http://localhost:3000
+bash run.sh                         # → http://localhost:3000
 ```
 
-That is the whole thing. `npm run app` installs what is missing, downloads the
-browser if it has to, builds the UI and starts the runner — and says which of
-those it skipped, because a setup script that works silently is one you cannot
-debug when it does not.
+That is the whole thing. `run.sh` installs what is missing, downloads the
+browser if it has to, migrates the control plane, generates the signing keypair,
+builds the UI and starts everything — and says which of those it skipped,
+because a setup script that works silently is one you cannot debug when it does
+not. It also prints the checkout and the branch it is starting, which is worth
+reading twice if you keep more than one worktree.
+
+It starts **with the sign-in**, because the application has one. You will land
+on a login page and you will not have an account yet; the next section makes
+one. `bash run.sh --open` runs with no login at all, which is the supported
+one-person-one-laptop shape and what `npm start` does.
 
 Add `--auth` and it also sets up and starts the Django control plane in
 `auth/`: pip, the migration, a signing keypair generated once into
