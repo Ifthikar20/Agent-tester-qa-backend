@@ -299,7 +299,8 @@ class DomainSignupTests(TestCase):
 
     def test_config_names_the_domains(self):
         self.assertEqual(Api().get('/auth/config').json(),
-                         {'signup': 'domain', 'domains': ['acme.example'], 'turnstile': None, 'google': False})
+                         {'signup': 'domain', 'signupOff': False, 'domains': ['acme.example'], 'turnstile': None,
+                          'google': False, 'passkeys': True, 'invitations': True})
 
 
 class PolicyTests(TestCase):

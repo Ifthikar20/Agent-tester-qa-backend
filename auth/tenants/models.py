@@ -8,6 +8,9 @@ executor token copies the row, the runner reads the token, and nothing in
 between is asked its opinion. An Invitation is a hashed single-use token that
 becomes a Membership when the right person accepts it.
 
+And a fifth, beside them rather than among them: a Switch turns one feature
+off for every organisation at once (tenants/switches.py).
+
 Every account has a personal organisation (tenants.personal), so there is
 never a signed-in user with nowhere to act — the alternative is a null
 organisation that every downstream check has to remember to refuse.
@@ -21,9 +24,11 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import F
+from django.db.models.signals import post_delete, post_save
+from django.dispatch import receiver
 from django.utils import timezone
 
-from . import plans
+from . import plans, switches
 from .slugs import is_slug
 
 
@@ -276,3 +281,45 @@ class Invitation(models.Model):
             'id': self.pk, 'email': self.email, 'role': self.role, 'state': self.state,
             'expiresAt': self.expires_at.isoformat(), 'invitedBy': getattr(self.invited_by, 'email', None),
         }
+
+
+class Switch(models.Model):
+    """
+    One feature, switched off for everybody (tenants/switches.py).
+
+    No row is on, and so is a row with `enabled` ticked; a key GC_SWITCHES_OFF
+    names is off whatever its row says. A row for every key is not needed and
+    not made: the table holds the decisions somebody took, with their reason.
+    """
+    key = models.CharField(max_length=40, unique=True, choices=switches.choices(), help_text=switches.HELP)
+    enabled = models.BooleanField(default=True, help_text='Untick to switch this feature off for everybody.')
+    reason = models.TextField(blank=True, help_text='Why, for whoever reads this next. Shown to nobody else.')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['key']
+
+    def __str__(self):
+        return f'{self.key} {"on" if self.enabled else "off"}'
+
+
+@receiver([post_save, post_delete], sender=Switch)
+def switch_changed(sender, **kwargs):
+    """
+    Every organisation's entitlements_version moves when a switch row does.
+
+    The runner never reads this table: a `runner.*` switch reaches it only as
+    the executor token's `off` claim, and the runner drops a token whose ent_v
+    is older than one it has seen for that organisation (tenancy.js). Without
+    the bump, a token minted a minute before the change would keep its answer
+    for the rest of its ten minutes. With it, the first token minted afterwards
+    retires the older ones. Every organisation, because a switch is about none
+    of them in particular.
+
+    On the signals rather than in save() and delete(): the admin's "delete
+    selected" deletes a queryset, which calls neither, and deleting a row is
+    how a switch is turned back on.
+    """
+    Organization.objects.update(entitlements_version=F('entitlements_version') + 1)
+    # The request that made the change reads the table again if it asks.
+    switches.forget()

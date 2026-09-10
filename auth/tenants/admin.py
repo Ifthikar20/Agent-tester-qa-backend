@@ -1,6 +1,7 @@
 from django.contrib import admin
 
-from .models import Invitation, Membership, Organization, Plan
+from . import switches
+from .models import Invitation, Membership, Organization, Plan, Switch
 
 
 @admin.register(Plan)
@@ -45,3 +46,22 @@ class OrganizationAdmin(admin.ModelAdmin):
     readonly_fields = ['entitlements_version', 'created_at']
     autocomplete_fields = ['personal_of']
     inlines = [MembershipInline, InvitationInline]
+
+
+@admin.register(Switch)
+class SwitchAdmin(admin.ModelAdmin):
+    """
+    The half of tenants/switches.py that changes without a restart. A row with
+    `enabled` unticked turns its feature off for everybody; ticking it, or
+    deleting the row, turns it back on — unless GC_SWITCHES_OFF names the key,
+    which no row overrides, and the environment column says when that is so.
+    Saving or deleting re-versions every organisation (tenants.models), which
+    is how a runner switch reaches a runner that never reads this table.
+    """
+    list_display = ['key', 'enabled', 'environment', 'reason', 'updated_at']
+    fields = ['key', 'enabled', 'reason', 'updated_at']
+    readonly_fields = ['updated_at']
+
+    @admin.display(description='GC_SWITCHES_OFF')
+    def environment(self, obj):
+        return 'off, whatever this row says' if obj.key in switches.env_off() else '-'

@@ -28,6 +28,11 @@ request reaches the subclass first:
                          [mfa-recovery-5]
   auth/sessions          ending other sessions is a row in the audit log
 
+And three of them answer 403 switched_off while their switch is off
+(tenants/switches.py), before anything else they do: auth/signup
+(control.signup), auth/webauthn/login (control.passkeys) and
+auth/provider/redirect (control.google).
+
 Everything else — the codes, the rate limits, the session cycling, the
 responses the SPA reads — is allauth's own.
 """
@@ -45,9 +50,27 @@ from allauth.mfa.base.forms import ReauthenticateForm
 from django.core.exceptions import ValidationError
 from django.http import Http404
 
+from tenants import switches
+
 from . import policy, turnstile, webauthn
 from .events import client_ip, record
 from .models import AuthEvent, PreviousEmail
+from .refusals import switched_off
+
+
+class Switched:
+    """
+    A view that answers nothing while its switch is off (tenants/switches.py):
+    403 switched_off in allauth's shape, before the body is parsed, the input
+    validated or a rate limit spent. For every method, so a passkey's options
+    and its ceremony are refused together.
+    """
+    switch = ''
+
+    def handle(self, request, *args, **kwargs):
+        if not switches.is_on(self.switch):
+            return switched_off(request, self.switch)
+        return super().handle(request, *args, **kwargs)
 
 
 class TurnstileInput(inputs.Input):
@@ -137,7 +160,10 @@ class LoginView(allauth_views.LoginView):
     input_class = LoginInput
 
 
-class SignupView(allauth_views.SignupView):
+class SignupView(Switched, allauth_views.SignupView):
+    # Refused before allauth's sign-up limit is spent or Turnstile is asked.
+    # Google's sign-up door checks the same switch (accounts.adapters).
+    switch = 'control.signup'
     input_class = {'POST': SignupInput}
 
 
@@ -252,7 +278,10 @@ class ReauthenticateWebAuthnView(mfa_views.ReauthenticateWebAuthnView):
         return mfa_response.WebAuthnRequestOptionsResponse(request, webauthn.begin_authentication(authenticated_user(request)))
 
 
-class LoginWebAuthnView(mfa_views.LoginWebAuthnView):
+class LoginWebAuthnView(Switched, mfa_views.LoginWebAuthnView):
+    # Passkey sign-in only. A passkey answering the challenge after a password
+    # is the second factor, and that is never switchable.
+    switch = 'control.passkeys'
     input_class = {'POST': LoginWebAuthnInput}
 
     def get(self, request, *args, **kwargs):
@@ -296,7 +325,7 @@ class ReauthenticateView(mfa_views.ReauthenticateView):
 
 # ---------------------------------------------------------------- Google
 
-class RedirectToProviderView(socialaccount_views.RedirectToProviderView):
+class RedirectToProviderView(Switched, socialaccount_views.RedirectToProviderView):
     """
     Starting a Google sign-in, with the refusal written down.
 
@@ -307,7 +336,14 @@ class RedirectToProviderView(socialaccount_views.RedirectToProviderView):
     is the only writer of a Google refusal row, so the ONE refusal in this
     flow shaped like an attack left no trace at all while "someone pressed
     Back on Google" left one. §4.6 asks for a row for every refusal.
+
+    While Google sign-in is switched off (control.google) nothing starts
+    here, connecting an identity from Settings included, and the answer is
+    the 403. The SPA posts its form here as a navigation, so that is what the
+    tab would show — but /auth/config has already said google: false, so the
+    button that posts it is not drawn.
     """
+    switch = 'control.google'
 
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)

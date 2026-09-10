@@ -28,7 +28,8 @@ And the social adapter, for Google (docs/AUTH.md §6):
 
   is_open_for_signup            the same policy the password sign-up asks,
                                 with the id_token's `hd` for domain mode,
-                                and the same sign-up rate limit [oauth-5]
+                                the same sign-up rate limit [oauth-5], and
+                                the same switch (control.signup)
   authenticate_by_email         Google's verified address opens an existing
                                 account only when the local address is
                                 verified too and no other Google identity is
@@ -69,6 +70,8 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Q
 from pwned_passwords_django import api as hibp
 from pwned_passwords_django.exceptions import PwnedPasswordsError
+
+from tenants import switches
 
 from . import google, mailer, policy
 from .events import PWNED, client_ip, record
@@ -232,6 +235,13 @@ class SocialAccountAdapter(DefaultSocialAccountAdapter):
         """
         email = _email_of(sociallogin)
         hd = (sociallogin.account.extra_data or {}).get('hd') or ''
+        # Sign-up switched off (tenants/switches.py) shuts this door with the
+        # password one, before the budget the two share is spent on it. The
+        # browser gets the word every refusal here gets; the log, the switch.
+        if not switches.is_on('control.signup'):
+            google.refuse(request, 'switched_off', kind=AuthEvent.Kind.SIGNUP_REFUSED, email=email,
+                          method='google', switch='control.signup')
+            return False
         if not _consume_signup_limit(request):
             google.refuse(request, 'rate_limited', kind=AuthEvent.Kind.SIGNUP_REFUSED, email=email, method='google')
             return False

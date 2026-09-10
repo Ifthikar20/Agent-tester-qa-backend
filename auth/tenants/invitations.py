@@ -189,6 +189,15 @@ def accept_pending(user, request=None, email=None):
     email = (email or user.email or '').strip()
     made = []
     live = Invitation.objects.live().filter(email__iexact=email).order_by('created_at')
+    from . import switches
+    if not switches.is_on('control.invitations'):
+        # Switched off is switched off here too, not only at the link: this is
+        # the other door an invitation is accepted through. Each one waits,
+        # live, for the link once invitations are back on, and is written down
+        # as refused now; the verification that called this still stands.
+        for invitation in live:
+            record(AuthEvent.Kind.INVITATION_REFUSED, request, user=user, reason='switched_off', invitation=invitation.pk)
+        return made
     for invitation in live:
         try:
             membership = _consume(invitation.pk, user)

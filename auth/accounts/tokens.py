@@ -21,11 +21,14 @@ The contract:
             the runner's set, so a rotation is "add the new public key,
             restart, remove the old one later"
   claims    iss, aud, sub, email, org, role, plan, amr, auth_time, su, ent,
-            ent_v, sid, iat, exp, jti — every one copied from the database or
-            the session, none from anything the client sent. `plan` is the
-            plan's slug, for display: the runner names it in a 402 refusal
-            ({error: 'entitlement', limit, plan}) and decides nothing by it —
-            what the plan allows is `ent`, key by key.
+            ent_v, off, sid, iat, exp, jti — every one copied from the
+            database, the session or the environment, none from anything the
+            client sent. `plan` is the plan's slug, for display: the runner
+            names it in a 402 refusal ({error: 'entitlement', limit, plan}) and
+            decides nothing by it — what the plan allows is `ent`, key by key.
+            `off` is the `runner.*` switches that are off (tenants/switches.py),
+            as a list that may be empty: the runner reads GC_SWITCHES_OFF for
+            itself but never the Switch rows, and this is how those reach it.
   signature Ed25519 over the two segments, base64url, unpadded
 
 `kid` is the RFC 7638 JWK thumbprint of the public key: SHA-256 over the
@@ -171,7 +174,7 @@ def clamp_ttl(ttl) -> int:
 
 
 def mint(*, subject, email='', key, kid=None, ttl=TTL_MAX, now=None,
-         org, role, plan='', ent=None, ent_v=0,
+         org, role, plan='', ent=None, ent_v=0, off=(),
          amr=(), auth_time=None, su=0, sid='', jti=None) -> str:
     """
     A signed token for `subject`, acting for `org`, good for `ttl` seconds.
@@ -203,6 +206,7 @@ def mint(*, subject, email='', key, kid=None, ttl=TTL_MAX, now=None,
         'su': int(su or 0),
         'ent': dict(ent or {}),
         'ent_v': int(ent_v or 0),
+        'off': list(off or ()),
         'sid': str(sid or ''),
         'iat': issued,
         'exp': issued + clamp_ttl(ttl),

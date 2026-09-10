@@ -109,7 +109,18 @@ def user_agent(request):
 
 
 def record(kind, request=None, *, user=None, email='', **detail):
-    """Write one AuthEvent for `kind`, with whatever the request can say about who."""
+    """
+    Write one AuthEvent for `kind`, with whatever the request can say about who.
+
+    A row written while a request is being served also carries that request's
+    id as `detail.rid` — the X-Request-Id its response and its log lines carry
+    (accounts.logs) — so a row found in the admin leads to the lines around it.
+    In `detail` rather than a column, which is where a row already says the rest.
+    """
+    from .logs import current
+    context = current()
+    if context is not None:
+        detail.setdefault('rid', context['rid'])
     return AuthEvent.objects.create(
         kind=kind,
         user=user if (user is not None and getattr(user, 'pk', None)) else None,

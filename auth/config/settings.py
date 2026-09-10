@@ -66,6 +66,19 @@ Environment (see .env.example):
                       off; on a laptop it is derived from the fixed dev secret
                       when unset. Several keys, comma-separated, rotate: the
                       first encrypts and every one decrypts.
+  GC_SWITCHES_OFF     features switched off for everybody: switch keys, the
+                      service names runner and control, or *, comma-separated
+                      (tenants/switches.py). The runner reads the same line.
+                      A word that is none of those refuses to start.
+  GC_MINT_RATE, GC_ACCEPT_RATE, GC_INVITE_RATE, GC_PASSKEY_LOGIN_RATE,
+  GC_REQUEST_RATE, GC_CSRF_RATE
+                      this project's rate limits, in allauth's syntax
+                      (10/m/ip); the defaults are with the limits below.
+                      Unreadable or zero refuses to start.
+  GC_LOG_LEVEL, GC_LOG_FORMAT, GC_REQUEST_LOG
+                      error, warning (or warn), info or debug (info); text or
+                      json (text); and which requests get a log line: off,
+                      sampled or all (sampled).
 """
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -73,7 +86,13 @@ import os
 import re
 
 import dj_database_url
+from corsheaders.defaults import default_headers
 from django.core.exceptions import ImproperlyConfigured
+
+# Two of the project's own modules, imported before any app is loaded. Both
+# promise to import no model, and this is the line that holds them to it.
+from accounts.ratelimit import parse as parse_rate
+from tenants import switches
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -84,6 +103,33 @@ def env_bool(name, default=False):
 
 def env_list(name, default=''):
     return [v.strip() for v in os.environ.get(name, default).split(',') if v.strip()]
+
+
+def env_rate(name, default):
+    """
+    A rate limit from the environment, in allauth's syntax (10/m/ip, 12/10m),
+    read now: unreadable, it would be a ValueError out of the first request
+    that counts; zero, it would be an outage that looks like a limit.
+    """
+    value = os.environ.get(name, '').strip() or default
+    try:
+        count, seconds = parse_rate(value)
+    except ValueError:
+        raise ImproperlyConfigured(f'{name} must be a rate such as 10/m/ip or 12/10m, not {value!r}')
+    if count < 1 or seconds < 1:
+        raise ImproperlyConfigured(
+            f'{name}={value!r} allows nothing at all, which is an outage rather than a limit. '
+            'To turn a feature off, name it in GC_SWITCHES_OFF.'
+        )
+    return value
+
+
+def env_choice(name, default, choices):
+    """One word from `choices`, case-insensitively, or a refusal that lists them."""
+    value = os.environ.get(name, '').strip().lower() or default
+    if value not in choices:
+        raise ImproperlyConfigured(f'{name} must be one of {", ".join(choices)}, not {value!r}')
+    return value
 
 
 DEBUG = env_bool('DJANGO_DEBUG', True)
@@ -174,11 +220,24 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # First: every answer from here down — a gate's 403, the limit's 429 —
+    # carries the request id its log lines and audit rows were written with.
+    'accounts.middleware.RequestContext',
+    # Second, for the same reason: an early refusal is still a response a
+    # browser receives.
+    'accounts.middleware.SecurityHeaders',
     'django.middleware.security.SecurityMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
     # Ahead of CommonMiddleware, as django-cors-headers requires, so that a
-    # preflight is answered rather than redirected.
+    # preflight is answered rather than redirected — and ahead of the request
+    # limit, so that its 429 is one a cross-origin caller (the SPA on a
+    # laptop, the extension) is allowed to read rather than a network error.
+    # It reads no session and no table, so its place costs the limit nothing;
+    # a preflight is answered here and never counted.
     'corsheaders.middleware.CorsMiddleware',
+    # Before the session: a refused request must not start one, or touch the
+    # database on the way to refusing.
+    'accounts.middleware.RequestRateLimit',
+    'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     # After the CSRF middleware, so its response phase runs after Django has
@@ -378,10 +437,17 @@ for _origin in GC_EXTENSION_ORIGINS:
 
 CORS_ALLOWED_ORIGINS = ([WEB_ORIGIN] if WEB_ORIGIN else []) + GC_EXTENSION_ORIGINS
 CORS_ALLOW_CREDENTIALS = True
-# The rotated CSRF token rides back in this header (accounts.middleware
-# .CsrfTokenHeader); cross-origin, a browser hides every header the server
-# did not expose by name.
-CORS_EXPOSE_HEADERS = ['X-CSRFToken']
+# A caller may send the request's id and its trace (accounts.middleware
+# .RequestContext); cross-origin, a header the preflight did not allow by name
+# is a header the browser will not send at all.
+CORS_ALLOW_HEADERS = (*default_headers, 'x-request-id', 'traceparent')
+# The rotated CSRF token rides back in one header (accounts.middleware
+# .CsrfTokenHeader) and the request's id in the other, so a page can quote the
+# id of the call that failed; cross-origin, a browser hides every header the
+# server did not expose by name.
+# And Retry-After, so a 429 can tell a page on another origin — the laptop's
+# UI — when to come back.
+CORS_EXPOSE_HEADERS = ['X-CSRFToken', 'X-Request-Id', 'Retry-After']
 CSRF_TRUSTED_ORIGINS = ([PUBLIC_URL] if PUBLIC_URL else ([WEB_ORIGIN] if WEB_ORIGIN else [])) + GC_EXTENSION_ORIGINS
 # Where the SPA is: every link in an email, and every redirect allauth or
 # the admin would make, lands on one of its routes. Empty on a laptop with no
@@ -510,19 +576,36 @@ ACCOUNT_RATE_LIMITS = {
     'change_password': '5/m/user',
     'manage_email': '10/m/user',
 }
-GC_MINT_RATE = '12/10m'       # per session key, on POST /auth/executor-token
-GC_ACCEPT_RATE = '10/m/ip'    # invitation acceptance
+#
+# The rest are this project's own limits (accounts/ratelimit.py), and each
+# can be tightened from the environment. env_rate reads every one at import,
+# so a typo refuses to start rather than failing the first request that
+# counts. They count in the same Redis, one key per client per window, and
+# accounts/ratelimit.py says why that Redis runs allkeys-lru under a
+# maxmemory (docker-compose.prod.yml sets both).
+GC_MINT_RATE = env_rate('GC_MINT_RATE', '12/10m')          # per session key, on POST /auth/executor-token
+GC_ACCEPT_RATE = env_rate('GC_ACCEPT_RATE', '10/m/ip')     # invitation acceptance
 # Issuing one. members.max bounds how many invitations may be LIVE at once,
 # which is not a bound on how many are sent: revoke-and-reissue in a loop
 # mails arbitrary third parties through this service's mailer without limit,
 # and on a plan whose members.max is null even the per-moment cap is gone.
 # Keyed on the manager who asked, because that is who is spending it.
-GC_INVITE_RATE = '20/h/user'
+GC_INVITE_RATE = env_rate('GC_INVITE_RATE', '20/h/user')
 # Passkey sign-in, keyed on the caller's address. The endpoint is reachable
 # unauthenticated and allauth identifies the account from a client-supplied
 # handle, so the ACCOUNT's second-factor budget must not be what a stranger
 # spends there (accounts.headless.LoginWebAuthnInput).
-GC_PASSKEY_LOGIN_RATE = '10/m/ip'
+GC_PASSKEY_LOGIN_RATE = env_rate('GC_PASSKEY_LOGIN_RATE', '10/m/ip')
+# Every request to this service, per client address, and GET /auth/csrf on
+# top of that: the one anonymous endpoint that writes a row, since the token
+# lives in a session it starts (CSRF_USE_SESSIONS, above). Both are counted
+# before the session middleware (accounts.middleware.RequestRateLimit), so a
+# refused request costs a counter and no row. Three hundred a minute is far
+# past what a person clicking through the SPA sends and far short of what a
+# script does; a window of a minute keeps the live counters to the clients
+# seen in the last one.
+GC_REQUEST_RATE = env_rate('GC_REQUEST_RATE', '300/m/ip')
+GC_CSRF_RATE = env_rate('GC_CSRF_RATE', '60/m/ip')
 
 # ---------------------------------------------------------------- the second factor
 #
@@ -803,6 +886,62 @@ try:
     GC_TOKEN_TTL = max(120, min(600, int(_ttl)))
 except ValueError:
     raise ImproperlyConfigured(f'GC_TOKEN_TTL must be a whole number of seconds, not {_ttl!r}')
+
+# ---------------------------------------------------------------- switches
+#
+# Features turned off for everybody; tenants/switches.py has the catalogue
+# and what each key guards. GC_SWITCHES_OFF is keys, the service names
+# `runner` and `control`, or `*`, comma-separated, and the runner reads the
+# same line. A word that is none of those refuses to start, and says which
+# word: a typo that quietly left a feature on is the one failure an
+# off-switch cannot have. The admin's Switch rows add to this at runtime and
+# never take away from it.
+try:
+    GC_SWITCHES_OFF = switches.parse(os.environ.get('GC_SWITCHES_OFF', ''))
+except ValueError as err:
+    raise ImproperlyConfigured(str(err)) from None
+
+# ---------------------------------------------------------------- logging
+#
+# One handler, the console, which is where a container's log is read; every
+# line through it carries the request's id and trace (accounts.logs) — the id
+# the response's X-Request-Id and the audit row's detail.rid carry too.
+#
+#   GC_LOG_LEVEL    error, warning, info (the default) or debug, for this
+#                   project's loggers: ghostclick.*, and the accounts and
+#                   tenants modules' own. `warn` is read as warning: the
+#                   runner reads the same variable and accepts that spelling,
+#                   and a word one service starts on and the other refuses is
+#                   a stack that comes up half.
+#   GC_LOG_FORMAT   text (the default), or json for one object per line.
+#   GC_REQUEST_LOG  the request log, ghostclick.request: off, sampled (the
+#                   default: only the requests whose traceparent says the
+#                   caller is sampling them) or all.
+#
+# Every other logger keeps Django's defaults. disable_existing_loggers is
+# False and the root, django and third-party loggers are not named here, so
+# nothing that logged before goes quiet, and a test listening with assertLogs
+# (accounts/tests/test_passwords.py) still hears what it listens for.
+GC_LOG_LEVEL = env_choice('GC_LOG_LEVEL', 'info', ('error', 'warn', 'warning', 'info', 'debug'))
+GC_LOG_LEVEL = 'warning' if GC_LOG_LEVEL == 'warn' else GC_LOG_LEVEL
+GC_LOG_FORMAT = env_choice('GC_LOG_FORMAT', 'text', ('text', 'json'))
+GC_REQUEST_LOG = env_choice('GC_REQUEST_LOG', 'sampled', ('off', 'sampled', 'all'))
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'filters': {'request': {'()': 'accounts.logs.RequestId'}},
+    'formatters': {
+        'text': {'()': 'accounts.logs.TextFormatter'},
+        'json': {'()': 'accounts.logs.JsonFormatter'},
+    },
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler', 'filters': ['request'], 'formatter': GC_LOG_FORMAT},
+    },
+    'loggers': {
+        name: {'handlers': ['console'], 'level': GC_LOG_LEVEL.upper(), 'propagate': False}
+        for name in ('ghostclick', 'accounts', 'tenants')
+    },
+}
 
 # ---------------------------------------------------------------- tests
 #

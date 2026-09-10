@@ -22,8 +22,9 @@ from django.views.decorators.http import require_http_methods
 
 from accounts.events import client_ip
 from accounts.ratelimit import over
+from accounts.refusals import switched_off
 
-from . import invitations, members, session
+from . import invitations, members, session, switches
 from .models import Invitation, Role
 
 
@@ -75,6 +76,11 @@ def invitation_list(request):
         rows = Invitation.objects.filter(organization=me.organization).select_related('invited_by')
         return JsonResponse({'org': me.organization.slug, 'invitations': [i.to_json() for i in rows]})
 
+    # Issuing is what control.invitations switches off (tenants/switches.py).
+    # The list and revoking are not, so a manager can still see what is
+    # outstanding and withdraw it.
+    if not switches.is_on('control.invitations'):
+        return switched_off(request, 'control.invitations')
     try:
         data = _body(request)
     except ValueError as err:
@@ -121,8 +127,13 @@ def invitation_revoke(request, pk):
 
 @require_http_methods(['POST'])
 def invitation_accept(request):
-    # Rate limited before anything else — before the sign-in check, so a
-    # guessing loop is counted whether or not it bothered to sign in.
+    # Switched off is answered first: nothing is read, so there is nothing to
+    # guess at, and a page that retries does not spend the budget it will want
+    # once invitations are back on.
+    if not switches.is_on('control.invitations'):
+        return switched_off(request, 'control.invitations')
+    # Rate limited before anything that reads the request — before the sign-in
+    # check, so a guessing loop is counted whether or not it bothered to sign in.
     if over('accept', client_ip(request) or '-', settings.GC_ACCEPT_RATE):
         return JsonResponse({'error': 'rate_limited'}, status=429)
     if not _signed_in(request):

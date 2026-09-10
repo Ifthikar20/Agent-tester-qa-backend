@@ -25,8 +25,11 @@ from allauth.socialaccount.providers.google.views import oauth2_callback
 from django.conf import settings
 from django.http import Http404
 
+from tenants import switches
+
 from .events import record
 from .models import AuthEvent
+from .refusals import switched_off
 
 # The one word the browser is told. The SPA maps it to the one sentence.
 REFUSED = 'refused'
@@ -58,6 +61,12 @@ def callback(request):
         # No client, no callback: the URL is not a thing a visitor can
         # reach, rather than a 500 from allauth looking for an app.
         raise Http404
+    if not switches.is_on('control.google'):
+        # Switched off while somebody was on Google's page (tenants/switches.py).
+        # Refused before the code is traded for anything, so no sign-in
+        # completes and no account is made — which also leaves nobody's
+        # account to be discreet about, so the refusal can say what it is.
+        return switched_off(request, 'control.google')
     response = oauth2_callback(request)
     location = response.get('Location') if 300 <= response.status_code < 400 else None
     if not location:

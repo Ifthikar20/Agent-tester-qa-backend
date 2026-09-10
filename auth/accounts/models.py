@@ -118,6 +118,10 @@ class AuthEvent(models.Model):
         MFA_RESET = 'mfa_reset', 'recovery codes regenerated'
         MFA_FAILED = 'mfa_failed', 'second factor refused'
         SESSIONS_ENDED = 'sessions_ended', 'other sessions signed out'
+        # The per-address request limit (accounts.middleware.RequestRateLimit)
+        # was reached: one row per address per window, however many requests
+        # it went on to refuse. `detail.limit` says which limit.
+        RATE_LIMITED = 'rate_limited', 'request rate limit reached'
 
     at = models.DateTimeField(default=timezone.now, db_index=True)
     # A CharField with choices rather than an enum column: later flows add

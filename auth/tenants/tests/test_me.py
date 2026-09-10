@@ -3,6 +3,7 @@
 """
 from django.test import TestCase
 
+from .. import switches
 from ..models import Membership, Role
 from ..session import ORG_KEY
 from .support import Api, give_authenticator, member, org, user
@@ -35,7 +36,9 @@ class MeShapeTests(TestCase):
         # be read back as an isStaff flag [authz-tenancy-6].
         self.assertEqual(me['mfa'], {'required': True, 'enrolled': True,
                                      'reasons': ['policy', 'manages_organisation']})
-        self.assertEqual(me['flags'], {})
+        # Every switch, and whether it is on: nothing is switched off here.
+        # (An empty placeholder until the switches existed.)
+        self.assertEqual(me['flags'], {key: True for key in switches.KEYS})
 
     def test_there_is_no_is_staff(self):
         # Staff opens /admin/ and nothing else. A flag shown to the browser is

@@ -522,7 +522,8 @@ SPA echoes whatever it last saw. `/auth/me` is the shape it draws from:
   "orgs": [{"slug": "ada", "name": "Ada", "role": "owner", "personal": true, "plan": "free"}, "…"],
   "entitlements": {"suites.max": 25, "runs.per_day": 500, "origins.max": 20, "vault.enabled": true,
                    "history.retention_days": 90, "members.max": 10, "mfa.required": false},
-  "mfa": {"required": true, "enrolled": false, "reasons": ["manages_organisation"]}, "flags": {} }
+  "mfa": {"required": true, "enrolled": false, "reasons": ["manages_organisation"]},
+  "flags": {"runner.recording": true, "runner.runs": true, "…": true, "control.invitations": false} }
 ```
 
 There is no `isStaff`. Staff is a control-plane fact that opens `/admin/`,

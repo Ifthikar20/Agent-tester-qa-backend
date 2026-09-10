@@ -211,7 +211,8 @@ class EndpointTests(TestCase):
     def test_config_says_the_mode_and_no_turnstile(self):
         r = self.c.get('/auth/config')
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json(), {'signup': 'invite', 'domains': [], 'turnstile': None, 'google': False})
+        self.assertEqual(r.json(), {'signup': 'invite', 'signupOff': False, 'domains': [], 'turnstile': None,
+                                    'google': False, 'passkeys': True, 'invitations': True})
 
     @override_settings(GC_SIGNING_KEY='')
     def test_unconfigured_says_so_rather_than_failing_obscurely(self):

@@ -3,7 +3,8 @@ The endpoints that are this project's own, and one of them is the whole point.
 
   GET  /auth/csrf             hand the SPA a CSRF token it can echo back
   GET  /auth/config           what the sign-up page needs to know: the mode,
-                              and the Turnstile site key when there is one
+                              the Turnstile site key when there is one, and
+                              which of the doors it draws are switched off
   GET  /auth/me               who am I, and for which organisation
   POST /auth/executor-token   a short-lived token the RUNNER will accept
   GET  /auth/jwks             the public keys that token verifies with
@@ -33,7 +34,7 @@ from django.http import JsonResponse
 from django.middleware.csrf import get_token
 from django.views.decorators.http import require_http_methods
 
-from tenants import plans
+from tenants import plans, switches
 from tenants.session import describe, selected
 
 from . import google, mfa, turnstile
@@ -55,7 +56,7 @@ def whoami(request):
 
       {user: {id, email, name}, org: {slug, name, role}, orgs: [...],
        entitlements: {...}, mfa: {required, enrolled, reasons},
-       mustChangePassword: bool, flags: {}}
+       mustChangePassword: bool, flags: {<switch key>: bool}}
 
     There is no isStaff and there will not be one. Staff is a control-plane
     fact that opens /admin/, and a flag the browser was shown is a flag the
@@ -67,6 +68,11 @@ def whoami(request):
     and enrolled — computed from the database now, never from the session.
     It is for display: the refusal that enforces it is the middleware's,
     and it asks the same module.
+
+    `flags` is every switch in tenants/switches.py and whether it is on, so
+    the SPA can leave out what this deployment has turned off. For display
+    too: the refusal is the control plane's or the runner's, whatever the
+    page drew.
     """
     return {
         'user': _shape(request.user),
@@ -78,7 +84,7 @@ def whoami(request):
         # `password_change_required` with nothing routing on it. Not a secret:
         # the session already knows, and every other endpoint says it out loud.
         'mustChangePassword': pwned_for(request.session, request.user),
-        'flags': {},
+        'flags': switches.flags(),
     }
 
 
@@ -110,12 +116,23 @@ def config(request):
     definition (it is rendered into every visitor's page) and null when
     Turnstile is not configured, which is the SPA's cue not to load it; and
     `google` says whether a "Continue with Google" button has anywhere to go.
+
+    The switches (tenants/switches.py) are folded in, so a page does not offer
+    what would be refused: `google` is false while Google sign-in is switched
+    off as well as while it is unconfigured, `passkeys` and `invitations` say
+    whether those are on, and `signupOff` whether sign-up is. That last is a
+    flag beside `signup` rather than a fourth mode because GC_SIGNUP_MODE has
+    no word for "nobody" — invite, open and domain each admit somebody — and
+    `signup` goes on saying which rule applies once sign-up is back on.
     """
     return JsonResponse({
         'signup': settings.GC_SIGNUP_MODE,
+        'signupOff': not switches.is_on('control.signup'),
         'domains': settings.GC_SIGNUP_DOMAINS if settings.GC_SIGNUP_MODE == 'domain' else [],
         'turnstile': turnstile.site_key(),
-        'google': google.configured(),
+        'google': google.configured() and switches.is_on('control.google'),
+        'passkeys': switches.is_on('control.passkeys'),
+        'invitations': switches.is_on('control.invitations'),
     })
 
 
@@ -238,6 +255,9 @@ def executor_token(request):
             plan=org.plan.slug,
             ent=plans.runner_subset(org.entitlements()),
             ent_v=org.entitlements_version,
+            # The runner switches that are off, from the environment and from
+            # the Switch rows; the runner can read only the first for itself.
+            off=switches.runner_off(),
             amr=amr,
             auth_time=auth_time,
             su=su,
