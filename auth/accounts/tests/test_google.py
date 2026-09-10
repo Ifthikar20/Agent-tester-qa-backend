@@ -44,9 +44,18 @@ GOOGLE = {'google': {
     'EMAIL_AUTHENTICATION': True,
     'EMAIL_AUTHENTICATION_AUTO_CONNECT': True,
 }}
-# The sentence the SPA shows for `error=refused`; pinned here so the words
-# the spec chose are the words in the build.
+# The sentence the SPA shows for `error=refused`. It is the spec's wording
+# [credentials-3] and it is rendered in ghostclick-web, which this repository
+# cannot read — so what is pinned here is the copy in google.py, the module
+# that decides every refusal gets it. The component-side pin is that
+# repository's to keep.
 GENERIC = 'We could not sign you in with Google. Sign in the way you usually do, then connect Google from Settings.'
+
+# Every word this service is allowed to put in the address bar. Anything else
+# is a leak: allauth's own names — `signup_closed`, `permission_denied`,
+# `connected_other` — say whether an address exists, whether it is verified,
+# and whether another Google identity already opens it.
+CODES = {'refused', 'cancelled'}
 
 
 def payload(email='ada@example.com', sub='1001', verified=True, hd=None, given='Ada', family='Lovelace'):
@@ -363,15 +372,91 @@ class RefusalTests(GoogleCase):
         self.assertEqual(query_of(r['Location']), {'error': 'cancelled', 'error_process': 'login'})
 
     def test_the_generic_sentence_is_the_one_the_spec_chose(self):
-        # Pinned in the UI's ProviderError component; the words are the
-        # spec's and the test says so in the one place both can read.
-        from pathlib import Path
-        source = Path(__file__).resolve().parents[3] / 'web' / 'src' / 'components' / 'ProviderError.vue'
-        # Not `if source.exists()`: this is the single pin tying the spec's
-        # [credentials-3] sentence to the built UI, and a guarded assertion
-        # passes silently the day the component is renamed or moved.
-        self.assertTrue(source.exists(), source)
-        self.assertIn(GENERIC, source.read_text(encoding='utf8'))
+        """
+        This used to read web/src/components/ProviderError.vue and assert the
+        spec's sentence was in it — one pin, tying the words to the build that
+        shows them. That component is in ghostclick-web now and this checkout
+        does not have it, so the pin has to move rather than be deleted: a
+        deleted pin is a sentence nobody is holding, and this one exists
+        because the WORDING is the security control. Say too much and the
+        address bar tells a stranger whether an account exists.
+
+        What this side still owns is the word in the URL, so that is what is
+        asserted here — the sentence is pinned to google.py's docstring, where
+        the decision to use it lives, and the vocabulary that triggers it is
+        pinned exhaustively below. ghostclick-web keeps the component-side
+        half against the same wording.
+        """
+        self.assertIn(GENERIC, ' '.join(google.__doc__.split()))
+        # And the constant the module actually redirects with is the one the
+        # closed set names — a rename here without one there would let a new
+        # word reach the address bar through the test that is meant to stop it.
+        self.assertEqual({google.REFUSED, google.CANCELLED}, CODES)
+
+    def test_no_refusal_ever_says_why_in_the_address_bar(self):
+        """
+        The rule the sentence exists to serve, asserted over every refusal
+        this module can produce rather than one at a time.
+
+        Each case below is refused for a different reason, and every reason is
+        a fact about somebody's account: that the address is taken, that it is
+        unverified, that another Google identity already opens it, that the
+        workspace does not match. The browser must be told the same word for
+        all of them, and the reason must be in the audit log and nowhere else.
+        """
+        def a_foreign_state():
+            # Made in one browser, presented from another: a login CSRF, or a
+            # replay. allauth's word for it is `unknown`.
+            _, started = self.start()
+            return self.come_back(Api(), self.state_of(started), payload())
+
+        def an_unverified_local_address():
+            # The address is in an account nobody proved. Google vouching for
+            # the mailbox must not open it — and must not say that it exists.
+            make_user('taken@example.com', verified=False)
+            return self.sign_in(payload(email='taken@example.com', sub='9001'))[1]
+
+        def sign_up_is_closed():
+            # allauth's word here is `signup_closed`, which read off the
+            # address bar is "this deployment is invite-only" — true, and not
+            # the browser's business from an unauthenticated callback.
+            with override_settings(GC_SIGNUP_MODE='invite'):
+                return self.sign_in(payload(email='stranger@example.com', sub='9002'))[1]
+
+        def the_workspace_does_not_match():
+            with override_settings(GC_SIGNUP_MODE='domain', GC_SIGNUP_DOMAINS=['acme.example']):
+                return self.sign_in(payload(email='bob@globex.example', sub='9003'))[1]
+
+        for run in (a_foreign_state, an_unverified_local_address, sign_up_is_closed,
+                    the_workspace_does_not_match):
+            with self.subTest(run.__name__):
+                AuthEvent.objects.all().delete()
+                r = run()
+                location = r['Location']
+                q = query_of(location)
+                # Exactly two keys. A third — `reason`, `email`, allauth's own
+                # `error_description` — is the leak, whatever it ends up called.
+                self.assertEqual(set(q), {'error', 'error_process'}, location)
+                self.assertIn(q['error'], CODES, location)
+
+                # The reason really did go somewhere. A refusal that says
+                # nothing anywhere is not discretion, it is a lost event, and
+                # §4.6 wants a row for every one of these.
+                ev = AuthEvent.objects.filter(
+                    kind__in=[AuthEvent.Kind.GOOGLE_REFUSED, AuthEvent.Kind.SIGNUP_REFUSED]).last()
+                self.assertIsNotNone(ev, f'{run.__name__}: refused with no audit row')
+
+                # And none of what it says reaches the browser. Everything the
+                # row holds is checked rather than a chosen field, so a detail
+                # added later is covered by this the day it is added —
+                # `process` excepted, which is the one thing the URL is
+                # supposed to repeat.
+                for key, value in ev.detail.items():
+                    if key == 'process' or not isinstance(value, str) or not value:
+                        continue
+                    self.assertNotIn(value, location, f'{run.__name__}: detail[{key!r}] leaked')
+                if ev.email:
+                    self.assertNotIn(ev.email, location, f'{run.__name__}: the address leaked')
 
     def test_a_get_cannot_start_a_sign_in_and_one_tap_does_not_exist(self):
         # SOCIALACCOUNT_LOGIN_ON_GET is off and, better, the URLs are not
