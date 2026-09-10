@@ -115,9 +115,14 @@ for (let i = 0; i < 40 && !ran; i++) await wait(500);
 ws.close();
 if (!ran) bad('a probe run was recorded', 'the run never finished');
 
-const child = spawnSync(process.execPath, [ROOT + 'scripts/start.js'], {
+// server.js, not scripts/start.js. What is being read here is the banner the
+// SERVER prints, and start.js now stands in front of it resolving the built UI
+// from GC_WEB_DIR — which this has no opinion about and which, unset, would
+// refuse before the banner was ever reached. GC_SKIP_BUILD went with the
+// bundler; there is nothing here that could build a UI to skip.
+const child = spawnSync(process.execPath, [ROOT + 'server.js'], {
   cwd: ROOT, timeout: 20000, encoding: 'utf8',
-  env: { ...process.env, PORT: '3400', GC_SKIP_BUILD: '1', HOME_URL: '' },
+  env: { ...process.env, PORT: String(Number(process.env.GC_BANNER_PORT) || 8305), HOME_URL: '' },
 });
 const banner = (child.stdout ?? '').split('\n').find((l) => l.includes('driving')) ?? '';
 const announced = banner.split('->')[1]?.trim() ?? '(no banner)';
@@ -167,10 +172,10 @@ console.log('\n— and it can be asked about itself while it starts ——');
  * instant the port accepts a connection until the browser is up, and any 500
  * in there is a failure.
  */
-const BOOT_PORT = Number(process.env.GC_BOOT_PORT) || 3407;
-const booting = spawn(process.execPath, [ROOT + 'scripts/start.js'], {
+const BOOT_PORT = Number(process.env.GC_BOOT_PORT) || 8306;
+const booting = spawn(process.execPath, [ROOT + 'server.js'], {
   cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
-  env: { ...process.env, PORT: String(BOOT_PORT), GC_SKIP_BUILD: '1', HOME_URL: '' },
+  env: { ...process.env, PORT: String(BOOT_PORT), HOME_URL: '' },
 });
 try {
   const codes = new Map();

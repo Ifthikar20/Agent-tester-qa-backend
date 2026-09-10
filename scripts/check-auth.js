@@ -36,6 +36,7 @@ import WebSocket from 'ws';
 import { verify, bearer, parseKeys, MAX_LIFETIME_S } from '../auth.js';
 import { isPrivateAddress, blockedName, blocked } from '../reach.js';
 import { csp, TURNSTILE_HOST } from '../mode.js';
+import { choosePython } from './app.js';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -312,18 +313,32 @@ console.log('\n— the control plane’s own tests —————————�
  * It skips loudly rather than failing when there is no Python: auth/ is
  * optional, and a laptop running the bundled runner should not need Django
  * installed to have a green suite.
+ *
+ * Which interpreter, asked rather than assumed — scripts/app.js's own rule,
+ * imported so there is one of it. Hard-coding `python3` reported "django tests
+ * pass: FAIL" on every Windows machine, because `python3` there is a Microsoft
+ * Store shortcut that exits non-zero with a sentence about App execution
+ * aliases. Not ENOENT, so the skip below never caught it: a red line about
+ * Django, on a machine with a working Django, for a reason that is not
+ * Django's.
  */
 if (!existsSync(AUTH_DIR)) {
   skip('the control plane is not in this checkout', 'auth/ is absent');
 } else {
-  const django = spawnSync('python3', ['manage.py', 'test', '--verbosity', '1'], {
+  const probe = (name) => {
+    const r = spawnSync(name, ['-c', 'import sys; sys.exit(0)'], { encoding: 'utf8' });
+    return { name, ok: r.status === 0 };
+  };
+  const py = choosePython((process.platform === 'win32'
+    ? ['python', 'python3', 'py'] : ['python3', 'python']).map(probe));
+  const django = py && spawnSync(py, ['manage.py', 'test', '--verbosity', '1'], {
     cwd: AUTH_DIR, encoding: 'utf8', timeout: 180000,
     env: { ...process.env, DJANGO_DEBUG: '1' },
   });
-  const report = `${django.stdout ?? ''}${django.stderr ?? ''}`;
+  const report = django ? `${django.stdout ?? ''}${django.stderr ?? ''}` : '';
   const ran = /Ran (\d+) test/.exec(report)?.[1];
-  if (django.error && django.error.code === 'ENOENT') {
-    skip('python3 is not installed', 'the control plane was not exercised');
+  if (!py) {
+    skip('no python on PATH', 'the control plane was not exercised');
   } else if (/No module named .django./.test(report)) {
     skip('django is not installed', 'pip install -r auth/requirements.txt');
   } else if (django.status === 0) {
@@ -406,10 +421,22 @@ console.log('\n— a signing key stops the runner ——————————
  * The cutover is one-directional. A GC_AUTH_SECRET in the environment means
  * a deployment half moved, with the old shared key still lying next to the
  * browser; the runner refuses to start rather than ignore it.
+ *
+ * server.js directly, not scripts/start.js. Every probe below asserts that the
+ * SERVER refuses, and it asserts it by the sentence in stderr — so a second
+ * refusal standing in front of it would make each of these pass for the wrong
+ * reason. start.js now refuses when GC_WEB_DIR names no build, which is right
+ * for `npm start` and would have hidden all five of these behind one message
+ * about a UI. None of them has an opinion about a UI. (GC_SKIP_BUILD went with
+ * the bundler; there is nothing left here that could build one to skip.)
+ *
+ * The port is one none of them ever reaches, since a refusal happens before
+ * the listen.
  */
-const withSecret = spawnSync(process.execPath, [join(ROOT, 'scripts/start.js')], {
+const REFUSAL_PORT = Number(process.env.GC_REFUSAL_PORT) || 8307;
+const withSecret = spawnSync(process.execPath, [join(ROOT, 'server.js')], {
   cwd: ROOT, timeout: 25000, encoding: 'utf8',
-  env: { ...process.env, PORT: '3405', GC_SKIP_BUILD: '1', GC_AUTH_SECRET: 'check-auth-secret-long-enough-for-hmac-0123456789' },
+  env: { ...process.env, PORT: String(REFUSAL_PORT), GC_AUTH_SECRET: 'check-auth-secret-long-enough-for-hmac-0123456789' },
 });
 if (withSecret.status !== 0 && /must not hold a signing key/.test(withSecret.stderr ?? '')) {
   ok('GC_AUTH_SECRET in the environment refuses to start', `exit ${withSecret.status}`);
@@ -418,27 +445,27 @@ if (withSecret.status !== 0 && /must not hold a signing key/.test(withSecret.std
 }
 // The live private key, not the retired one: an operator who sourced
 // .env.prod into their shell must not be able to start the runner with it.
-const withSigningKey = spawnSync(process.execPath, [join(ROOT, 'scripts/start.js')], {
+const withSigningKey = spawnSync(process.execPath, [join(ROOT, 'server.js')], {
   cwd: ROOT, timeout: 25000, encoding: 'utf8',
-  env: { ...process.env, PORT: '3405', GC_SKIP_BUILD: '1', GC_SIGNING_KEY: PRIVATE_PEM },
+  env: { ...process.env, PORT: String(REFUSAL_PORT), GC_SIGNING_KEY: PRIVATE_PEM },
 });
 if (withSigningKey.status !== 0 && /must not hold a signing key/.test(withSigningKey.stderr ?? '')) {
   ok('GC_SIGNING_KEY in the environment refuses to start', `exit ${withSigningKey.status}`);
 } else {
   bad('GC_SIGNING_KEY in the environment refuses to start', `exit ${withSigningKey.status} — the private key was tolerated`);
 }
-const badKeys = spawnSync(process.execPath, [join(ROOT, 'scripts/start.js')], {
+const badKeys = spawnSync(process.execPath, [join(ROOT, 'server.js')], {
   cwd: ROOT, timeout: 25000, encoding: 'utf8',
-  env: { ...process.env, PORT: '3405', GC_SKIP_BUILD: '1', GC_AUTH_PUBLIC_KEYS: JSON.stringify({ k: PRIVATE_PEM }), GC_WEB_ORIGIN: 'http://127.0.0.1:3405' },
+  env: { ...process.env, PORT: String(REFUSAL_PORT), GC_AUTH_PUBLIC_KEYS: JSON.stringify({ k: PRIVATE_PEM }), GC_WEB_ORIGIN: `http://127.0.0.1:${REFUSAL_PORT}` },
 });
 if (badKeys.status !== 0 && /must not hold a signing key/.test(badKeys.stderr ?? '')) {
   ok('a private key in GC_AUTH_PUBLIC_KEYS refuses to start', `exit ${badKeys.status}`);
 } else {
   bad('a private key in GC_AUTH_PUBLIC_KEYS refuses to start', `exit ${badKeys.status}`);
 }
-const noOrigin = spawnSync(process.execPath, [join(ROOT, 'scripts/start.js')], {
+const noOrigin = spawnSync(process.execPath, [join(ROOT, 'server.js')], {
   cwd: ROOT, timeout: 25000, encoding: 'utf8',
-  env: { ...process.env, PORT: '3405', GC_SKIP_BUILD: '1', GC_AUTH_PUBLIC_KEYS: JSON.stringify({ [KID]: PUBLIC_PEM }), GC_WEB_ORIGIN: '' },
+  env: { ...process.env, PORT: String(REFUSAL_PORT), GC_AUTH_PUBLIC_KEYS: JSON.stringify({ [KID]: PUBLIC_PEM }), GC_WEB_ORIGIN: '' },
 });
 if (noOrigin.status !== 0 && /GC_WEB_ORIGIN/.test(noOrigin.stderr ?? '')) {
   ok('auth on with no GC_WEB_ORIGIN refuses to start', 'no origin to check sockets against');
@@ -447,10 +474,10 @@ if (noOrigin.status !== 0 && /GC_WEB_ORIGIN/.test(noOrigin.stderr ?? '')) {
 }
 // The extension list trusts its entries the way GC_WEB_ORIGIN is trusted; a
 // web origin in it is the wildcard back under another name (mode.js).
-const webInExt = spawnSync(process.execPath, [join(ROOT, 'scripts/start.js')], {
+const webInExt = spawnSync(process.execPath, [join(ROOT, 'server.js')], {
   cwd: ROOT, timeout: 25000, encoding: 'utf8',
-  env: { ...process.env, PORT: '3405', GC_SKIP_BUILD: '1', GC_AUTH_PUBLIC_KEYS: JSON.stringify({ [KID]: PUBLIC_PEM }),
-         GC_WEB_ORIGIN: 'http://127.0.0.1:3405', GC_EXTENSION_ORIGINS: 'https://evil.example' },
+  env: { ...process.env, PORT: String(REFUSAL_PORT), GC_AUTH_PUBLIC_KEYS: JSON.stringify({ [KID]: PUBLIC_PEM }),
+         GC_WEB_ORIGIN: `http://127.0.0.1:${REFUSAL_PORT}`, GC_EXTENSION_ORIGINS: 'https://evil.example' },
 });
 if (webInExt.status !== 0 && /GC_EXTENSION_ORIGINS/.test(webInExt.stderr ?? '')) {
   ok('a web origin in GC_EXTENSION_ORIGINS refuses to start', 'only chrome-extension://<id> is an extension');
@@ -461,15 +488,15 @@ if (webInExt.status !== 0 && /GC_EXTENSION_ORIGINS/.test(webInExt.stderr ?? ''))
 // ---------------------------------------------------------------------------
 console.log('\n— the gate, on a running runner ———————————————————————');
 
-const PORT = Number(process.env.GC_AUTH_PORT) || 3404;
+const PORT = Number(process.env.GC_AUTH_PORT) || 8308;
 const BASE = `http://127.0.0.1:${PORT}`;
 const ORIGIN = BASE;
 // The recorder's origin, the way a real install has one: an id, per install.
 const EXTENSION = 'chrome-extension://checkauthaaaaaaaaaaaaaaaaaaaaaaaa';
-const child = spawn(process.execPath, [join(ROOT, 'scripts/start.js')], {
+const child = spawn(process.execPath, [join(ROOT, 'server.js')], {
   cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
   env: {
-    ...process.env, PORT: String(PORT), GC_SKIP_BUILD: '1', HOME_URL: '',
+    ...process.env, PORT: String(PORT), HOME_URL: '',
     GC_AUTH_PUBLIC_KEYS: JSON.stringify({ [KID]: PUBLIC_PEM }), GC_WEB_ORIGIN: ORIGIN,
     GC_EXTENSION_ORIGINS: EXTENSION,
   },
@@ -501,7 +528,11 @@ const closedWith = (ws) => new Promise((res) => {
 try {
   let up = false;
   for (let i = 0; i < 60 && !up; i++) {
-    up = await fetch(`${BASE}/app/`).then((r) => r.ok).catch(() => false);
+    // /healthz, not /app/. Readiness has to mean the BROWSER is up, and
+    // since the split /app/ may legitimately be a 503 saying no UI was
+    // supplied — a runner nobody has pointed at a build is still a runner,
+    // and every assertion below is about the gate rather than the app.
+    up = await fetch(`${BASE}/healthz`).then((r) => r.ok).catch(() => false);
     if (!up) await wait(500);
   }
   if (!up) {
@@ -690,13 +721,21 @@ try {
     } else bad('the driven page cannot reach a private address', openedMe);
 
     /**
-     * What must NOT be gated: the UI has to load in order to render a login
-     * form. What must not be SERVED: the demo fixtures, which exist to be
-     * driven and have no business on a gated runner (GC_DEMO=1 to serve them).
+     * What must NOT be gated: /app/ has to be reachable in order to render a
+     * login form. What must not be SERVED: the demo fixtures, which exist to
+     * be driven and have no business on a gated runner (GC_DEMO=1 to serve
+     * them).
+     *
+     * Asserted as "not an auth refusal" rather than "200", because this
+     * repository no longer contains a UI and this server is not pointed at
+     * one: /app/ here is the 503 that names GC_WEB_DIR. That is fine and is
+     * the point — the claim is that the gate does not stand in front of the
+     * login screen, and a 401 or a 403 would be the gate. A 200 (a UI is
+     * mounted) and a 503 (none is) are both the gate staying out of the way.
      */
     const ui = await fetch(`${BASE}/app/`);
-    if (ui.ok) ok('the UI still loads', `${ui.status} /app/`);
-    else bad('the UI still loads', `${ui.status} — a login screen you cannot reach`);
+    if (ui.status !== 401 && ui.status !== 403) ok('/app/ is not behind the gate', `${ui.status} — a login screen must be reachable`);
+    else bad('/app/ is not behind the gate', `${ui.status} — a login screen you cannot reach`);
     for (const path of ['/demo.html', '/go/tracked', '/pricing.html']) {
       const r = await fetch(BASE + path, { redirect: 'manual' });
       if (r.status === 404) ok(`the fixtures are not served with auth on`, `${r.status} ${path}`);
@@ -744,5 +783,5 @@ console.log(failures
   : '\n  OK — forgeries are refused, a token minted in Python verifies in Node,\n'
     + '       the driven page cannot reach inward, and a gated runner turns away\n'
     + '       an API call, a socket with no ticket, a spent ticket, a token in a\n'
-    + '       URL and a foreign origin, while still serving the UI.\n');
+    + '       URL and a foreign origin, while never standing in front of /app/.\n');
 process.exit(failures ? 1 : 0);

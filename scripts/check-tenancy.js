@@ -199,7 +199,7 @@ forgetVersions();
 // ---------------------------------------------------------------------------
 console.log('\n— a gated runner, two organisations ———————————————————');
 
-const PORT = Number(process.env.GC_TENANCY_PORT) || 3406;
+const PORT = Number(process.env.GC_TENANCY_PORT) || 8309;
 const BASE = `http://127.0.0.1:${PORT}`;
 const IDLE_MS = 3000;
 
@@ -218,10 +218,13 @@ writeFileSync(join(ROOT, '.ghostclick', 'check-stale', 'runs.json'), JSON.string
   { at: Date.now() - 1000, suite: 'New', suiteId: null, caseId: null, caseName: null, url: 'https://new.example/', ms: 1, total: 1, passed: 1, failed: 0, ok: true, error: null, step: null },
 ] }));
 
-const child = spawn(process.execPath, [join(ROOT, 'scripts/start.js')], {
+// server.js, not scripts/start.js: what is under test is one runner's tenancy,
+// and start.js would refuse first over a GC_WEB_DIR this has no opinion about.
+// (GC_SKIP_BUILD went with the bundler — nothing here could build a UI.)
+const child = spawn(process.execPath, [join(ROOT, 'server.js')], {
   cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
   env: {
-    ...process.env, PORT: String(PORT), GC_SKIP_BUILD: '1', HOME_URL: '',
+    ...process.env, PORT: String(PORT), HOME_URL: '',
     GC_AUTH_PUBLIC_KEYS: JSON.stringify({ [KID]: PUBLIC_PEM }), GC_WEB_ORIGIN: BASE,
     // A laptop with a login: the bundled pages on this port are what there is
     // to drive, so the private-address block is off and the fixtures are on.
@@ -273,7 +276,11 @@ const isEnt = (r, limit, plan) => r.status === 402 && r.body.error === 'entitlem
 try {
   let up = false;
   for (let i = 0; i < 60 && !up; i++) {
-    up = await fetch(`${BASE}/app/`).then((r) => r.ok).catch(() => false);
+    // /healthz, not /app/. Readiness has to mean the BROWSER is up, and
+    // since the split /app/ may legitimately be a 503 saying no UI was
+    // supplied — a runner nobody has pointed at a build is still a runner,
+    // and every assertion below is about the gate rather than the app.
+    up = await fetch(`${BASE}/healthz`).then((r) => r.ok).catch(() => false);
     if (!up) await wait(500);
   }
   if (!up) throw new Error(`no answer on ${PORT}\n${out.trim().split('\n').slice(-6).join('\n')}`);
