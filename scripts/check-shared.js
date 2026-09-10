@@ -187,8 +187,22 @@ const { mkdtempSync } = await import('node:fs');
 const { tmpdir } = await import('node:os');
 const { join } = await import('node:path');
 const EXT = root('extension');
+/**
+ * `channel: 'chromium'` is the difference between this section running and
+ * this section failing on every machine.
+ *
+ * Playwright's default headless browser is the headless SHELL — a separate,
+ * smaller build that has no extension support at all, so `--load-extension`
+ * is accepted and silently does nothing: no service worker, no content
+ * script, and a failure that reads as "check manifest.json" when the manifest
+ * is fine. Naming the channel asks for the full Chromium in its new headless
+ * mode, which loads extensions the way a real browser does.
+ *
+ * Not passed alongside CHROMIUM_PATH: playwright refuses both at once, and a
+ * sandbox that ships its own browser has already made this choice.
+ */
 const ctx = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), 'gc-ext-')), {
-  executablePath: process.env.CHROMIUM_PATH || undefined,
+  ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : { channel: 'chromium' }),
   args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`],
 });
 try {
