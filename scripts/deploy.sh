@@ -431,13 +431,19 @@ probe /admin/          403 "the admin is behind the allowlist"
 # not WORK.
 RESOLVE="\$HOST:\$PORT:127.0.0.1"
 
-# CSRF has to reach the browser before a sign-in can start, and a missing
-# Set-Cookie here is a login that 403s for everyone. The probe above cannot
-# see it: the body is identical either way.
-if curl -s -m 10 -i --resolve "\$RESOLVE" "\$PUBLIC_URL/auth/csrf" | grep -qi '^set-cookie:.*csrftoken'; then
-  printf '    %-34s %s\n' "sign-in can actually start" "csrftoken set"
+# CSRF has to reach the browser before a sign-in can start, and without it
+# every login 403s. The probe above cannot see that: a 200 carrying an empty
+# body looks identical to a 200 carrying a token.
+#
+# Asserted in the BODY rather than as a Set-Cookie, because CSRF_USE_SESSIONS
+# is on: Django issues no csrftoken cookie at all and the SPA reads the value
+# from this response. Grepping for the cookie would fail on a healthy box.
+csrf_probe=\$(curl -s -m 10 --resolve "\$RESOLVE" "\$PUBLIC_URL/auth/csrf" \
+              | grep -o '"csrfToken":"[^"]*"' | cut -d'"' -f4)
+if [ -n "\$csrf_probe" ]; then
+  printf '    %-34s %s\n' "sign-in can actually start" "a token, \${#csrf_probe} chars"
 else
-  printf '    %-34s %s\n' "sign-in can actually start" "NO csrftoken — every login 403s"; FAIL=1
+  printf '    %-34s %s\n' "sign-in can actually start" "NO token in /auth/csrf — every login 403s"; FAIL=1
 fi
 
 # The whole round trip, when the operator supplies an account to do it with.

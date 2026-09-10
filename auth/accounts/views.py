@@ -85,10 +85,19 @@ def whoami(request):
 @require_http_methods(['GET'])
 def csrf(request):
     """
-    The SPA lives on another origin, so it cannot read Django's csrftoken
-    cookie with document.cookie — cookies are not readable across origins. It
-    gets the value in a body instead and echoes it in X-CSRFToken, which is the
-    part CsrfViewMiddleware actually compares.
+    The only way the SPA can obtain a CSRF token.
+
+    There are two reasons, and either alone would be enough. CSRF_USE_SESSIONS
+    is on, so Django sets no csrftoken cookie anywhere — the token lives in the
+    session and this is the one thing that hands the value out. And in
+    development the SPA is on another origin, where document.cookie could not
+    have read the cookie even when there was one.
+
+    It is echoed back in X-CSRFToken, which is the part CsrfViewMiddleware
+    actually compares.
+
+    Calling this is what starts a session for an anonymous visitor, which is
+    the cost CSRF_USE_SESSIONS carries; see the note beside it in settings.
     """
     return JsonResponse({'csrfToken': get_token(request)})
 

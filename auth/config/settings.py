@@ -444,6 +444,37 @@ else:
     CSRF_COOKIE_SECURE = SESSION_COOKIE_SECURE
 SESSION_COOKIE_HTTPONLY = True
 
+# The CSRF token lives in the session, not in a cookie of its own.
+#
+# Every CSRF_COOKIE_* setting above is inert while this is True — Django never
+# sets the cookie — and they are left in place because turning this off must
+# restore the old behaviour without anyone having to remember what it was.
+#
+# Be clear about what this does and does not buy, because it reads like a
+# hardening measure and is mostly not one:
+#
+#   It does NOT make the token secret. The SPA still fetches it from
+#   GET /auth/csrf and holds it in memory, so it is in the network tab and in
+#   a JavaScript variable either way. Anyone who can read it in a browser is
+#   already signed in as that person.
+#
+#   What actually stops CSRF here is unchanged and is three things, none of
+#   them the token's hiding place: Django compares the Origin header against
+#   CSRF_TRUSTED_ORIGINS and refuses before it ever looks at a token;
+#   SameSite=Lax means the session cookie is not sent on a cross-site POST at
+#   all; and CORS names one origin, so an attacker's page cannot read the
+#   response of /auth/csrf to learn the value.
+#
+#   What it DOES do is remove the one credential-shaped thing a person sees in
+#   the Application tab, which was the reason it was asked for.
+#
+# The cost is real and lands on the database: the token needs somewhere to
+# live, so Django starts a session for anyone who asks for one — an anonymous
+# visitor on the landing page, a crawler, a scanner. `manage.py clearsessions`
+# already runs daily (docs/AUTH.md §12) and is what keeps that table from
+# growing without bound; it matters more now than it did.
+CSRF_USE_SESSIONS = True
+
 # ---------------------------------------------------------------- sessions
 #
 # Two clocks. The idle one is Django's: twelve hours since the last request,
