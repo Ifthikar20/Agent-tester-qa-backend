@@ -198,9 +198,9 @@ export async function iconFor(origin, list = [], { now = Date.now() } = {}) {
       const href = iconHref(page.body.toString('utf8'));
       if (href) {
         // A data: URI is an icon that has already arrived — no second request,
-        // and no host to vet. It is also what this very app uses
-        // (web/index.html:7), so the bundled demo suite works with no network
-        // at all rather than falling through to a monogram.
+        // and no host to vet. It is also what the ghostclick UI's own
+        // index.html carries, so a suite pointed at this runner's app resolves
+        // with no network at all rather than falling through to a monogram.
         const inline = dataUri(href);
         if (inline) {
           write(origin, { ok: true, type: inline.type, at: now }, inline.body);

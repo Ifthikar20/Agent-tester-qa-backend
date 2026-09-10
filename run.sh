@@ -2,6 +2,8 @@
 #
 # Start ghostclick, with the sign-in.
 #
+#   GC_WEB_DIR=../ghostclick-web/dist bash run.sh
+#
 #   bash run.sh                the runner, the UI and the control plane — you sign in
 #   bash run.sh --open         no sign-in at all, the one-person-one-laptop shape
 #   bash run.sh --fast         runs skip the performance, for a quick check
@@ -10,6 +12,13 @@
 #   bash run.sh --port 3100    the runner somewhere else (--auth-port moves the other)
 #
 # One Ctrl-C stops whatever it started.
+#
+# GC_WEB_DIR is not optional and is not something this repository can supply.
+# The UI is the ghostclick-web repository (docs/BOUNDARY.md); build it there
+# and name the build here. With the sign-in it has to have been built knowing
+# where to sign in — `VITE_AUTH_URL=http://localhost:8000 npm run build` over
+# there — because that address is baked into the bundle and no flag on this
+# side can put it in afterwards. scripts/app.js checks both and says so.
 #
 # THE DEFAULT IS THE SIGN-IN, and that is the one thing here worth arguing
 # about, because it inverts `npm start`. Two different questions have two
@@ -32,17 +41,17 @@
 # `--open` is the way out, and it is a word rather than a negation because
 # `--no-auth` reads as "broken" when it is in fact a supported shape.
 #
-# The work is all in scripts/app.js — installing what is missing, downloading
-# the browser, migrating, generating the signing keypair whose two halves go to
-# two different processes, building the UI with the control plane's address
-# baked in, and starting the processes. This is a wrapper, and it earns its
-# place with three things that are easy to get wrong from a terminal:
+# The work is all in scripts/app.js — finding the built UI, installing what is
+# missing, downloading the browser, migrating, generating the signing keypair
+# whose two halves go to two different processes, and starting the processes.
+# This is a wrapper, and it earns its place with three things that are easy to
+# get wrong from a terminal:
 #
 #   - `npm run app --auth` does not do what it looks like. npm eats the flag
 #     unless you write `npm run app -- --auth`, and without it you get the app
 #     with NO sign-in and nothing saying why.
-#   - A port already in use is found only after the install-and-build work, so
-#     you wait through all of it to be told the thing you could have been told
+#   - A port already in use is found only after the install work, so you wait
+#     through all of it to be told the thing you could have been told
 #     immediately. With the control plane there are two ports to be wrong about.
 #   - This repository is usually checked out more than once — a worktree per
 #     branch — and every copy has its own node_modules, its own .ghostclick and

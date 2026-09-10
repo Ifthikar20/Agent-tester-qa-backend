@@ -1,85 +1,76 @@
 /**
- * One command: build the UI if this checkout has one, then run the server.
+ * One command: find the built UI, say which one, then run the server.
  *
  *   npm start
  *
- * The backend and the frontend are separate projects that happen to live in one
- * repository today (docs/BOUNDARY.md). This script is the convenience that
- * spans them, and it is deliberately the ONLY place that does — the server
- * itself never looks at `web/src`, it is handed a built directory.
+ * This script used to be the convenience that spanned two directories — it
+ * rebuilt `web/` whenever its sources were newer than its build, so that
+ * editing a component and restarting showed you the component you edited.
+ * There is no `web/` to rebuild any more (docs/BOUNDARY.md): the UI is the
+ * ghostclick-web repository, it builds to its own `dist/`, and this repository
+ * is POINTED at the result.
  *
- * So it does nothing at all in the two cases where the frontend is not this
- * script's business:
+ * So the staleness problem it solved is gone and a different one has taken its
+ * place. `GC_WEB_DIR` is now the single thread holding the application
+ * together, and every way it goes wrong is quiet:
  *
- *   GC_WEB_DIR set        the UI was built and deployed somewhere else; a local
- *                         build would be work nobody is going to look at
- *   no web/ directory     a backend-only checkout, which is what the backend
- *                         repository will be
+ *   unset             /app/ answers a 503 sentence, so you find out from a
+ *                     browser rather than from the terminal you started
+ *   a typo            an empty directory serves nothing, which looks the same
+ *   a source tree     `../ghostclick-web` rather than `../ghostclick-web/dist`
+ *                     has no index.html and 404s every route
  *
- * Otherwise it compares source mtimes against the build and rebuilds only when
- * something actually changed, because the build is committed and a stale one is
- * invisible: edit a component, restart, and you are still looking at the old
- * build with no indication that anything is stale. "Why don't I see the new
- * button" is not a question anyone should have to ask their own tool.
+ * All three are visible before Chromium is launched, so this looks, refuses,
+ * and names the fix — which is the difference between `npm start` and `npm run
+ * serve`. `npm start` means "run the application", and the application has a
+ * UI. `npm run serve` means "run the server", and server.js is deliberately
+ * content without one: a runner driving pages for the recorder extension, or
+ * for curl, does not need an app.
  *
- * If Vite is not installed (a checkout with production dependencies only) it
- * says so and serves the committed build, because refusing to start would be
- * worse.
- *
- *   GC_SKIP_BUILD=1 npm start   never build, just serve what is there
+ * It reports rather than builds, and must stay that way. A backend that can
+ * build the UI is a backend that has the UI's toolchain, its dependencies and
+ * its opinions back in this repository, which is the coupling the split was
+ * for.
  */
-import { spawnSync } from 'node:child_process';
-import { readdirSync, statSync, existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { join, dirname } from 'node:path';
+import { existsSync, statSync } from 'node:fs';
+import { resolve, join } from 'node:path';
 
-const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const WEB = join(ROOT, 'web');
-const CONFIG = join(WEB, 'vite.config.js');
-const BUILT = join(WEB, 'dist/index.html');
-const SOURCES = ['src', 'index.html', 'vite.config.js', 'package.json'].map((p) => join(WEB, p));
+const HINT = `
+  The UI is a separate repository. Build it there, point this at the result:
 
-/** Newest mtime anywhere under these paths. */
-function newest(paths) {
-  let latest = 0;
-  const walk = (p) => {
-    let st;
-    try { st = statSync(p); } catch { return; }
-    if (st.isDirectory()) {
-      for (const name of readdirSync(p)) walk(join(p, name));
-    } else {
-      latest = Math.max(latest, st.mtimeMs);
-    }
-  };
-  paths.forEach(walk);
-  return latest;
+      cd ../ghostclick-web && npm install && npm run build
+      cd -  &&  GC_WEB_DIR=../ghostclick-web/dist npm start
+
+  With the sign-in, it has to be built knowing where to sign in — the address
+  is baked into the bundle, so this is a build-time choice, not a runtime one:
+
+      VITE_AUTH_URL=http://localhost:8000 npm run build
+
+  Or run the server on its own, with the API and no app:
+
+      npm run serve
+`;
+
+function ui() {
+  const given = process.env.GC_WEB_DIR;
+  if (!given) return { fatal: 'GC_WEB_DIR is not set, so there is no UI to serve.' };
+
+  const dir = resolve(given);
+  if (!existsSync(dir)) return { fatal: `GC_WEB_DIR names ${dir}, which does not exist.` };
+  if (!existsSync(join(dir, 'index.html'))) {
+    return { fatal: `GC_WEB_DIR names ${dir}, which has no index.html — that is a source tree or an empty directory, not a build.` };
+  }
+  // The same mtime /api/version reports, said once at boot: a UI built three
+  // weeks ago when you expected three minutes is the kind of thing that
+  // otherwise turns into an afternoon of debugging the wrong service.
+  const built = statSync(join(dir, 'index.html')).mtime.toISOString().replace('T', ' ').slice(0, 16);
+  return { detail: `${dir}  (built ${built})` };
 }
 
-function build() {
-  if (process.env.GC_WEB_DIR) return `not mine — serving ${process.env.GC_WEB_DIR}`;
-  if (!existsSync(CONFIG)) return 'no frontend in this checkout — serving whatever GC_WEB_DIR points at';
-  if (/^(1|true|yes)$/i.test(process.env.GC_SKIP_BUILD ?? '')) return 'skipped by GC_SKIP_BUILD';
-  if (!existsSync(join(ROOT, 'node_modules/vite'))) {
-    return 'vite is not installed — serving the committed build (npm install to change it)';
-  }
-
-  const built = existsSync(BUILT) ? statSync(BUILT).mtimeMs : 0;
-  if (built && newest(SOURCES) <= built) return 'up to date';
-
-  console.log('  building the UI…');
-  const r = spawnSync(process.execPath,
-    [join(ROOT, 'node_modules/vite/bin/vite.js'), 'build', '--config', CONFIG],
-    { cwd: WEB, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
-
-  if (r.status !== 0) {
-    // A broken build must not cost you a working runner. Say what went wrong
-    // and serve the last good one.
-    console.error(`\n  the UI build failed — serving the previous build\n${(r.stderr || r.stdout || '').trim().split('\n').slice(-12).map((l) => `    ${l}`).join('\n')}\n`);
-    return 'FAILED — serving the previous build';
-  }
-  const line = (r.stdout || '').split('\n').find((l) => l.includes('built in')) ?? '';
-  return `rebuilt${line ? ` (${line.trim().replace(/^.*✓\s*/, '')})` : ''}`;
+const found = ui();
+if (found.fatal) {
+  console.error(`\n  ${found.fatal}\n${HINT}`);
+  process.exit(1);
 }
-
-console.log(`\n  ui          ->  ${build()}`);
+console.log(`\n  ui          ->  ${found.detail}`);
 await import('../server.js');

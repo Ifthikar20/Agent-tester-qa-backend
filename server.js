@@ -267,32 +267,38 @@ app.use(express.json({ limit: '512kb' }));
  *
  *   GC_WEB_DIR=/srv/ghostclick-web/dist npm start
  *
- * It used to be `public/app/`, written there by the frontend's own build
- * config. That is the coupling that makes two repositories impossible: the
- * frontend cannot build without the backend's tree to write into, and the
- * backend cannot serve a UI that was deployed anywhere else. Now the frontend
- * builds to its own `web/dist/` and this reads whatever directory it is given,
- * so the same server serves a sibling checkout, a CI artefact, or nothing at
- * all — see docs/BOUNDARY.md.
+ * The UI is a different repository now (docs/BOUNDARY.md). It builds to its
+ * own `dist/`, and this reads whatever directory it is given: a sibling
+ * checkout, a CI artefact, a read-only mount inside a container. Nothing here
+ * builds it, imports it, or knows what is in it beyond `index.html`.
  *
- * The default is the sibling `web/dist/`, whose build is committed, so `npm
- * start` still needs no bundler — a tool you need a build step to run is a tool
- * people stop running.
+ * There is no default, and that is the change the split made. A default of
+ * `./web/dist` would name a path this repository cannot produce, so it could
+ * only ever be a directory that is not there — and "not there" arrives as a
+ * 404 on the app URL, which reads as a broken deploy rather than as an unset
+ * variable. Unset is instead a stated fact: the banner says so at boot and
+ * every request under /app/ is answered with the sentence that names
+ * GC_WEB_DIR. The API and the socket are unaffected; a runner with no UI is a
+ * perfectly good runner for the extension and for curl.
  *
  * Static files win (this sits before the fallback), so only client-side routes
  * reach it.
  */
-const WEB_DIR = process.env.GC_WEB_DIR
-  ? resolve(process.env.GC_WEB_DIR)
-  : fileURLToPath(new URL('./web/dist', import.meta.url));
-const APP = join(WEB_DIR, 'index.html');
+const WEB_DIR = process.env.GC_WEB_DIR ? resolve(process.env.GC_WEB_DIR) : null;
+const APP = WEB_DIR ? join(WEB_DIR, 'index.html') : null;
+const NO_UI = 'No UI is being served. This is the backend repository; the UI is built in '
+  + 'ghostclick-web and this server is pointed at the result — set GC_WEB_DIR to that build.';
 
 app.get('/', (_req, res) => res.redirect('/app/'));
-app.use('/app', express.static(WEB_DIR, { setHeaders: cacheHeaders }));
+if (WEB_DIR) app.use('/app', express.static(WEB_DIR, { setHeaders: cacheHeaders }));
 app.use('/app', (req, res, next) => {
   if (req.method !== 'GET' || req.path.startsWith('/assets/')) return next();
+  // 503 rather than 404: the route exists and the operator has not finished
+  // wiring it, which is a different thing from a page that is not there, and
+  // is the difference between reading this sentence and reading a stack trace.
+  if (!WEB_DIR) return res.status(503).type('text/plain').set('Cache-Control', 'no-store').send(`${NO_UI}\n`);
   res.sendFile(APP, (err) => {
-    if (err) next(new Error(`No UI at ${WEB_DIR} — run \`npm run build\`, or point GC_WEB_DIR at one`));
+    if (err) next(new Error(`No index.html in ${WEB_DIR} — GC_WEB_DIR must name a built UI, not a source tree`));
   });
 });
 
@@ -583,11 +589,13 @@ async function take(org) {
  * shelling out, so it works where git is not on PATH.
  *
  * The commit and the start time are fixed for this process. The BUILD time is
- * not: express serves the UI directory off disk, so a `vite build` in another
- * terminal changes what the browser gets without this process noticing. Read
- * at boot, the stamp then claims a UI older than the one being served — a
- * version stamp that is confidently wrong is worse than none, since its entire
- * job is to be trusted at a glance.
+ * not, and since the split it is not even this repository's: the UI is
+ * deployed on its own schedule into the directory GC_WEB_DIR names, so the
+ * bytes under /app/ can change while this process runs and nothing tells it.
+ * That is why the stamp is a fresh stat per request rather than a value read
+ * at boot — read once, it would confidently report a UI older than the one
+ * being served, and a version stamp whose entire job is to be trusted at a
+ * glance is worse wrong than absent.
  */
 const identity = (() => {
   const read = (p) => { try { return readFileSync(fileURLToPath(new URL(p, import.meta.url)), 'utf8').trim(); } catch { return null; } };
@@ -599,8 +607,18 @@ const identity = (() => {
   let commit = process.env.GC_GIT_SHA?.trim() || null;
   if (!commit) {
     const head = read('./.git/HEAD');
-    if (head?.startsWith('ref: ')) commit = read(`./.git/${head.slice(5)}`);
-    else if (head) commit = head;
+    if (head?.startsWith('ref: ')) {
+      const ref = head.slice(5);
+      // A ref lives in one of two places and a fresh clone uses the second.
+      // `git gc` — and `git clone`, which packs on the way in — moves loose
+      // refs into .git/packed-refs and deletes the files, so reading only
+      // .git/refs/heads/<branch> answers null on every checkout nobody has
+      // committed to yet. That is most of them, and this repository, whose
+      // history was rewritten wholesale by git-filter-repo, arrived packed.
+      commit = read(`./.git/${ref}`)
+        ?? read('./.git/packed-refs')?.split('\n').find((l) => l.endsWith(` ${ref}`))?.split(' ')[0]
+        ?? null;
+    } else if (head) commit = head;
   }
   return {
     commit: commit ? commit.slice(0, 7) : null,
@@ -608,7 +626,8 @@ const identity = (() => {
   };
 })();
 const buildTime = () => {
-  try { return statSync(APP).mtime.toISOString(); } catch { return null; }   // not built
+  if (!APP) return null;                                                     // no UI to date
+  try { return statSync(APP).mtime.toISOString(); } catch { return null; }   // pointed at nothing
 };
 app.get('/api/version', (_req, res) => res.json({ ...identity, built: buildTime() }));
 
@@ -1071,7 +1090,9 @@ if (process.env.HOME_URL) {
 }
 
 console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
-            `\n  serving     ->  ${WEB_DIR}${process.env.GC_WEB_DIR ? '  (GC_WEB_DIR)' : ''}` +
+            `\n  serving     ->  ${WEB_DIR
+              ? `${WEB_DIR}  (GC_WEB_DIR)`
+              : 'NO UI — GC_WEB_DIR is unset, so /app/ says so and the API still works'}` +
             `\n  driving     ->  ${homeUrl() ?? 'nothing yet — open a URL in the console'}` +
             `\n  auth        ->  ${AUTH_ON
               ? `on — an EdDSA token from the control plane is required; keys: ${[...PUBLIC_KEYS.keys()].join(', ')}`
@@ -1100,7 +1121,7 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  pace        ->  ${PACE ? `${PACE}ms of performance per step, so a run can be watched` : '0 — no performance, as fast as the page allows'}` +
             ` (GC_PACE_MS)` +
             `\n  version     ->  ${identity.commit ?? 'unknown'}` +
-            `${buildTime() ? `, ui built ${buildTime().replace('T', ' ').slice(0, 16)}` : ', ui NOT BUILT'}\n`);
+            `${buildTime() ? `, ui built ${buildTime().replace('T', ' ').slice(0, 16)}` : ', no ui to date'}\n`);
 
 // ---------------------------------------------------------------- browser
 /**

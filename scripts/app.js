@@ -6,15 +6,22 @@
  *   node scripts/app.js --fast       runs skip the performance
  *   node scripts/app.js --setup      do the first-run work and stop
  *
- * There are three projects here now — the runner, the UI in web/, the Django
- * control plane in auth/ — and getting them up meant knowing about npm install,
- * a Playwright browser download, pip, a migration, a signing keypair whose two
- * halves go to two different processes, and a UI rebuild with the right
- * variable baked in. Every one of those is a step someone can forget, and
- * most of them fail in a way that looks like something else.
+ * Two services live here — the runner and the Django control plane in auth/ —
+ * and getting them up means npm install, a Playwright browser download, pip, a
+ * migration, and a signing keypair whose two halves go to two different
+ * processes. Every one of those is a step someone can forget, and most of them
+ * fail in a way that looks like something else.
  *
  * So this does them, skips the ones already done, and SAYS which is which. A
  * setup script that works silently is one you cannot debug when it does not.
+ *
+ * The UI is the third thing the application needs and the one thing this
+ * cannot do, because it is a different repository now (docs/BOUNDARY.md). It
+ * is built there and handed over as a directory in GC_WEB_DIR. That makes it
+ * the step most likely to be missing and the least likely to announce itself,
+ * so it is checked FIRST — before the install, the download and the migration
+ * — and, with --auth, the build is inspected for the one thing that cannot be
+ * fixed from this side: whether it was built knowing where to sign in.
  *
  * What it will not do is invent a credential. If the control plane has no
  * accounts it tells you to create one; a script that quietly makes an admin
@@ -24,7 +31,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const WIN = process.platform === 'win32';
@@ -88,12 +95,17 @@ export function parseArgs(argv) {
  *
  * Pure and exported because this is where the two halves of the keypair go
  * their separate ways: the PRIVATE key reaches the control plane as
- * GC_SIGNING_KEY and nothing else, the PUBLIC set reaches the runner as
- * GC_AUTH_PUBLIC_KEYS and nothing else, and the UI has to be BUILT knowing
- * where to sign in. A runner handed the private key is a runner that can
- * mint; a control plane handed nothing cannot; either produces a login screen
- * that cannot log in, which is a bad afternoon to debug and a cheap thing to
- * test.
+ * GC_SIGNING_KEY and nothing else, and the PUBLIC set reaches the runner as
+ * GC_AUTH_PUBLIC_KEYS and nothing else. A runner handed the private key is a
+ * runner that can mint; a control plane handed nothing cannot; either produces
+ * a login screen that cannot log in, which is a bad afternoon to debug and a
+ * cheap thing to test.
+ *
+ * `uiBuild` is the odd one out: it is not an environment for anything this
+ * script starts. It is what the OTHER repository must have built with, which
+ * this side can state and check but not do. It stays in this function because
+ * it is derived from the same ports as the two real environments, and three
+ * places deriving the control plane's address is how they come to disagree.
  *
  * @param keys  { privatePem, publicKeys } from keypair(), or null without --auth
  */
@@ -130,8 +142,12 @@ export function envFor(opts, keys, base = {}, root = ROOT) {
         // --auth, where both are already the laptop defaults.
         GC_DEMO: '1',
         GC_BLOCK_PRIVATE: '0',
-        // Serve the machine-local build, leaving the committed one untouched.
-        GC_WEB_DIR: authBuildDir(root),
+        // GC_WEB_DIR is deliberately NOT invented here, or anywhere below. It
+        // names a build this repository cannot make, so a value chosen here
+        // could only be a guess at where somebody else's output landed — and a
+        // guess that happens to exist is worse than one that does not, because
+        // it serves a stale app instead of saying anything. main() passes the
+        // operator's own value through, resolved.
       } : {}),
       ...(opts.fast ? { GC_PACE_MS: '0' } : {}),
       ...(opts.headed ? { HEADED: '1' } : {}),
@@ -144,38 +160,96 @@ export function envFor(opts, keys, base = {}, root = ROOT) {
       DJANGO_DEBUG: '1',
       DJANGO_ALLOWED_HOSTS: 'localhost,127.0.0.1,[::1]',
     },
-    // Baked into the bundle, so it is a BUILD variable, not a runtime one —
-    // which is why turning auth on has to rebuild the UI.
+    // What the UI in the other repository must have been built with, and the
+    // reason it has to be a build-time fact rather than something set here:
+    // VITE_AUTH_URL is baked into the bundle, so the address of the sign-in is
+    // decided by whoever ran `npm run build` over there, minutes or weeks ago.
     //
-    // ERASED without --auth rather than set to '', for the same reason as the
-    // runner's names above and one more: `VITE_AUTH_URL=''` and an unset
-    // VITE_AUTH_URL produce DIFFERENT bytes (vite leaves the key out of
-    // import.meta.env when it is unset, and bakes `""` when it is not), so
-    // building into the committed web/dist with it set made that directory
-    // stop reproducing from `npm run build` — which is the command the
-    // repository says produced it. src/config.js reads both as the same empty
-    // string, so nothing about the built app changes.
-    build: { ...base, ...(opts.auth ? { VITE_AUTH_URL: authUrl } : { VITE_AUTH_URL: undefined }) },
+    // Which means turning --auth on and off HERE cannot change the app. A
+    // bundle built without it has no login screen at all, and pointing an
+    // authenticated runner at that bundle produces a UI that shows the console,
+    // fetches /api, and is refused on every call with no way offered to sign
+    // in. Nothing is broken; it is just two halves that were never told the
+    // same thing. So this is stated, printed at boot, and looked for in the
+    // build — see uiNote() below.
+    uiBuild: { VITE_AUTH_URL: opts.auth ? authUrl : undefined },
   };
 }
-
-/**
- * Where an auth-enabled build goes, and why it is not web/dist.
- *
- * web/dist is COMMITTED — that is the whole reason `npm start` needs no
- * bundler. Building into it with VITE_AUTH_URL baked in makes the committed
- * bundle demand a login at localhost:8000 on YOUR machine, for everyone who
- * pulls it. Nothing would tell you: it builds, it runs, it works here.
- *
- * So an auth build is machine-local and gitignored, and the runner is POINTED
- * at it — which is precisely what GC_WEB_DIR exists for. Without --auth nothing
- * moves and the committed build is what gets served.
- */
-export const authBuildDir = (root) => join(root, '.ghostclick', 'web-auth');
 
 /** Which python to use, given what is on this machine. Pure; the probing is not. */
 export function choosePython(candidates) {
   return candidates.find((c) => c.ok)?.name ?? null;
+}
+
+/**
+ * What to say about a UI build, given what is in it. Pure, so the sentences
+ * can be tested without a build to look at.
+ *
+ * `index` is the text of the build's index.html plus the assets it names —
+ * everything the browser would load — and `wanted` is the address the sign-in
+ * should be at, or undefined when there is no sign-in. VITE_AUTH_URL is baked
+ * in literally, so it is either in those bytes or it is not, and that is the
+ * one question about someone else's build this side can answer for itself.
+ *
+ * Never fatal. This is a heuristic about a minified bundle from another
+ * repository, and a heuristic that can stop your application from starting is
+ * a heuristic you will eventually be forced to work around.
+ *
+ * @returns {{level: 'ok'|'warn', text: string}}
+ */
+export function uiNote(index, wanted) {
+  const has = (url) => index.includes(url);
+  if (!wanted) {
+    // The reverse mismatch, and the quieter of the two: a bundle built for a
+    // sign-in, served by a runner with no gate. It shows a login screen, the
+    // login works, and the token it comes back with is ignored — so every
+    // account looks like it has the same empty workspace.
+    const baked = index.match(/https?:\/\/[^"'`\s]+?:\d{2,5}/)?.[0];
+    return baked && /localhost|127\.0\.0\.1/.test(baked)
+      ? { level: 'warn', text: `built with a sign-in at ${baked}, but this runner has no gate — the login will succeed and be ignored (--auth, or rebuild without VITE_AUTH_URL)` }
+      : { level: 'ok', text: 'no sign-in, matching this runner' };
+  }
+  return has(wanted)
+    ? { level: 'ok', text: `signs in at ${wanted}` }
+    : { level: 'warn', text: `does NOT mention ${wanted} — it was built without VITE_AUTH_URL, or against another port, so no login will appear. Rebuild it: VITE_AUTH_URL=${wanted} npm run build` };
+}
+
+/**
+ * The built UI, and everything that can be wrong with the way it was named.
+ *
+ * Checked before anything slow, because the alternative is finding out after
+ * the install, the browser download and the migration — and finding out from a
+ * blank page rather than from the terminal that is already open.
+ */
+function webDir(opts) {
+  const given = process.env.GC_WEB_DIR;
+  if (!given) {
+    fail(`GC_WEB_DIR is not set, and the UI is a different repository now.
+
+    Build it there, then point this at the result:
+
+      cd ../ghostclick-web && npm install && ${opts.auth ? `VITE_AUTH_URL=http://localhost:${opts.authPort} ` : ''}npm run build
+      cd -  &&  GC_WEB_DIR=../ghostclick-web/dist npm run app${opts.auth ? ' -- --auth' : ''}
+
+    Or run the runner with the API and no app:  npm run serve`);
+  }
+  const dir = resolve(given);
+  if (!existsSync(join(dir, 'index.html'))) {
+    fail(`GC_WEB_DIR names ${dir}, which has no index.html.\n\n    That is a source tree or an empty directory, not a build. The build is\n    the ghostclick-web repository's dist/, after \`npm run build\` there.`);
+  }
+  return dir;
+}
+
+/** What the browser would load from a build: index.html and the assets it names. */
+function uiBytes(dir) {
+  let text = readFileSync(join(dir, 'index.html'), 'utf8');
+  for (const m of text.matchAll(/(?:src|href)="([^"]+\.js)"/g)) {
+    // A path relative to the build root, which is how vite emits them; anything
+    // it cannot read simply contributes nothing, since this only ever adds
+    // evidence and never takes any away.
+    try { text += readFileSync(join(dir, m[1].replace(/^\/?(app\/)?/, '')), 'utf8'); } catch { /* not on disk */ }
+  }
+  return text;
 }
 
 // ---------------------------------------------------------------- the keypair
@@ -290,17 +364,11 @@ function accounts(py, env) {
   console.log('      GC_SIGNUP_MODE=open npm run app -- --auth      or sign up at /app/signup — the code is printed here\n');
 }
 
-function buildUi(env) {
-  if (!existsSync(join(ROOT, 'node_modules', 'vite'))) return step('ui', 'vite absent — cannot build the UI (npm install)');
-  // Absolute: this runs with cwd=web/, and a relative path would look for
-  // web/node_modules/vite, which is not where it is.
-  const args = [join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js'), 'build'];
-  if (env.VITE_AUTH_URL) args.push('--outDir', authBuildDir(ROOT), '--emptyOutDir');
-  const r = quiet('node', args, { cwd: join(ROOT, 'web'), env: { ...process.env, ...env } });
-  if (!r.ok) fail(`the UI build failed:\n${r.out.split('\n').slice(-12).join('\n')}`);
-  step('ui', env.VITE_AUTH_URL
-    ? `built to .ghostclick/web-auth — the committed build is untouched`
-    : 'built, no sign-in');
+/** Say which build is being served and whether it agrees with --auth. */
+function ui(dir, wanted) {
+  step('ui', dir);
+  const note = uiNote(uiBytes(dir), wanted);
+  step('', note.level === 'ok' ? note.text : `WARNING: it ${note.text}`);
 }
 
 function fail(message) {
@@ -317,6 +385,10 @@ const HELP = `
     npm run app -- --setup       do the first-run work and stop
     npm run app -- --headed      drive a real browser window you can watch
     npm run app -- --port 3100   somewhere else
+
+  The UI is the ghostclick-web repository. Build it there and name the build:
+
+    GC_WEB_DIR=../ghostclick-web/dist npm run app -- --auth
 `;
 
 // ---------------------------------------------------------------- main
@@ -326,6 +398,9 @@ async function main(argv) {
   if (opts.unknown.length) fail(`I do not know ${opts.unknown.join(' ')}.${HELP}`);
 
   console.log('\n  getting ready\n');
+  // First, because it is the one step this repository cannot do for you and
+  // the one whose absence would otherwise be discovered from a blank page.
+  const web = webDir(opts);
   nodeModules();
   browser();
 
@@ -357,7 +432,7 @@ async function main(argv) {
       step('', '.ghostclick/auth-secret is the old shared HMAC secret; nothing reads it now, delete it');
     }
   }
-  buildUi(env.build);
+  ui(web, env.uiBuild.VITE_AUTH_URL);
 
   if (opts.setupOnly) return void console.log('\n  setup done — `npm run app` to start it.\n');
 
@@ -395,7 +470,11 @@ async function main(argv) {
   // here: node is an executable, not a batch file, and on Windows it usually
   // lives under "Program Files" — a path a shell splits at the space.
   const app = spawn(process.execPath, [join(ROOT, 'scripts', 'start.js')], {
-    cwd: ROOT, stdio: 'inherit', shell: false, env: { ...process.env, ...env.runner },
+    // GC_WEB_DIR resolved: the child's cwd is the repository root, not the
+    // shell's, so `GC_WEB_DIR=../ghostclick-web/dist npm run app` from a
+    // subdirectory would otherwise resolve against a different directory than
+    // the one the person was looking at when they typed it.
+    cwd: ROOT, stdio: 'inherit', shell: false, env: { ...process.env, ...env.runner, GC_WEB_DIR: web },
   });
   children.push(app);
   app.on('exit', (code) => { stopAll(); process.exit(code ?? 0); });
