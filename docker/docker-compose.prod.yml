@@ -129,6 +129,25 @@ services:
       # control plane trusts the same list for CSRF when it hands the
       # extension a token — one line, two readers, so they cannot differ.
       GC_EXTENSION_ORIGINS: ${GC_EXTENSION_ORIGINS:-}
+      # Switches (docs/HARDENING.md): parts of the product turned off for
+      # everyone. The control plane reads the same line, so the two services
+      # cannot disagree about what is off.
+      GC_SWITCHES_OFF: ${GC_SWITCHES_OFF:-}
+      # Request limits. The edge REPLACES X-Forwarded-For, so its one entry is
+      # the client's address and the limits are keyed on it; the rates default
+      # to the numbers in limits.js unless named.
+      GC_TRUSTED_PROXY_COUNT: 1
+      GC_API_RATE: ${GC_API_RATE:-}
+      GC_AUTH_FAIL_RATE: ${GC_AUTH_FAIL_RATE:-}
+      GC_TICKET_RATE: ${GC_TICKET_RATE:-}
+      GC_WS_CONNECT_RATE: ${GC_WS_CONNECT_RATE:-}
+      GC_WS_MESSAGE_RATE: ${GC_WS_MESSAGE_RATE:-}
+      # The log (trace.js). JSON lines, because json-file below is what reads
+      # them; requests are logged when their traceparent is sampled unless
+      # GC_REQUEST_LOG says all or off.
+      GC_LOG_LEVEL: ${GC_LOG_LEVEL:-info}
+      GC_LOG_FORMAT: json
+      GC_REQUEST_LOG: ${GC_REQUEST_LOG:-sampled}
     volumes:
       # Run history, the ORIGIN ALLOWLIST, the vault — one directory per
       # organisation, .ghostclick/<org>/. Without this every deploy forgets
@@ -226,6 +245,24 @@ services:
       # extension asks for a token with the person's session (docs/AUTH.md
       # §11). The same line the runner reads for CORS.
       GC_EXTENSION_ORIGINS: ${GC_EXTENSION_ORIGINS:-}
+      # Switches (docs/HARDENING.md): the same line the runner reads, so the
+      # two services cannot disagree about what is off. The admin's Switch
+      # rows add to it at runtime; nothing turns back on what this names.
+      GC_SWITCHES_OFF: ${GC_SWITCHES_OFF:-}
+      # Request limits, counted in Redis beside allauth's sign-in limits.
+      # Empty is the default in auth/config/settings.py; a value that does not
+      # read as a rate stops the container at startup.
+      GC_REQUEST_RATE: ${GC_REQUEST_RATE:-}
+      GC_CSRF_RATE: ${GC_CSRF_RATE:-}
+      GC_MINT_RATE: ${GC_MINT_RATE:-}
+      GC_ACCEPT_RATE: ${GC_ACCEPT_RATE:-}
+      GC_INVITE_RATE: ${GC_INVITE_RATE:-}
+      GC_PASSKEY_LOGIN_RATE: ${GC_PASSKEY_LOGIN_RATE:-}
+      # The log: JSON lines, each with its request id and trace, and a request
+      # line when the traceparent is sampled unless GC_REQUEST_LOG says all or off.
+      GC_LOG_LEVEL: ${GC_LOG_LEVEL:-info}
+      GC_LOG_FORMAT: json
+      GC_REQUEST_LOG: ${GC_REQUEST_LOG:-sampled}
     volumes:
       - control-static:/app/staticfiles
     expose: ["8000"]

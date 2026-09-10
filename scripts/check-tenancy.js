@@ -229,6 +229,9 @@ const child = spawn(process.execPath, [join(ROOT, 'server.js')], {
     // A laptop with a login: the bundled pages on this port are what there is
     // to drive, so the private-address block is off and the fixtures are on.
     GC_DEMO: '1', GC_BLOCK_PRIVATE: '0', GC_RUNNER_IDLE_MS: String(IDLE_MS),
+    // Several organisations' worth of calls from one address, fast: the limits
+    // (limits.js) are checked in check-hardening.js, and set out of the way here.
+    GC_API_RATE: '100000/m', GC_AUTH_FAIL_RATE: '100000/m', GC_TICKET_RATE: '100000/m', GC_WS_CONNECT_RATE: '100000/m',
   },
 });
 let out = '';

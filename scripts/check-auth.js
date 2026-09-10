@@ -499,6 +499,10 @@ const child = spawn(process.execPath, [join(ROOT, 'server.js')], {
     ...process.env, PORT: String(PORT), HOME_URL: '',
     GC_AUTH_PUBLIC_KEYS: JSON.stringify({ [KID]: PUBLIC_PEM }), GC_WEB_ORIGIN: ORIGIN,
     GC_EXTENSION_ORIGINS: EXTENSION,
+    // This suite presents deliberately bad tokens and tickets by the dozen from
+    // one address. The brute-force budget (limits.js) has its own check in
+    // check-hardening.js, so here the limits are set out of the way.
+    GC_AUTH_FAIL_RATE: '100000/m', GC_API_RATE: '100000/m', GC_TICKET_RATE: '100000/m', GC_WS_CONNECT_RATE: '100000/m',
   },
 });
 let out = '';

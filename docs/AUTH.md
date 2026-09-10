@@ -401,7 +401,7 @@ Minting — `POST /auth/executor-token` (session + CSRF; the body is ignored):
   "amr": ["password", "otp"], "auth_time": 1789000000,
   "su": 1789000600,
   "ent": {"suites.max": 25, "runs.per_day": 500, "origins.max": 20, "vault.enabled": true, "history.retention_days": 90},
-  "ent_v": 7, "sid": "h(session_key)",
+  "ent_v": 7, "off": ["runner.recording"], "sid": "h(session_key)",
   "iat": 1789000300, "exp": 1789000900, "jti": "c1f0…" }
 ```
 
@@ -493,6 +493,8 @@ reauthenticates (strong factor if the account has one), re-mints, retries.
   subset rides in the token.
 - `/auth/me` returns `{user:{id,email,name}, org:{slug,name,role}, orgs:[…],
   entitlements, mfa:{required, enrolled, reasons}, mustChangePassword, flags}`.
+  `flags` is every switch (docs/HARDENING.md) and whether it is on; the token's
+  `off` claim carries the `runner.*` switches that are off.
   There is no `isStaff` `[authz-tenancy-6]`. Staff is a control-plane-only fact
   that opens `/admin/` — and it is not in `reasons` either: a reason list that
   can only hold three other words identifies a staff account by ELIMINATION,

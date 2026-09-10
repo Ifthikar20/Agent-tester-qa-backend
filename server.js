@@ -14,10 +14,14 @@ import { bearer, verify } from './auth.js';
 import { AUTH_ON, DEMO, PUBLIC_KEYS, KEY_ERROR, WEB_ORIGIN, EXTENSION_ORIGINS, EXTENSION_ERROR, TURNSTILE, csp } from './mode.js';
 import * as tickets from './tickets.js';
 import * as tenancy from './tenancy.js';
+import { SWITCH_ERROR, SwitchedOff, switchesFor } from './switches.js';
+import { LIMITS, LIMIT_ERROR, Limiter, clientIp } from './limits.js';
+import { LOG_ERROR, logger, requestContext, requestIds, wanted } from './trace.js';
 import { LOCAL } from './org.js';
 import { blocked } from './reach.js';
 import { NoSuchSuite, originOf, pageCheckFlow } from './suites.js';
 import { discover, links } from './targets.js';
+import { targetRefresher, watchDom } from './domwatch.js';
 import { parse } from './parse.js';
 import { parseFlow, flatten, toFlow } from './flow.js';
 import { LANGUAGE_VERSION } from './vocabulary.js';
@@ -86,11 +90,19 @@ if (EXTENSION_ERROR) {
   console.error(`\n  ${EXTENSION_ERROR}\n`);
   process.exit(1);
 }
+if (SWITCH_ERROR || LIMIT_ERROR || LOG_ERROR) {
+  // A switch, a limit or a log setting that cannot be read is refused here,
+  // naming the variable, and never guessed at: a typo in GC_SWITCHES_OFF
+  // would leave on exactly what it was written to turn off, and a rate that
+  // reads as nothing would be no limit at all (docs/HARDENING.md).
+  console.error(`\n  ${[SWITCH_ERROR, LIMIT_ERROR, LOG_ERROR].filter(Boolean).join('\n  ')}\n`);
+  process.exit(1);
+}
 /**
  * Whether the driven page may reach private addresses (reach.js). On
  * whenever auth is on, because that is the deployed shape; GC_BLOCK_PRIVATE
- * overrides either way, and `npm run app -- --auth` turns it off with GC_DEMO
- * on so a laptop with a login can still drive the bundled apps on localhost.
+ * overrides either way, and `npm run app -- --auth` turns it off so a laptop
+ * with a login can still drive the apps being built on localhost.
  */
 const BLOCK_PRIVATE = process.env.GC_BLOCK_PRIVATE != null
   ? /^(1|true|yes|on)$/i.test(process.env.GC_BLOCK_PRIVATE)
@@ -107,11 +119,15 @@ const migrated = tenancy.migrate();
 /** The laptop's one organisation. With auth on nothing signs in as it. */
 const local = tenancy.workspace(LOCAL);
 
-/** Where the runner points when it starts — the rule itself is in home.js. */
+/**
+ * Where the runner points when it starts — the rule itself is in home.js.
+ * Never its own origin, which is where the bundled demo site is served.
+ */
 const homeUrl = () => chooseHome({
   envUrl: process.env.HOME_URL,
   runs: local.history.list(),
   isAllowed: (origin) => local.origins.has(origin),
+  exclude: [`http://localhost:${process.env.PORT || 3000}`, `http://127.0.0.1:${process.env.PORT || 3000}`],
 });
 
 /**
@@ -192,6 +208,16 @@ const driver = new tenancy.Driver({
 if (!AUTH_ON) driver.claim(LOCAL);
 
 const app = express();
+// Express announces itself on every response by default: a version banner for
+// anyone mapping what to try, and nothing that reads it.
+app.disable('x-powered-by');
+
+/**
+ * Ids first (trace.js), so every response from here on carries X-Request-Id —
+ * the refusals the limits and the gate make included — and a request its
+ * caller asked to have traced is logged when it finishes.
+ */
+app.use(requestContext(clientIp));
 
 /**
  * The headers every response carries (docs/AUTH.md §11 [browser-side-3]
@@ -206,6 +232,13 @@ const app = express();
  * deployed, both sit behind one origin and 'self' already says it. The
  * Turnstile host joins script-src and frame-src only when the control
  * plane will ask for the widget (mode.js).
+ *
+ * The rest close doors nothing here uses (docs/HARDENING.md): no other site
+ * keeps a handle on this window (COOP) or embeds its responses (CORP), the
+ * origin gets an agent cluster of its own, cross-domain policy files are
+ * refused, and hosts named in a page are not resolved before anyone asks.
+ * Permissions-Policy names the powerful features nothing here needs — and
+ * never publickey-credentials, which a passkey sign-in on this origin does.
  */
 const CSP = csp();
 /**
@@ -220,7 +253,12 @@ app.use((_req, res, next) => {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
+  res.setHeader('Origin-Agent-Cluster', '?1');
+  res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+  res.setHeader('X-DNS-Prefetch-Control', 'off');
   next();
 });
 
@@ -261,7 +299,8 @@ if (DEMO) {
     if (path.endsWith('.html')) res.setHeader('Content-Security-Policy', FIXTURE_CSP);
   } }));
 }
-app.use(express.json({ limit: '512kb' }));
+// JSON bodies are parsed under /api only, and only past the limits and the
+// gate: the parser is registered beside the gate, not here.
 
 /**
  * The UI, which is a DIRECTORY this server is pointed at — not a path it owns.
@@ -348,6 +387,9 @@ const fail = (res, err, code = 400) => {
   }
   if (err instanceof tenancy.RunnerBusy) return res.status(409).json({ ok: false, error: 'runner_busy', org: err.org });
   if (err instanceof tenancy.Forbidden) return res.status(403).json({ ok: false, error: 'forbidden', needs: 'admin' });
+  // The operator turned this off for the whole deployment (switches.js). A
+  // 403, because no plan and no role would change the answer.
+  if (err instanceof SwitchedOff) return res.status(403).json({ ok: false, error: 'switched_off', switch: err.key, message: err.message });
   // A suite this organisation does not have is a 404 from every route that can
   // reach one — the nested ones used to answer 400, which contradicts §10 for
   // no gain, since the body is the same either way.
@@ -355,6 +397,10 @@ const fail = (res, err, code = 400) => {
   return res.status(code).json({ ok: false, error: err.message ?? String(err) });
 };
 const sendOk = (res, body) => res.json({ ok: true, ...body });
+
+/** A 429, with the wait in the header a client is meant to read and in the body for one that reads JSON. */
+const tooMany = (res, seconds) => res.set('Retry-After', String(seconds)).status(429)
+  .json({ ok: false, error: 'rate_limited', retryAfter: seconds });
 
 app.use('/api', (req, res, next) => {
   // The app's origin, or one of the operator's extension origins (mode.js):
@@ -367,18 +413,41 @@ app.use('/api', (req, res, next) => {
   } else if (!AUTH_ON) {
     res.set('Access-Control-Allow-Origin', '*');
   }
-  res.set('Access-Control-Allow-Headers', 'content-type, authorization');
+  // The UI sends a request id and a trace context with every call (trace.js)
+  // and reads back the id and any Retry-After. Cross-origin, a browser hides
+  // every header that is not named here, in both directions.
+  res.set('Access-Control-Allow-Headers', 'content-type, authorization, x-request-id, traceparent');
   res.set('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+  res.set('Access-Control-Expose-Headers', 'X-Request-Id, Retry-After');
   // A preflight carries no Authorization header by definition, so it must be
   // answered before the gate. Requiring auth here would make every
   // cross-origin call fail at the preflight, which reads as a CORS bug.
   if (req.method === 'OPTIONS') return res.sendStatus(204);
+
+  // The limits (limits.js), before anything that costs anything. An address
+  // that has spent its failed-authentication budget is refused everything
+  // until its window ends — a valid token included: the budget is about the
+  // address, and a guessing loop that has found a token is done guessing.
+  // Then every address has a ceiling.
+  const ip = clientIp(req);
+  const shutOut = LIMITS.authFail.blocked(ip);
+  if (shutOut) return tooMany(res, shutOut);
+  const hit = LIMITS.api.hit(ip);
+  if (hit.over) {
+    if (hit.first) logger.warn('rate limited', { limit: 'GC_API_RATE', ip, rid: req.ids.rid });
+    return tooMany(res, hit.retryAfter);
+  }
+  // An answer here is one organisation's, at one moment, and nothing between
+  // this process and the browser should keep a copy. A route that wants
+  // caching — a site icon — says so for itself.
+  res.set('Cache-Control', 'no-store');
 
   if (!AUTH_ON) {
     // The laptop: one organisation, no plan, nobody to refuse.
     req.user = null;
     req.space = local;
     req.ent = tenancy.entitlements(null);
+    req.switches = switchesFor(null);
     return next();
   }
 
@@ -409,11 +478,35 @@ app.use('/api', (req, res, next) => {
     // determine anyway, and it is the difference between the UI silently
     // re-authenticating and a person staring at a spinner.
     const error = err instanceof tenancy.StaleEntitlements ? 'stale_entitlements' : err.message;
+    // A token that does not verify counts against the address. A stale one
+    // does not — it was genuine a moment ago, and the UI mints a fresh one at
+    // once — and neither does no token at all, which is what a control plane
+    // that is down looks like: shutting its users out for five minutes after
+    // it recovers would help nobody.
+    if (!(err instanceof tenancy.StaleEntitlements)) {
+      const failed = LIMITS.authFail.hit(ip);
+      if (failed.first) logger.warn('failed authentication past the limit; refusing the address', { limit: 'GC_AUTH_FAIL_RATE', ip, rid: req.ids.rid });
+    }
     return res.status(401).json({ ok: false, error });
   }
   req.space = tenancy.workspace(req.user.org);
   req.ent = tenancy.entitlements(req.user);
+  req.switches = switchesFor(req.user);
   next();
+});
+
+/**
+ * Bodies are read only now, past the limits and the gate: an address that is
+ * refused, or has no token, cannot make this process parse half a megabyte of
+ * JSON first. A body too big, or not JSON, is answered in the API's own shape
+ * — left to Express it was an HTML page, which the UI printed as
+ * "Unexpected token <".
+ */
+app.use('/api', express.json({ limit: '512kb' }));
+app.use('/api', (err, _req, res, next) => {
+  if (err?.type === 'entity.too.large') return res.status(413).json({ ok: false, error: 'the request body is larger than 512kb' });
+  if (err?.type === 'entity.parse.failed') return res.status(400).json({ ok: false, error: 'the request body is not valid JSON' });
+  return next(err);
 });
 
 /**
@@ -424,9 +517,33 @@ app.use('/api', (req, res, next) => {
  */
 app.post('/api/socket-ticket', (req, res) => {
   if (!AUTH_ON) return res.status(404).json({ ok: false, error: 'auth is off; the socket needs no ticket' });
+  // Per address as well as per subject: five outstanding per subject stops
+  // one token minting tickets forever, and this stops one address trying many.
+  const hit = LIMITS.tickets.hit(clientIp(req));
+  if (hit.over) return tooMany(res, hit.retryAfter);
   try { res.json({ ok: true, ...tickets.issue(req.user) }); }
   catch (err) { fail(res, err, err.name === 'TooManyTickets' ? 429 : 500); }
 });
+
+/**
+ * The operator's switches (switches.js), in front of the routes they guard.
+ * One table rather than a line in each route, so the route added last cannot
+ * be the one that forgot. After the gate and before the plan: a switch is
+ * about the deployment, not the customer. The socket's messages have a table
+ * of their own, beside the connection handler.
+ */
+const switched = (...keys) => (req, res, next) => {
+  try {
+    for (const key of keys) req.switches.demand(key);
+    next();
+  } catch (err) { fail(res, err); }
+};
+app.post('/api/recording', switched('runner.recording'));
+app.post('/api/suites/:id/run', switched('runner.runs'));
+app.post('/api/suites/quickstart', switched('runner.onboarding', 'runner.runs'));
+app.post(['/api/suites', '/api/suites/:id/pages', '/api/suites/:id/pages/:pageId/scan'], switched('runner.onboarding'));
+app.post('/api/origins', switched('runner.origins'));
+app.delete('/api/origins', switched('runner.origins'));
 
 /**
  * Step-up: is this token fresh enough for the one action that demands it?
@@ -677,6 +794,9 @@ app.get('/api/state', (req, res) => {
     plan: req.ent.plan,
     driving: driver.describe(req.space.org),
     usage: usage(req),
+    // What the operator has turned off for everyone (switches.js), so a page
+    // can say so before a button is pressed rather than after.
+    switches: req.switches.runner(),
   });
 });
 
@@ -1017,6 +1137,10 @@ app.get('/vendor/mermaid.min.js', (_req, res) =>
 // EADDRINUSE, several frames deep, for a problem with a one-line fix — and it
 // still launched a browser on the way down.
 const http = app.listen(PORT);
+// Twenty seconds for a client to finish sending its headers. Node allows a
+// minute, and a connection that dribbles a header a byte at a time holds a
+// socket for every second of it (docs/HARDENING.md).
+http.headersTimeout = 20_000;
 await new Promise((resolve) => {
   http.once('listening', resolve);
   http.once('error', (err) => {
@@ -1067,21 +1191,40 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 1 << 20 });
 wss.on('error', (err) => console.error(`  websocket server: ${err.message}`));
 
 http.on('upgrade', (req, socket, head) => {
+  const ids = requestIds(req.headers);
+  const ip = clientIp(req);
   // A real HTTP response, not a bare destroy: a socket that closes with no
   // status looks like a crashed server, and the UI would sit reconnecting
   // on its timer forever without ever saying why.
-  const refuse = (code, text, why) => {
-    socket.write(`HTTP/1.1 ${code} ${text}\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: ${Buffer.byteLength(why)}\r\n\r\n${why}`);
+  const refuse = (code, text, why, retryAfter = 0) => {
+    const wait = retryAfter ? `Retry-After: ${retryAfter}\r\n` : '';
+    socket.write(`HTTP/1.1 ${code} ${text}\r\nConnection: close\r\nX-Request-Id: ${ids.rid}\r\n${wait}Content-Type: text/plain\r\nContent-Length: ${Buffer.byteLength(why)}\r\n\r\n${why}`);
     socket.destroy();
+    logger.debug('socket refused', { rid: ids.rid, ip, status: code, why });
+  };
+  // The limits (limits.js), before a ticket is so much as looked at: an
+  // address shut out for failed authentication on the API is shut out here
+  // too, and every address has a ceiling on upgrades.
+  const shutOut = LIMITS.authFail.blocked(ip);
+  if (shutOut) return refuse(429, 'Too Many Requests', 'too many failed attempts from this address', shutOut);
+  const hit = LIMITS.connect.hit(ip);
+  if (hit.over) {
+    if (hit.first) logger.warn('rate limited', { limit: 'GC_WS_CONNECT_RATE', ip, rid: ids.rid });
+    return refuse(429, 'Too Many Requests', 'too many connections from this address', hit.retryAfter);
+  }
+  /** A refusal that is also a failed authentication, and counts against the address. */
+  const unauthorized = (code, text, why) => {
+    if (LIMITS.authFail.hit(ip).first) logger.warn('failed authentication past the limit; refusing the address', { limit: 'GC_AUTH_FAIL_RATE', ip, rid: ids.rid });
+    return refuse(code, text, why);
   };
   let claims = null;
   if (AUTH_ON) {
     let params;
     try { params = new URL(req.url, 'http://localhost').searchParams; } catch { return refuse(400, 'Bad Request', 'unreadable url'); }
-    if (params.has('t')) return refuse(401, 'Unauthorized', 'a token in a URL is refused; POST /api/socket-ticket and open the socket with ?ticket=');
-    if (req.headers.origin !== WEB_ORIGIN) return refuse(403, 'Forbidden', 'the socket is open to the app origin only');
+    if (params.has('t')) return unauthorized(401, 'Unauthorized', 'a token in a URL is refused; POST /api/socket-ticket and open the socket with ?ticket=');
+    if (req.headers.origin !== WEB_ORIGIN) return unauthorized(403, 'Forbidden', 'the socket is open to the app origin only');
     claims = tickets.redeem(params.get('ticket'));
-    if (!claims) return refuse(401, 'Unauthorized', 'no ticket, or a ticket already spent or expired');
+    if (!claims) return unauthorized(401, 'Unauthorized', 'no ticket, or a ticket already spent or expired');
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
     // Bound at the upgrade and read by every message handler. `null` is auth
@@ -1224,11 +1367,19 @@ function redact(text) {
   }
   return out;
 }
-const LEVELS = { warning: 'warn', error: 'error', assert: 'error', trace: 'debug' };
-const fromPage = (level, text) => emit({
+const LEVELS = { warning: 'warn', error: 'error', assert: 'error', trace: 'debug', verbose: 'debug' };
+/**
+ * `where` is the script and line a message came from, as DevTools shows beside
+ * it — for a failed resource load, the resource. Redacted like the text: a URL
+ * carries a token in its query string as readily as a log line does.
+ */
+const fromPage = (level, text, { source = 'console', where } = {}) => emit({
   t: 'console',
   level: LEVELS[level] ?? (['log', 'info', 'debug'].includes(level) ? level : 'log'),
   text: redact(text).slice(0, LINE_MAX),
+  source,
+  url: where?.url ? redact(where.url).slice(0, LINE_MAX) : null,
+  line: where?.url && Number.isInteger(where.lineNumber) ? where.lineNumber + 1 : null,
   at: Date.now(),
 });
 
@@ -1353,10 +1504,14 @@ async function newSession() {
    * no longer exists, detoured via a tracker, or arrived at a friendly 404. The
    * final URL says none of that, so the chain is kept and shown.
    */
-  page.on('console', (msg) => fromPage(msg.type(), msg.text()));
+  // Everything DevTools' console would show for the page: console.* at every
+  // level, and what the browser itself logs about it — a failed resource load,
+  // a blocked request, a deprecation — which Playwright reports as console
+  // messages too. So no Log.enable here: it would print each of those twice.
+  page.on('console', (msg) => fromPage(msg.type(), msg.text(), { where: msg.location() }));
   // An uncaught exception never reaches console.*, and it is the one you most
   // want: it is usually why the next step could not find anything.
-  page.on('pageerror', (err) => fromPage('error', err?.stack || String(err)));
+  page.on('pageerror', (err) => fromPage('error', err?.stack || String(err), { source: 'exception' }));
 
   nav = new NavigationLog(page, {
     onNavigation: (n) => {
@@ -1385,6 +1540,15 @@ async function newSession() {
     onError: (msg) => emit({ t: 'log', level: 'error', msg }),
   });
   await recorder.attach();
+
+  // An accordion, a menu or a dialog opening changes what can be clicked
+  // without navigating, so the page reports it and the target panel reads
+  // again (domwatch.js). Never during a run; a run publishes when it ends.
+  await watchDom(page, targetRefresher({
+    read: async () => ({ url: currentUrl(), items: await discover(page) }),
+    publish: ({ url, items }) => emit({ t: 'targets', url, items }),
+    busy: () => running,
+  }));
 
   // An SPA route change is an assertion worth keeping, and it means the target
   // panel is stale.
@@ -1571,6 +1735,7 @@ function refusal(err) {
   if (err instanceof tenancy.EntitlementError) return { error: 'entitlement', limit: err.limit, plan: err.plan };
   if (err instanceof tenancy.RunnerBusy) return { error: 'runner_busy', org: err.org };
   if (err instanceof tenancy.Forbidden) return { error: 'forbidden', needs: 'admin' };
+  if (err instanceof SwitchedOff) return { error: 'switched_off', switch: err.key };
   return { error: err.message };
 }
 
@@ -1578,11 +1743,28 @@ function refusal(err) {
 /** Live sockets per subject. A fourth closes the oldest [websocket-5]. */
 const MAX_SOCKETS_PER_SUB = 3;
 
+/**
+ * The switch each message needs (switches.js): the socket's half of the table
+ * the HTTP routes have. A pointer moving over the page counts as driving it.
+ */
+const SWITCHED = {
+  command: 'runner.runs',
+  open: 'runner.driving',
+  'origin.add': 'runner.origins',
+  'origin.remove': 'runner.origins',
+  'record.start': 'runner.recording',
+};
+const switchFor = (t) => SWITCHED[t] ?? (/^human\./.test(String(t)) ? 'runner.driving' : null);
+
 wss.on('connection', (ws) => {
   const claims = ws.claims ?? null;
   const org = ws.org;
   const space = tenancy.workspace(org);
   const ent = tenancy.entitlements(claims);
+  const switches = switchesFor(claims);
+  // Every socket has a budget of its own (limits.js): one viewer flooding
+  // messages spends that viewer's, not the browser everyone shares.
+  const budget = LIMITS.messages ? new Limiter(LIMITS.messages, 'GC_WS_MESSAGE_RATE', { shared: false }) : null;
   // Only to this viewer — a refusal is theirs, not the room's.
   const tell = (ev) => { if (ws.readyState === 1) ws.send(JSON.stringify(ev)); };
   /** Say no, in the shape the UI acts on, and in words for the log. */
@@ -1623,9 +1805,29 @@ wss.on('connection', (ws) => {
   // is open, which on a real site is long enough to click a button in. The
   // symptom was Run script doing nothing at all, with no error anywhere.
   ws.on('message', async (raw) => {
+    // Past its budget a message is dropped unread, and the viewer is told once
+    // a window rather than once a message, which would only double the traffic.
+    const spent = budget?.hit('socket');
+    if (spent?.over) {
+      if (spent.first) {
+        tell({ t: 'refused', of: 'message', error: 'rate_limited', retryAfter: spent.retryAfter });
+        tell({ t: 'log', level: 'error', msg: `too many messages from this connection — the rest are dropped for ${spent.retryAfter}s` });
+        logger.warn('rate limited', { limit: 'GC_WS_MESSAGE_RATE', org, sub: claims?.sub });
+      }
+      return;
+    }
     let m;
     try { m = JSON.parse(raw); } catch { return; }
     if (!m || typeof m !== 'object') return;
+
+    // The operator's switches, before anything acts on the message. A pointer
+    // moving over a switched-off console is dropped without a sentence per
+    // frame; the deliberate acts are refused out loud, naming the switch.
+    const needs = switchFor(m.t);
+    if (needs && !switches.on(needs)) {
+      if (/^human\./.test(String(m.t))) return;
+      return refuse(m.t, new SwitchedOff(needs));
+    }
 
     /**
      * Every message is authorised against the claims bound at the upgrade,
@@ -1760,7 +1962,23 @@ wss.on('connection', (ws) => {
     // to expect anything — this is how it gets the current one. Only ever the
     // driving organisation's picture, to the driving organisation.
     if (m.t === 'frame.request') {
-      if (driver.sees(org) && lastFrame && ws.readyState === 1) ws.send(lastFrame, { binary: true });
+      if (!driver.sees(org) || ws.readyState !== 1) return;
+      if (lastFrame) return void ws.send(lastFrame, { binary: true });
+      // A page is open and no frame ever came of it: it finished loading
+      // between two acks, or before anyone was watching, and has not changed
+      // since. Take one, rather than leave the canvas saying it is loading
+      // something that will never arrive on its own. At most one capture per
+      // socket a second — the console asks once a second while it waits.
+      if (currentUrl() && !(ws.grabbedAt > Date.now() - 1000)) {
+        ws.grabbedAt = Date.now();
+        cdp.send('Page.captureScreenshot', { format: 'jpeg', quality: 62 })
+          .then(({ data }) => {
+            if (!currentUrl()) return;
+            lastFrame ??= Buffer.from(data, 'base64');
+            if (ws.readyState === 1 && driver.sees(org)) ws.send(lastFrame, { binary: true });
+          })
+          .catch(() => { /* mid-navigation; the next request tries again */ });
+      }
       return;
     }
 
@@ -1842,6 +2060,9 @@ wss.on('connection', (ws) => {
     origins: space.origins.list(),
     org,
     driving: driver.describe(org),
+    // What the operator has switched off (switches.js), so the console can
+    // grey out Record and Run before anyone presses them.
+    switches: switches.runner(),
   }));
   if (mine) publishTargets();
 });
