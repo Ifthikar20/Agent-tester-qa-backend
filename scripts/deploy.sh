@@ -219,7 +219,7 @@ envgrep -qE '^PUBLIC_URL=https?://.+' || {
 
 # ---- the UI, which is built in the other repository -------------------------
 #
-# GC_WEB_DIR names a directory on THIS host holding ghostclick-web's dist/,
+# GC_WEB_DIR names a directory on THIS host holding poc-qa-stack's dist/,
 # bind-mounted into the runner. Compose's own \`:?\` would catch it missing, but
 # it cannot look inside, and the two ways this goes wrong both survive compose:
 # a path that does not exist (docker helpfully creates an empty directory and
@@ -232,11 +232,11 @@ envgrep -qE '^PUBLIC_URL=https?://.+' || {
 unquote() { local v="\$1"; v=\${v%\\"}; v=\${v#\\"}; v=\${v%\\'}; v=\${v#\\'}; printf '%s' "\$v"; }
 WEB_DIR=\$(unquote "\$(envgrep -m1 '^GC_WEB_DIR=' | cut -d= -f2-)")
 [ -n "\$WEB_DIR" ] || {
-  echo "  .env.prod has no GC_WEB_DIR. The UI is the ghostclick-web repository now:"
+  echo "  .env.prod has no GC_WEB_DIR. The UI is the poc-qa-stack repository now:"
   echo "  build it there and point this at the result."
   echo ""
-  echo "      cd ghostclick-web && VITE_AUTH_URL=<PUBLIC_URL> npm run build"
-  echo "      GC_WEB_DIR=/srv/ghostclick-web/dist   in .env.prod"
+  echo "      cd poc-qa-stack && VITE_AUTH_URL=<PUBLIC_URL> npm run build"
+  echo "      GC_WEB_DIR=/srv/poc-qa-stack/dist   in .env.prod"
   exit 1; }
 [ -f "\$WEB_DIR/index.html" ] || {
   echo "  GC_WEB_DIR is \$WEB_DIR, which has no index.html."
@@ -258,7 +258,7 @@ if ! grep -rqF "\$PUB" "\$WEB_DIR" 2>/dev/null; then
   echo "  It was built without VITE_AUTH_URL, or against another host, so it will"
   echo "  offer no way to sign in to this deployment. Rebuild it:"
   echo ""
-  echo "      cd ghostclick-web && VITE_AUTH_URL=\$PUB npm run build"
+  echo "      cd poc-qa-stack && VITE_AUTH_URL=\$PUB npm run build"
   exit 1
 fi
 echo "  ui            \$WEB_DIR, built for \$PUB"

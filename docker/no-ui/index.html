@@ -29,24 +29,24 @@
   <h1>The runner is up. The UI is not here.</h1>
   <p class="lede">
     ghostclick is two repositories. This one holds the runner and the control
-    plane; the app you are looking for is built in <code>ghostclick-web</code>
+    plane; the app you are looking for is built in <code>poc-qa-stack</code>
     and handed to this server as a directory.
   </p>
 
   <h2>Mount it</h2>
   <p>The usual answer, and what the production compose file does. Build the UI
     in its own repository, then bind-mount the result over <code>/app/ui</code>:</p>
-<pre><code>cd ghostclick-web
+<pre><code>cd poc-qa-stack
 VITE_AUTH_URL=https://your.host npm run build
 
 # .env.prod
-GC_WEB_DIR=/srv/ghostclick-web/dist</code></pre>
+GC_WEB_DIR=/srv/poc-qa-stack/dist</code></pre>
   <p>The address in <code>VITE_AUTH_URL</code> is baked into the bundle at build
     time, so a UI built without it shows no sign-in at all, whatever this
     runner is configured to require.</p>
 
   <h2>Or bake it into the image</h2>
-<pre><code>cp -r ../ghostclick-web/dist ./web-dist
+<pre><code>cp -r ../poc-qa-stack/dist ./web-dist
 docker build --build-arg GC_WEB_SRC=web-dist -t ghostclick-runner .</code></pre>
 
   <h2>Or point the server somewhere else entirely</h2>

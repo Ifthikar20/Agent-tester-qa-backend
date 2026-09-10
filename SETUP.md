@@ -5,20 +5,20 @@ Fifteen minutes, most of it waiting for a browser to download.
 ## 1 · Run the server
 
 ghostclick is two repositories. This one is the runner and the Django control
-plane; the app is `ghostclick-web`, and this one is *pointed at* its build
+plane; the app is `poc-qa-stack`, and this one is *pointed at* its build
 (docs/BOUNDARY.md). So there are two clones and one build before the one
 command:
 
 ```bash
 git clone <ghostclick>     ghostclick
-git clone <ghostclick-web> ghostclick-web
+git clone <poc-qa-stack> poc-qa-stack
 
 # the UI, built knowing where it will sign in
-cd ghostclick-web && npm install && VITE_AUTH_URL=http://localhost:8000 npm run build
+cd poc-qa-stack && npm install && VITE_AUTH_URL=http://localhost:8000 npm run build
 
 # the application
 cd ../ghostclick
-GC_WEB_DIR=../ghostclick-web/dist bash run.sh      # → http://localhost:3000
+GC_WEB_DIR=../poc-qa-stack/dist bash run.sh      # → http://localhost:3000
 ```
 
 `run.sh` installs what is missing, downloads the browser if it has to, migrates
@@ -64,14 +64,14 @@ The longer way still works, and is what `npm run app` does for you:
 ```bash
 npm install
 npx playwright install chromium
-GC_WEB_DIR=../ghostclick-web/dist npm start
+GC_WEB_DIR=../poc-qa-stack/dist npm start
 ```
 
 It prints what it starts with:
 
 ```
   ghostclick  ->  http://localhost:3000
-  serving     ->  /path/to/ghostclick-web/dist  (GC_WEB_DIR)
+  serving     ->  /path/to/poc-qa-stack/dist  (GC_WEB_DIR)
   allowed     ->  http://localhost:3000
   secrets     ->  QA_PASS, QA_USER
   driving     ->  nothing yet — open a URL in the console
@@ -110,7 +110,7 @@ Open `http://localhost:3000`. It lands on **Test suites**.
 then serves it:
 
 ```
-  ui          ->  /path/to/ghostclick-web/dist  (built 2026-09-06 16:43)
+  ui          ->  /path/to/poc-qa-stack/dist  (built 2026-09-06 16:43)
   version     ->  0b8c46a, ui built 2026-09-06 16:43
 ```
 
@@ -118,7 +118,7 @@ Two numbers now, because there are two repositories: the commit is this one,
 the build time is the other one's. Both are at the bottom of the sidebar. If
 either is not what you expect you are looking at an old half — worth checking
 before chasing a bug you have already fixed. Nothing here rebuilds the UI, so
-after changing it, rebuild in `ghostclick-web` and reload: the runner reads the
+after changing it, rebuild in `poc-qa-stack` and reload: the runner reads the
 directory per request and needs no restart.
 
 **Scrolling the page you are driving:** point at the canvas and use your wheel

@@ -228,14 +228,14 @@ function webDir(opts) {
 
     Build it there, then point this at the result:
 
-      cd ../ghostclick-web && npm install && ${opts.auth ? `VITE_AUTH_URL=http://localhost:${opts.authPort} ` : ''}npm run build
-      cd -  &&  GC_WEB_DIR=../ghostclick-web/dist npm run app${opts.auth ? ' -- --auth' : ''}
+      cd ../poc-qa-stack && npm install && ${opts.auth ? `VITE_AUTH_URL=http://localhost:${opts.authPort} ` : ''}npm run build
+      cd -  &&  GC_WEB_DIR=../poc-qa-stack/dist npm run app${opts.auth ? ' -- --auth' : ''}
 
     Or run the runner with the API and no app:  npm run serve`);
   }
   const dir = resolve(given);
   if (!existsSync(join(dir, 'index.html'))) {
-    fail(`GC_WEB_DIR names ${dir}, which has no index.html.\n\n    That is a source tree or an empty directory, not a build. The build is\n    the ghostclick-web repository's dist/, after \`npm run build\` there.`);
+    fail(`GC_WEB_DIR names ${dir}, which has no index.html.\n\n    That is a source tree or an empty directory, not a build. The build is\n    the poc-qa-stack repository's dist/, after \`npm run build\` there.`);
   }
   return dir;
 }
@@ -386,9 +386,9 @@ const HELP = `
     npm run app -- --headed      drive a real browser window you can watch
     npm run app -- --port 3100   somewhere else
 
-  The UI is the ghostclick-web repository. Build it there and name the build:
+  The UI is the poc-qa-stack repository. Build it there and name the build:
 
-    GC_WEB_DIR=../ghostclick-web/dist npm run app -- --auth
+    GC_WEB_DIR=../poc-qa-stack/dist npm run app -- --auth
 `;
 
 // ---------------------------------------------------------------- main
@@ -471,7 +471,7 @@ async function main(argv) {
   // lives under "Program Files" — a path a shell splits at the space.
   const app = spawn(process.execPath, [join(ROOT, 'scripts', 'start.js')], {
     // GC_WEB_DIR resolved: the child's cwd is the repository root, not the
-    // shell's, so `GC_WEB_DIR=../ghostclick-web/dist npm run app` from a
+    // shell's, so `GC_WEB_DIR=../poc-qa-stack/dist npm run app` from a
     // subdirectory would otherwise resolve against a different directory than
     // the one the person was looking at when they typed it.
     cwd: ROOT, stdio: 'inherit', shell: false, env: { ...process.env, ...env.runner, GC_WEB_DIR: web },

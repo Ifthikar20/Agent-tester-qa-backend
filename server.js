@@ -266,7 +266,7 @@ app.use(express.json({ limit: '512kb' }));
 /**
  * The UI, which is a DIRECTORY this server is pointed at — not a path it owns.
  *
- *   GC_WEB_DIR=/srv/ghostclick-web/dist npm start
+ *   GC_WEB_DIR=/srv/poc-qa-stack/dist npm start
  *
  * The UI is a different repository now (docs/BOUNDARY.md). It builds to its
  * own `dist/`, and this reads whatever directory it is given: a sibling
@@ -288,7 +288,7 @@ app.use(express.json({ limit: '512kb' }));
 const WEB_DIR = process.env.GC_WEB_DIR ? resolve(process.env.GC_WEB_DIR) : null;
 const APP = WEB_DIR ? join(WEB_DIR, 'index.html') : null;
 const NO_UI = 'No UI is being served. This is the backend repository; the UI is built in '
-  + 'ghostclick-web and this server is pointed at the result — set GC_WEB_DIR to that build.';
+  + 'poc-qa-stack and this server is pointed at the result — set GC_WEB_DIR to that build.';
 
 app.get('/', (_req, res) => res.redirect('/app/'));
 if (WEB_DIR) app.use('/app', express.static(WEB_DIR, { setHeaders: cacheHeaders }));

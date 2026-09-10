@@ -96,7 +96,7 @@ services:
         # There is no .git in the image; this is how /api/version knows.
         GC_GIT_SHA: ${GC_GIT_SHA:-}
         # VITE_AUTH_URL is gone from here, and its absence is the deployment's
-        # half of the split. The UI is built in ghostclick-web with that
+        # half of the split. The UI is built in poc-qa-stack with that
         # address baked in — it is still PUBLIC_URL, because the edge fronts
         # both services — and arrives as the directory mounted below. A UI
         # release is then a directory swap and a restart, rather than a rebuild
@@ -141,7 +141,7 @@ services:
       # mounted", the edge would answer 200, and every smoke probe below would
       # pass a deployment nobody can use. scripts/deploy.sh checks the
       # directory really is a build before it gets this far.
-      - ${GC_WEB_DIR:?set GC_WEB_DIR in .env.prod — the ghostclick-web build to serve}:/app/ui:ro
+      - ${GC_WEB_DIR:?set GC_WEB_DIR in .env.prod — the poc-qa-stack build to serve}:/app/ui:ro
     # Chromium is told --disable-dev-shm-usage so it does not need a big /dev/shm,
     # but headroom here is cheap and a starved browser fails in confusing ways.
     shm_size: 512mb

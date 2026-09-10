@@ -232,8 +232,8 @@ else bad('without a built UI it refuses by name', `exit ${noWeb.status}: ${saidN
 if (!/deps|browser|chromium/.test(saidNoWeb)) ok('and refuses before doing any of the slow work', 'seconds, not an install');
 else bad('and refuses before doing any of the slow work', 'it installed something first');
 
-// A source tree is the other half of the same mistake: `../ghostclick-web`
-// where `../ghostclick-web/dist` was meant. It exists, so `existsSync` alone
+// A source tree is the other half of the same mistake: `../poc-qa-stack`
+// where `../poc-qa-stack/dist` was meant. It exists, so `existsSync` alone
 // would pass it, and it 404s every route.
 const notABuild = run(['--setup'], { GC_WEB_DIR: ROOT });
 if (notABuild.status === 1 && /index\.html/.test(`${notABuild.stdout}${notABuild.stderr}`)) ok('and a source tree is not a build', 'no index.html in it');

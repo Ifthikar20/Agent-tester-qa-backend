@@ -7,7 +7,7 @@
  * rebuilt `web/` whenever its sources were newer than its build, so that
  * editing a component and restarting showed you the component you edited.
  * There is no `web/` to rebuild any more (docs/BOUNDARY.md): the UI is the
- * ghostclick-web repository, it builds to its own `dist/`, and this repository
+ * poc-qa-stack repository, it builds to its own `dist/`, and this repository
  * is POINTED at the result.
  *
  * So the staleness problem it solved is gone and a different one has taken its
@@ -17,7 +17,7 @@
  *   unset             /app/ answers a 503 sentence, so you find out from a
  *                     browser rather than from the terminal you started
  *   a typo            an empty directory serves nothing, which looks the same
- *   a source tree     `../ghostclick-web` rather than `../ghostclick-web/dist`
+ *   a source tree     `../poc-qa-stack` rather than `../poc-qa-stack/dist`
  *                     has no index.html and 404s every route
  *
  * All three are visible before Chromium is launched, so this looks, refuses,
@@ -38,8 +38,8 @@ import { resolve, join } from 'node:path';
 const HINT = `
   The UI is a separate repository. Build it there, point this at the result:
 
-      cd ../ghostclick-web && npm install && npm run build
-      cd -  &&  GC_WEB_DIR=../ghostclick-web/dist npm start
+      cd ../poc-qa-stack && npm install && npm run build
+      cd -  &&  GC_WEB_DIR=../poc-qa-stack/dist npm start
 
   With the sign-in, it has to be built knowing where to sign in — the address
   is baked into the bundle, so this is a build-time choice, not a runtime one:

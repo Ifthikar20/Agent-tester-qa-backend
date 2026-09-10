@@ -53,13 +53,13 @@ needs to know:
 
 ```bash
 # in the UI's repository — the address is baked into the bundle
-cd ../ghostclick-web && VITE_AUTH_URL=http://localhost:8000 npm run build
+cd ../poc-qa-stack && VITE_AUTH_URL=http://localhost:8000 npm run build
 
 # back in this repository's root
 cd -
 GC_AUTH_PUBLIC_KEYS='{"<kid>": "-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----\n"}' \
 GC_WEB_ORIGIN=http://localhost:3000 GC_AUTH_ORIGIN=http://localhost:8000 \
-GC_WEB_DIR=../ghostclick-web/dist npm start
+GC_WEB_DIR=../poc-qa-stack/dist npm start
 ```
 
 The build comes first because it is the one step nothing on this side can do

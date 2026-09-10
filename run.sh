@@ -2,7 +2,7 @@
 #
 # Start ghostclick, with the sign-in.
 #
-#   GC_WEB_DIR=../ghostclick-web/dist bash run.sh
+#   GC_WEB_DIR=../poc-qa-stack/dist bash run.sh
 #
 #   bash run.sh                the runner, the UI and the control plane — you sign in
 #   bash run.sh --open         no sign-in at all, the one-person-one-laptop shape
@@ -14,7 +14,7 @@
 # One Ctrl-C stops whatever it started.
 #
 # GC_WEB_DIR is not optional and is not something this repository can supply.
-# The UI is the ghostclick-web repository (docs/BOUNDARY.md); build it there
+# The UI is the poc-qa-stack repository (docs/BOUNDARY.md); build it there
 # and name the build here. With the sign-in it has to have been built knowing
 # where to sign in — `VITE_AUTH_URL=http://localhost:8000 npm run build` over
 # there — because that address is baked into the bundle and no flag on this

@@ -11,7 +11,7 @@
  *                 Three projects parse this grammar; a copy that has drifted is
  *                 a case the recorder writes and the executor cannot read.
  *   the version   the copy that is not in this repository any more. The UI
- *                 holds one, in ghostclick-web, and nothing that runs here can
+ *                 holds one, in poc-qa-stack, and nothing that runs here can
  *                 read it — so what is checked is the number the UI compares
  *                 itself against: that it still describes the bytes the grammar
  *                 actually has, and that the runner reports it to anyone who
@@ -57,7 +57,7 @@ ok('recorder.js injects the same proposer the extension loads');
 console.log('\n— and a number for the copy this repository cannot see ————');
 
 /**
- * The UI's copy went to ghostclick-web with the UI. The byte-for-byte check
+ * The UI's copy went to poc-qa-stack with the UI. The byte-for-byte check
  * above cannot follow it there, and a check that quietly stopped covering a
  * consumer is worse than one that was never written, so this is what took its
  * place: the grammar carries a version, and the version has to describe the
@@ -75,7 +75,7 @@ if (LANGUAGE_VERSION !== PINNED.version) {
 if (digest !== PINNED.digest) {
   fail(`the case language has changed but LANGUAGE_VERSION is still ${LANGUAGE_VERSION}.\n`
     + `        ${digest} now, ${PINNED.digest} when the version was set.\n`
-    + '        Bump it in vocabulary.js, run `npm run sync:lang`, and tell ghostclick-web.');
+    + '        Bump it in vocabulary.js, run `npm run sync:lang`, and tell poc-qa-stack.');
 }
 ok(`language version ${LANGUAGE_VERSION} describes the grammar it names`, digest);
 

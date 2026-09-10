@@ -10,7 +10,7 @@
  * The split moved one of those three out of reach. Two copies are still in
  * this repository and are still checked byte for byte, because a copy that is
  * checked is safe and a copy that is remembered is not. The UI's copy is in
- * ghostclick-web now, and no check that runs here can say anything true about
+ * poc-qa-stack now, and no check that runs here can say anything true about
  * a file in a repository this checkout does not have.
  *
  * What replaces it is a number. The language declares LANGUAGE_VERSION, the

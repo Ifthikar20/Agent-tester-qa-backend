@@ -1,7 +1,7 @@
 # The line between this repository and the UI's
 
 They are two repositories now. This one holds the runner and the control
-plane; `ghostclick-web` holds the app. Nothing imports across, because nothing
+plane; `poc-qa-stack` holds the app. Nothing imports across, because nothing
 can.
 
 This document used to be a plan for that split, with four rules and a check
@@ -11,7 +11,7 @@ what crosses it, what each side is allowed to assume, and which of the old
 rules still needs a check because the repository boundary does not enforce it.
 
 ```
-   ghostclick-web (repo)                   ghostclick (this repo)
+   poc-qa-stack (repo)                   poc-qa-stack-backend (this repo)
    ┌───────────────────────────┐        ┌───────────────────────────┐
    │  src/         the app     │        │  server.js, ops.js, …     │
    │  src/lang/    a copy of   │        │  public/     pages to drive
@@ -62,7 +62,7 @@ runner verifies it and holds public keys only.
 
 `npm run check:boundary` starts its own servers and asserts four things. Two of
 the old rules are gone from it — "the frontend reads nothing outside `web/`"
-and "and writes nothing outside it" are ghostclick-web's to keep, and it cannot
+and "and writes nothing outside it" are poc-qa-stack's to keep, and it cannot
 break them without breaking its own build. Asserting them here would mean
 asserting something about files this checkout does not contain, which is a
 check that passes because it found nothing.
@@ -106,9 +106,9 @@ person can act on without reading this repository.
 | `GC_WEB_DIR` | the built UI to serve | this repo | **none** — no UI, and it says so |
 | `GC_SIGNING_KEY` | the Ed25519 private key tokens are signed with | control plane | none — no token can be minted |
 | `GC_AUTH_PUBLIC_KEYS` | the public half, `{kid: pem}` | runner | none — auth is off |
-| `VITE_AUTH_URL` | where the built app signs in | ghostclick-web, at build time | empty — no login at all |
+| `VITE_AUTH_URL` | where the built app signs in | poc-qa-stack, at build time | empty — no login at all |
 | `GC_WEB_ORIGIN` | the origin allowed to call `/api` with credentials | runner | none — `*`, uncredentialed |
-| `VITE_API_URL` | where the built app sends `/api` and `/ws` | ghostclick-web, at build time | empty — its own origin |
+| `VITE_API_URL` | where the built app sends `/api` and `/ws` | poc-qa-stack, at build time | empty — its own origin |
 
 ## The mismatch neither side can prevent
 
@@ -135,15 +135,15 @@ written; now that the UI is a directory on the host, it can be looked at.
 
 ```
 # once
-git clone <ghostclick-web> ../ghostclick-web
-cd ../ghostclick-web && npm install
+git clone <poc-qa-stack> ../poc-qa-stack
+cd ../poc-qa-stack && npm install
 
 # the UI, built knowing where to sign in
 VITE_AUTH_URL=http://localhost:8000 npm run build
 
 # the application
 cd -
-GC_WEB_DIR=../ghostclick-web/dist bash run.sh
+GC_WEB_DIR=../poc-qa-stack/dist bash run.sh
 ```
 
 `bash run.sh` is the runner, the control plane and the sign-in. `npm run app`

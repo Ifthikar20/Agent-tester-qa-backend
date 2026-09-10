@@ -137,9 +137,9 @@ esac
 # and this repository cannot build one, so without an address to clone it from
 # the run would get as far as `compose up` — ten minutes and an EC2 instance
 # later — and stop on GC_WEB_DIR being unset.
-[ -n "$WEB_REPO_URL" ] || die "set WEB_REPO_URL to the ghostclick-web repository:
+[ -n "$WEB_REPO_URL" ] || die "set WEB_REPO_URL to the poc-qa-stack repository:
 
-    WEB_REPO_URL=https://github.com/<you>/ghostclick-web HTTP_CIDR=$HTTP_CIDR bash scripts/aws-up.sh
+    WEB_REPO_URL=https://github.com/<you>/poc-qa-stack HTTP_CIDR=$HTTP_CIDR bash scripts/aws-up.sh
 
   The app is a separate repository now (docs/BOUNDARY.md). This box clones it,
   builds it against its own public address, and the runner is pointed at the
@@ -398,19 +398,19 @@ fi
 # the build cannot leave anything behind on a host whose only job is running
 # containers. The image is the one the runner's Dockerfile used to build the UI
 # with, pinned by digest for the same reason it was there.
-sudo mkdir -p /opt/ghostclick-web && sudo chown ubuntu:ubuntu /opt/ghostclick-web
-if [ -d /opt/ghostclick-web/.git ]; then
-  git -C /opt/ghostclick-web fetch --quiet origin "$WEB_BRANCH"
-  git -C /opt/ghostclick-web reset --hard --quiet "origin/$WEB_BRANCH"
+sudo mkdir -p /opt/poc-qa-stack && sudo chown ubuntu:ubuntu /opt/poc-qa-stack
+if [ -d /opt/poc-qa-stack/.git ]; then
+  git -C /opt/poc-qa-stack fetch --quiet origin "$WEB_BRANCH"
+  git -C /opt/poc-qa-stack reset --hard --quiet "origin/$WEB_BRANCH"
 else
-  git clone --quiet --branch "$WEB_BRANCH" "$WEB_REPO_URL" /opt/ghostclick-web
+  git clone --quiet --branch "$WEB_BRANCH" "$WEB_REPO_URL" /opt/poc-qa-stack
 fi
 echo "  building the UI for http://$PUBLIC_IP"
 UI_BUILDER=node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
-sudo docker run --rm -v /opt/ghostclick-web:/src -w /src \
+sudo docker run --rm -v /opt/poc-qa-stack:/src -w /src \
   -e VITE_AUTH_URL="http://$PUBLIC_IP" "$UI_BUILDER" \
   sh -c 'npm ci --ignore-scripts && npm run build'
-[ -f /opt/ghostclick-web/dist/index.html ] || {
+[ -f /opt/poc-qa-stack/dist/index.html ] || {
   echo "  the UI build produced no dist/index.html — refusing to deploy a runner with nothing to serve"
   exit 1; }
 
@@ -453,7 +453,7 @@ if [ ! -f .env.prod ]; then
   sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=http://$PUBLIC_IP|"     .env.prod.new
   # Where the build above landed. Bind-mounted read-only into the runner at
   # /app/ui by docker-compose.prod.yml.
-  sed -i "s|^GC_WEB_DIR=.*|GC_WEB_DIR=/opt/ghostclick-web/dist|" .env.prod.new
+  sed -i "s|^GC_WEB_DIR=.*|GC_WEB_DIR=/opt/poc-qa-stack/dist|" .env.prod.new
   # The admin, from the same address the ssh rule admits.
   sed -i "s|^# GC_ADMIN_CIDRS=.*|GC_ADMIN_CIDRS=$ADMIN_CIDR|"  .env.prod.new
   sudo install -m 600 -o root -g root .env.prod.new .env.prod

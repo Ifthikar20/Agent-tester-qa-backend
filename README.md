@@ -5,7 +5,7 @@ headless-Chrome feed and clicks things, driven by a small DSL — against any
 allowlisted URL, with the script rendered as a mermaid diagram.
 
 This repository is the **runner** and the **control plane**. The app is a
-second repository, `ghostclick-web`, and this one is *pointed at* its build
+second repository, `poc-qa-stack`, and this one is *pointed at* its build
 (`GC_WEB_DIR`) rather than building it — see [docs/BOUNDARY.md](docs/BOUNDARY.md).
 
 **New here? [SETUP.md](SETUP.md) walks through it end to end** — both clones,
@@ -14,7 +14,7 @@ your own app, credentials, the extension, and a first recording.
 ```bash
 npm install
 npx playwright install chromium   # skip if your sandbox already ships one
-GC_WEB_DIR=../ghostclick-web/dist npm start
+GC_WEB_DIR=../poc-qa-stack/dist npm start
 
 npm run check                     # end-to-end, against a running server
 npm run check:freshness           # a UI deployed under a running runner is served, and re-stamped
@@ -36,7 +36,7 @@ npm run check:boundary            # no bundler crept back, and the UI is still a
 npm run check:diagram             # generated mermaid vs. the real parser
 ```
 
-`GC_WEB_DIR` names a built UI — `ghostclick-web`'s `dist/`, a CI artefact, a
+`GC_WEB_DIR` names a built UI — `poc-qa-stack`'s `dist/`, a CI artefact, a
 read-only mount in a container. There is no default: one would name a path this
 repository cannot produce, so it could only ever be a directory that is not
 there, and that arrives as a 404 on the app's own address, which reads as a
@@ -79,7 +79,7 @@ keys it trusts, every time. `npm run app -- --auth` does all of this; by hand:
 cd auth && python manage.py signing_key --new      # prints both lines below, once
 
 # the control plane                                    # the runner
-GC_SIGNING_KEY='…' python manage.py runserver 8000     GC_AUTH_PUBLIC_KEYS='{"<kid>": "…"}' GC_WEB_ORIGIN=http://localhost:3000 GC_AUTH_ORIGIN=http://localhost:8000 GC_WEB_DIR=../ghostclick-web/dist npm start
+GC_SIGNING_KEY='…' python manage.py runserver 8000     GC_AUTH_PUBLIC_KEYS='{"<kid>": "…"}' GC_WEB_ORIGIN=http://localhost:3000 GC_AUTH_ORIGIN=http://localhost:8000 GC_WEB_DIR=../poc-qa-stack/dist npm start
 # the UI, in the other repository
 VITE_AUTH_URL=http://localhost:8000 npm run build
 ```
@@ -717,7 +717,7 @@ credential printed the way a hurried wrapper prints it, then a throw.
 `check:console` section 6 drives it. Removing the redaction turns that check red
 with `THE SECRET IS ON SCREEN` — the redaction happens in the runner, before
 anything can render it, so that assertion stayed here when the rest of the old
-console check went to ghostclick-web with the components it was reading.
+console check went to poc-qa-stack with the components it was reading.
 
 The ↑ Top / ↓ Bottom buttons are gone. The wheel is the way you scroll a page,
 and the buttons were a workaround from before it worked. The `scroll to top` and
@@ -814,7 +814,7 @@ not an error in red:
 that which is this repository's — recording through a real cross-origin
 redirect (`/go/offsite`) and getting back a case whose entry is the URL you
 asked for — is `check:redirects`. Where the refusal is *rendered* is the app's,
-and is checked in ghostclick-web, since a message off the bottom of a scrolling
+and is checked in poc-qa-stack, since a message off the bottom of a scrolling
 page is a fact about a page.
 
 ## example.com is not www.example.com
@@ -1549,7 +1549,7 @@ silently inside someone else's docs.
 | `suites.js` | the suite model — one origin, pages, expectations, cases |
 | `home.js` | where the runner points at startup — pure, so it can be tested |
 | `runs.js` | run history, scoped by suite; defects grouped out of it |
-| `GC_WEB_DIR` | not a file: the built app, made in `ghostclick-web` and served from wherever this names |
+| `GC_WEB_DIR` | not a file: the built app, made in `poc-qa-stack` and served from wherever this names |
 | `scripts/copies.js` | who holds a copy of the case language, and the version the UI checks itself against |
 | `auth/` | Django: users, sessions, SSO later — identity and nothing else |
 | `auth/accounts/tokens.py` | mints the HS256 token the runner accepts, stdlib only |

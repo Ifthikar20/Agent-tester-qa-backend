@@ -4,7 +4,7 @@
 # whole devDependency tree while running the app needs a browser and four
 # production packages, and one image with both would ship a bundler to
 # production and a browser to the build. That stage cannot exist here any more:
-# the UI is the ghostclick-web repository (docs/BOUNDARY.md) and its source is
+# the UI is the poc-qa-stack repository (docs/BOUNDARY.md) and its source is
 # not in this build context, so there is nothing to build and no reason for a
 # second stage.
 #
@@ -18,7 +18,7 @@
 #                  an image whose contents did not change — which is the right
 #                  shape for two repositories that release on their own clocks.
 #
-#   bake it        copy ghostclick-web's dist/ into this context and build with
+#   bake it        copy poc-qa-stack's dist/ into this context and build with
 #                  --build-arg GC_WEB_SRC=<that path>. Right for an air-gapped
 #                  registry, or anywhere a running container must not depend on
 #                  a directory on the host.

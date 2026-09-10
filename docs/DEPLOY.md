@@ -68,7 +68,7 @@ change first for real multi-user use.
 From a laptop with the AWS CLI logged in:
 
 ```bash
-WEB_REPO_URL=<ghostclick-web> HTTP_CIDR=<your-ip>/32 bash scripts/aws-up.sh
+WEB_REPO_URL=<poc-qa-stack> HTTP_CIDR=<your-ip>/32 bash scripts/aws-up.sh
 ```
 
 `WEB_REPO_URL` is the UI's repository. ghostclick is two repositories now
@@ -257,7 +257,7 @@ how you actually reach the box — exactly as you would type it in the browser.
 
 | who reads it | as | for |
 |---|---|---|
-| the UI, **at build time, in `ghostclick-web`** | `VITE_AUTH_URL` | where to sign in — its own origin |
+| the UI, **at build time, in `poc-qa-stack`** | `VITE_AUTH_URL` | where to sign in — its own origin |
 | Caddy | the site address | which host to answer for; whether to get a certificate |
 | Django | `GC_PUBLIC_URL` | `ALLOWED_HOSTS`, the CSRF origin, and whether cookies are `Secure` and `__Host-` prefixed |
 | the runner | `GC_WEB_ORIGIN` | the origin allowed to call `/api`, and the only origin a socket is accepted from |
@@ -295,7 +295,7 @@ and a bundle that never mentions `PUBLIC_URL`.
 Releasing a new UI does not touch this repository:
 
 ```bash
-cd /opt/ghostclick-web && git pull
+cd /opt/poc-qa-stack && git pull
 sudo docker run --rm -v "$PWD:/src" -w /src -e VITE_AUTH_URL=<PUBLIC_URL>   node:22-slim sh -c 'npm ci --ignore-scripts && npm run build'
 cd /opt/ghostclick && ./scripts/gc restart runner
 ```

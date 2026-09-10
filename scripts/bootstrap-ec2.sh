@@ -112,8 +112,8 @@ cat <<'NEXT'
 
   And the UI, which is a second repository and is not built by the first:
 
-    git clone <ghostclick-web-url> /opt/ghostclick-web
-    cd /opt/ghostclick-web
+    git clone <poc-qa-stack-url> /opt/poc-qa-stack
+    cd /opt/poc-qa-stack
     sudo docker run --rm -v "$PWD:/src" -w /src -e VITE_AUTH_URL=<PUBLIC_URL>       node:22-slim sh -c 'npm ci --ignore-scripts && npm run build'
 
   GC_WEB_DIR is that dist/. The runner is pointed at it; nothing here builds

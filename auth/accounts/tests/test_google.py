@@ -45,7 +45,7 @@ GOOGLE = {'google': {
     'EMAIL_AUTHENTICATION_AUTO_CONNECT': True,
 }}
 # The sentence the SPA shows for `error=refused`. It is the spec's wording
-# [credentials-3] and it is rendered in ghostclick-web, which this repository
+# [credentials-3] and it is rendered in poc-qa-stack, which this repository
 # cannot read — so what is pinned here is the copy in google.py, the module
 # that decides every refusal gets it. The component-side pin is that
 # repository's to keep.
@@ -375,7 +375,7 @@ class RefusalTests(GoogleCase):
         """
         This used to read web/src/components/ProviderError.vue and assert the
         spec's sentence was in it — one pin, tying the words to the build that
-        shows them. That component is in ghostclick-web now and this checkout
+        shows them. That component is in poc-qa-stack now and this checkout
         does not have it, so the pin has to move rather than be deleted: a
         deleted pin is a sentence nobody is holding, and this one exists
         because the WORDING is the security control. Say too much and the
@@ -384,7 +384,7 @@ class RefusalTests(GoogleCase):
         What this side still owns is the word in the URL, so that is what is
         asserted here — the sentence is pinned to google.py's docstring, where
         the decision to use it lives, and the vocabulary that triggers it is
-        pinned exhaustively below. ghostclick-web keeps the component-side
+        pinned exhaustively below. poc-qa-stack keeps the component-side
         half against the same wording.
         """
         self.assertIn(GENERIC, ' '.join(google.__doc__.split()))

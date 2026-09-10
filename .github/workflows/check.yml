@@ -123,7 +123,7 @@ jobs:
           load: true
           tags: ghostclick-runner:ci
           # No VITE_AUTH_URL: there is no UI stage in this image any more. The
-          # app is built in ghostclick-web and mounted at /app/ui, so what is
+          # app is built in poc-qa-stack and mounted at /app/ui, so what is
           # built here is the runner carrying the placeholder page the
           # Dockerfile ships — which is exactly the image a deployment starts
           # from, before the mount arrives.

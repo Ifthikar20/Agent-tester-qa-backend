@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "PoC: drive headless Chrome from a small DSL, stream it to a canvas, draw a synthetic cursor over it. The runner and the Django control plane; the UI is the ghostclick-web repository and this is POINTED at its build (see docs/BOUNDARY.md).",
+  "description": "PoC: drive headless Chrome from a small DSL, stream it to a canvas, draw a synthetic cursor over it. The runner and the Django control plane; the UI is the poc-qa-stack repository and this is POINTED at its build (see docs/BOUNDARY.md).",
   "scripts": {
     "app": "node scripts/app.js",
     "start": "node scripts/start.js",

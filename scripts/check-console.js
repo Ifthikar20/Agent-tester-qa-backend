@@ -6,8 +6,8 @@
  *
  * This file used to drive the Vue app in a real browser: navigate to /app/
  * console, read the canvas back pixel by pixel, count how much of it was not
- * black. Every one of those assertions is about something ghostclick-web
- * renders, and ghostclick-web is a different repository now — so that half has
+ * black. Every one of those assertions is about something poc-qa-stack
+ * renders, and poc-qa-stack is a different repository now — so that half has
  * gone there, where the components it names actually live and where a rename
  * breaks it on the commit that does the renaming.
  *
@@ -250,7 +250,7 @@ console.log('\n— 6 · the driven page’s console, forwarded —————�
  * hurried fetch wrapper prints it, and then an uncaught throw.
  *
  * The app decides how to DISPLAY all that — folded away until asked for,
- * repeats collapsed — and those assertions went to ghostclick-web with the
+ * repeats collapsed — and those assertions went to poc-qa-stack with the
  * rest of the rendering. What is here is what the runner puts on the wire,
  * and one of those is a security property rather than a convenience.
  */
@@ -303,5 +303,5 @@ console.log(failures
     + '       frame rather than left black, the wheel and the keyboard reach\n'
     + '       the page being driven, and its own console comes back with the\n'
     + '       vault redacted and long lines cut. What the app DRAWS with all\n'
-    + '       of that is checked in ghostclick-web.\n');
+    + '       of that is checked in poc-qa-stack.\n');
 process.exit(failures ? 1 : 0);

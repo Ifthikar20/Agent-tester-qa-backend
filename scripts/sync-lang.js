@@ -8,7 +8,7 @@
  * remembering cheap. scripts/copies.js says who holds a copy and why.
  *
  * Two jobs, and the second one arrived with the split. The copies inside this
- * repository can be made to match by copying. The one in ghostclick-web cannot
+ * repository can be made to match by copying. The one in poc-qa-stack cannot
  * — this side has no access to it — so what it gets instead is a version
  * number it can compare itself against at runtime, and this is where that
  * number is recorded as describing particular bytes.
@@ -64,7 +64,7 @@ if (digest === PINNED.digest && LANGUAGE_VERSION === PINNED.version) {
   writeFileSync(PIN_FILE, next);
   changed++;
   console.log(`  pinned   language version ${LANGUAGE_VERSION} (${digest})  <-  was ${PINNED.version} (${PINNED.digest})`);
-  console.log('\n  Tell ghostclick-web: its copy of vocabulary.js needs the same update, and');
+  console.log('\n  Tell poc-qa-stack: its copy of vocabulary.js needs the same update, and');
   console.log(`  the version it compares against a runner is now ${LANGUAGE_VERSION}.`);
 }
 
