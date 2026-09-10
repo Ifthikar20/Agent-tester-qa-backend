@@ -44,12 +44,23 @@ const LISTENERS = `
   var propose = self.__gcPropose.propose;
   var n = 0;
 
+  /**
+   * Hand an interaction to the recorder — after deciding any click that is
+   * still waiting to learn whether it changed the page, so steps arrive in the
+   * order they happened.
+   */
   function send(msg) {
+    settle(false);
+    post(msg);
+  }
+
+  function post(msg) {
     try { window.__gcRecord(msg); } catch (e) { /* binding not attached yet */ }
   }
 
-  function report(kind, el, extra, ev) {
-    if (!el || !el.getAttribute) return;
+  /** An interaction, measured now — while the element is still the way it was. */
+  function describe(kind, el, extra, ev) {
+    if (!el || !el.getAttribute) return null;
     var id = 'gc' + ++n;
     el.setAttribute('data-gc-el', id);
     var r = el.getBoundingClientRect();
@@ -66,8 +77,103 @@ const LISTENERS = `
           vw: window.innerWidth, vh: window.innerHeight,
         } };
       for (var k in (extra || {})) msg[k] = extra[k];
-      send(msg);
-    } catch (e) { /* the element went away mid-measure */ }
+      return msg;
+    } catch (e) { return null; /* the element went away mid-measure */ }
+  }
+
+  function report(kind, el, extra, ev) {
+    var msg = describe(kind, el, extra, ev);
+    if (msg) send(msg);
+  }
+
+  // ---- clicks on things that are not controls ------------------------------
+  // An accordion header, a tab, a card: often a <div> with a click handler,
+  // and nothing in the markup says it is a control. Those clicks used to be
+  // ignored on purpose — naming a div by the text inside it is usually a target
+  // that breaks next week — so a recording replayed into a closed accordion,
+  // one step short.
+  //
+  // The page answers what the markup does not. If something near the element
+  // changes within CHANGE_MS of the click, the click did something, and it is a
+  // step. Not anything that was already changing just before the click: a
+  // ticking counter or an animation mutates all the time, and a click on the
+  // text beside it did nothing. A click that changes nothing is still not an
+  // action. <summary> needs none of this; it is a control and says so.
+  var CLICKABLE = SCOPE + ',summary';
+  var CHANGE_MS = 500;
+  var QUIET_MS = 800;
+  var WATCHED = ['class', 'style', 'open', 'hidden', 'aria-expanded', 'aria-hidden', 'aria-selected', 'aria-pressed', 'data-state'];
+  var lastChanged = new WeakMap();    // element -> when it last changed
+  var pending = null;                 // { el, msg, at, timer }: a click waiting for its answer
+
+  /** The waiting click, decided: kept because the page changed, or let go. */
+  function settle(keep) {
+    if (!pending) return;
+    var p = pending;
+    pending = null;
+    clearTimeout(p.timer);
+    if (keep) post(p.msg);
+    else p.el.removeAttribute('data-gc-el');
+  }
+
+  /** Within three levels around the element, or inside what it says it controls. */
+  function near(node, el) {
+    var box = el;
+    for (var i = 0; i < 3 && box.parentElement && box.parentElement !== document.body; i++) box = box.parentElement;
+    if (box.contains(node)) return true;
+    // Doubled backslash: this whole script is a template string on the way in,
+    // and a single one would reach the page as a plain "s".
+    var ids = (el.getAttribute('aria-controls') || '').split(/\\s+/);
+    for (var j = 0; j < ids.length; j++) {
+      var c = ids[j] && document.getElementById(ids[j]);
+      if (c && c.contains(node)) return true;
+    }
+    return false;
+  }
+
+  new MutationObserver(function (records) {
+    var now = Date.now();
+    for (var i = 0; i < records.length; i++) {
+      var rec = records[i];
+      var node = null;
+      var surfaced = false;             // a new top-level layer: a dialog, a menu, a popover
+      if (rec.type === 'attributes') {
+        node = rec.target;
+      } else {
+        for (var a = 0; a < rec.addedNodes.length && !node; a++) {
+          if (rec.addedNodes[a].nodeType === 1) { node = rec.target; surfaced = rec.target === document.body; }
+        }
+        for (var d = 0; d < rec.removedNodes.length && !node; d++) {
+          if (rec.removedNodes[d].nodeType === 1) node = rec.target;
+        }
+      }
+      // Text alone is not the page changing shape; it is a number ticking over.
+      if (!node || node.nodeType !== 1) continue;
+      var before = lastChanged.get(node);
+      lastChanged.set(node, now);
+      if (!pending || now - pending.at > CHANGE_MS) continue;
+      if (before !== undefined && before >= pending.at - QUIET_MS) continue;   // was already changing
+      if (surfaced || near(node, pending.el)) settle(true);
+    }
+    // The document itself, not documentElement: this runs as an init script,
+    // before the parser has made an <html> to hang an observer on.
+  }).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: WATCHED });
+
+  /** A click on something that is not a control: measure it now, keep it if the page answers. */
+  function watchClick(e) {
+    var el = e.target;
+    if (!el || !el.getAttribute || el === document.body || el === document.documentElement) return;
+    // The element that was made clickable, not the span inside it: climb while
+    // the page's own styling still says "pointer".
+    if (getComputedStyle(el).cursor === 'pointer') {
+      for (var i = 0; i < 5 && el.parentElement && el.parentElement !== document.body
+           && getComputedStyle(el.parentElement).cursor === 'pointer'; i++) el = el.parentElement;
+    }
+    settle(false);
+    var msg = describe('click', el, null, e);
+    if (!msg) return;
+    clickAt = Date.now();
+    pending = { el: el, msg: msg, at: clickAt, timer: setTimeout(function () { settle(false); }, CHANGE_MS) };
   }
 
   var FIELD = /^(input|textarea|select)$/;
@@ -195,18 +301,19 @@ const LISTENERS = `
   }, true);
 
   document.addEventListener('click', function (e) {
-    // A click on nothing in particular is not an action. Recording it anyway
-    // means naming a <div> by whatever text happens to be inside it, which is
-    // exactly the unstable target a recorder exists to avoid.
-    var el = e.target.closest(SCOPE);
-    if (!el) return;
+    var el = e.target.closest && e.target.closest(CLICKABLE);
+    // Not a control. It may still be the step — an accordion header, a tab —
+    // and the page will say so: watchClick keeps it only if something near it
+    // changes. A click that changes nothing is still not an action.
+    if (!el) return watchClick(e);
     var tag = el.tagName.toLowerCase();
     // Clicking a text field is just focus; the change that follows carries the
     // real intent. Checkboxes and radios are the exception — the click IS it.
     if (FIELD.test(tag) && ['checkbox','radio','submit','button'].indexOf(el.type) === -1) return;
 
-    // Was this even on the page before the pointer went looking for it?
-    if (!baseline.has(el)) {
+    // Was this even on the page before the pointer went looking for it? Only
+    // controls are sampled into the baseline, so only a control can ask.
+    if (el.matches(SCOPE) && !baseline.has(el)) {
       var opener = openerOf(el);
       if (opener) report('hover', opener, null, null);
     }
@@ -243,7 +350,10 @@ const LISTENERS = `
 
   ['popstate', 'hashchange'].forEach(function (ev) {
     window.addEventListener(ev, function () {
-      try { window.__gcRecord({ kind: 'url', href: location.href }); } catch (e) {}
+      // A route change right after a click is that click's answer — and the
+      // click happened first, so it is sent first.
+      settle(true);
+      post({ kind: 'url', href: location.href });
     });
   });
 })();
@@ -477,7 +587,17 @@ export class Recorder {
       if (!parsed.scope && found <= ORDINAL_MAX) {
         let at = -1;
         for (let i = 0; i < found && at < 0; i++) {
-          if (await loc.nth(i).and(tagged).count() === 1) at = i;
+          const one = loc.nth(i);
+          if (await one.and(tagged).count() === 1
+            // The two relationships a unique match is already allowed, which
+            // this branch forgot: the match sits INSIDE what was interacted
+            // with — `text:` finds a stat's span, never the card a scroll
+            // landed on — or, for a candidate naming the surrounding box, it
+            // is that box. Without them a name that matched twice dropped the
+            // step even when one match was plainly the element:
+            // "Dropped a scroll … Tried: text:100.0% (2 matches)".
+            || await one.and(tagged.locator('*')).count() === 1
+            || (cand.enclosing && await one.locator('*').and(tagged).count() === 1)) at = i;
         }
         if (at >= 0) return { target: `nth${at + 1}/${target}`, via: 'ordinal' };
       }
