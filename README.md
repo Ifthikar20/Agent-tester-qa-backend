@@ -32,10 +32,11 @@ npm run check:boundary            # the three projects can still be split apart
 npm run check:diagram             # generated mermaid vs. the real parser
 ```
 
-The UI is a Vue 3 app in `web/`, built to `web/dist/`. That build is committed,
-so the app runs with no bundler present — but `npm start` also **rebuilds it
-when a source file is newer than the build**, so one command always gives you
-the latest. A start with nothing to do says `up to date` and costs nothing.
+The UI is a Vue 3 app in `web/`, built to `web/dist/`. That build is **not** in
+git: it is generated, and committing it meant every change to a component
+arrived as itself plus a wall of regenerated bundles. `npm start` **builds it
+when it is missing or when a source file is newer**, so one command always gives
+you the latest. A start with nothing to do says `up to date` and costs nothing.
 
 ```bash
 bash run.sh                       # the whole application, with the sign-in ← the one you want
@@ -45,7 +46,7 @@ npm run app -- --fast             # runs skip the performance
 npm start                         # just the runner, if setup is already done
 npm run serve                     # run only, never build
 npm run dev                       # Vite in front of it, on :5173
-npm run build                     # → web/dist/, commit the result
+npm run build                     # → web/dist/, generated and gitignored
 npm run check:all                 # every check, in one command
 ```
 
@@ -1502,7 +1503,7 @@ silently inside someone else's docs.
 | `home.js` | where the runner points at startup — pure, so it can be tested |
 | `runs.js` | run history, scoped by suite; defects grouped out of it |
 | `web/` | the Vue 3 app: onboarding, suites, console, dashboard — its own project |
-| `web/dist/` | its build — committed, so `npm start` needs no bundler |
+| `web/dist/` | its build — generated, gitignored; `npm start` makes it |
 | `web/src/config.js` | where the backend is: same origin, or `VITE_API_URL` |
 | `web/src/lang/` | the frontend's checked copy of the vocabulary |
 | `auth/` | Django: users, sessions, SSO later — identity and nothing else |

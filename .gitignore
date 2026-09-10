@@ -3,8 +3,15 @@ node_modules/
 
 .ghostclick/
 
-# The Vue build IS committed (web/dist) so `npm start` needs no bundler,
-# and it belongs to the frontend project rather than the backend's tree.
+# The Vue build is NOT committed. It used to be, so that `npm start` needed no
+# bundler — and the cost was that every change to a component arrived in review
+# as itself plus a wall of regenerated minified bundles, and that two people
+# building the same source produced a diff.
+#
+# `npm start` builds it when it is missing or stale, which is what made the
+# committed copy redundant. A checkout with no node_modules cannot build, and
+# says so rather than serving something silently wrong.
+web/dist/
 web/node_modules/
 
 # Suites the checks create. Real ones belong in git — that is the point of

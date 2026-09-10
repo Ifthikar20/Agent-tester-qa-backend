@@ -291,7 +291,7 @@ function accounts(py, env) {
 }
 
 function buildUi(env) {
-  if (!existsSync(join(ROOT, 'node_modules', 'vite'))) return step('ui', 'vite absent — serving the committed build');
+  if (!existsSync(join(ROOT, 'node_modules', 'vite'))) return step('ui', 'vite absent — cannot build the UI (npm install)');
   // Absolute: this runs with cwd=web/, and a relative path would look for
   // web/node_modules/vite, which is not where it is.
   const args = [join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js'), 'build'];

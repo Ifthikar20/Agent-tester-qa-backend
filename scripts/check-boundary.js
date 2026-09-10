@@ -93,7 +93,7 @@ else bad('the build lands inside web/', `${relative(ROOT, outDir)} is the backen
 /**
  * And what is committed there is ONE build, not several piled up.
  *
- * web/dist is in git — that is why `npm start` needs no bundler — and vite
+ * web/dist is generated and gitignored; `npm start` makes it — and vite
  * names every chunk by a hash of its content, so a rebuild on a checkout
  * whose line endings differ produces a second complete set under different
  * names. It happened: forty-four files where twenty-two were reachable, with
