@@ -195,9 +195,9 @@ envgrep -qE '^GC_AUTH_SECRET=' && {
 
 # The placeholder check is the one that catches a copied example file. A
 # literal CHANGE_ME is long enough to pass every length test above.
-envgrep -qE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|GC_MFA_KEY|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' && {
+envgrep -qE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|GC_MFA_KEY|DJANGO_SECRET_KEY|PUBLIC_URL|GC_WEB_DIR|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' && {
   echo "  .env.prod still has CHANGE_ME placeholders. Fill them in first:"
-  envgrep -nE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|GC_MFA_KEY|DJANGO_SECRET_KEY|PUBLIC_URL|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' | sed 's/^/    /'
+  envgrep -nE '^(GC_SIGNING_KEY|GC_AUTH_PUBLIC_KEYS|GC_MFA_KEY|DJANGO_SECRET_KEY|PUBLIC_URL|GC_WEB_DIR|POSTGRES_PASSWORD|REDIS_PASSWORD)=CHANGE_ME' | sed 's/^/    /'
   exit 1; }
 
 # A '\$(' in the file is command substitution that never ran. Compose reads
@@ -214,7 +214,54 @@ envgrep -qE '^[A-Z_]+=.*\\\$\(' && {
 
 envgrep -qE '^PUBLIC_URL=https?://.+' || {
   echo "  .env.prod has no usable PUBLIC_URL (want https://<host>, or http://<ip> for a demo)."
-  echo "  It is a BUILD argument: empty ships a UI with no sign-in at all."; exit 1; }
+  echo "  Caddy serves this address, Django derives its hosts and cookies from it,"
+  echo "  and the UI was built against it. Refusing to deploy."; exit 1; }
+
+# ---- the UI, which is built in the other repository -------------------------
+#
+# GC_WEB_DIR names a directory on THIS host holding ghostclick-web's dist/,
+# bind-mounted into the runner. Compose's own \`:?\` would catch it missing, but
+# it cannot look inside, and the two ways this goes wrong both survive compose:
+# a path that does not exist (docker helpfully creates an empty directory and
+# mounts that), and the right repository with the wrong subdirectory.
+#
+# Both produce a deployment where every probe below passes. /app/ answers 200 —
+# with the placeholder page the image ships, or with a directory listing —
+# /api/state answers 401, the control plane answers, and the smoke test is
+# green on a box nobody can use.
+unquote() { local v="\$1"; v=\${v%\\"}; v=\${v#\\"}; v=\${v%\\'}; v=\${v#\\'}; printf '%s' "\$v"; }
+WEB_DIR=\$(unquote "\$(envgrep -m1 '^GC_WEB_DIR=' | cut -d= -f2-)")
+[ -n "\$WEB_DIR" ] || {
+  echo "  .env.prod has no GC_WEB_DIR. The UI is the ghostclick-web repository now:"
+  echo "  build it there and point this at the result."
+  echo ""
+  echo "      cd ghostclick-web && VITE_AUTH_URL=<PUBLIC_URL> npm run build"
+  echo "      GC_WEB_DIR=/srv/ghostclick-web/dist   in .env.prod"
+  exit 1; }
+[ -f "\$WEB_DIR/index.html" ] || {
+  echo "  GC_WEB_DIR is \$WEB_DIR, which has no index.html."
+  echo "  That is an empty directory or a source tree, not a build. Refusing to deploy."
+  exit 1; }
+
+# And the bundle was built for THIS deployment.
+#
+# VITE_AUTH_URL is baked in at build time, so a UI built for localhost, or for
+# the staging host, or with no sign-in at all, is indistinguishable from a
+# correct one until somebody tries to log in — and the failure looks like a
+# broken control plane rather than like a stale build. This is the "bundle
+# built against the wrong origin" the probe table further down names and could
+# never see; now that the UI is a directory on the host, it can be looked at.
+PUB=\$(unquote "\$(envgrep -m1 '^PUBLIC_URL=' | cut -d= -f2-)")
+PUB=\${PUB%/}
+if ! grep -rqF "\$PUB" "\$WEB_DIR" 2>/dev/null; then
+  echo "  The UI in \$WEB_DIR never mentions \$PUB."
+  echo "  It was built without VITE_AUTH_URL, or against another host, so it will"
+  echo "  offer no way to sign in to this deployment. Rebuild it:"
+  echo ""
+  echo "      cd ghostclick-web && VITE_AUTH_URL=\$PUB npm run build"
+  exit 1
+fi
+echo "  ui            \$WEB_DIR, built for \$PUB"
 
 envgrep -qE '^DJANGO_SECRET_KEY=.{32,}' || {
   echo "  .env.prod has no DJANGO_SECRET_KEY of at least 32 characters."; exit 1; }

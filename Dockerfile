@@ -1,34 +1,40 @@
 # The runner: node, playwright, and a real Chromium.
 #
-# Two stages, because the two halves need opposite things. Building the UI needs
-# vite and the whole devDependency tree; running the app needs a browser and
-# four production packages. One image with both would ship a bundler to
-# production and a browser to the build.
-
-# ---- 1 · the UI, with the control plane's address baked in ------------------
+# One stage. There used to be two, because building the UI needed vite and the
+# whole devDependency tree while running the app needs a browser and four
+# production packages, and one image with both would ship a bundler to
+# production and a browser to the build. That stage cannot exist here any more:
+# the UI is the ghostclick-web repository (docs/BOUNDARY.md) and its source is
+# not in this build context, so there is nothing to build and no reason for a
+# second stage.
 #
-# VITE_AUTH_URL is read at BUILD time — it decides whether the app has a login
-# at all and where that login lives. That is why it is a build argument: a
-# runtime env var would arrive far too late, after the bundle was written.
+# WHICH LEAVES THE QUESTION OF HOW THE IMAGE GETS A UI, and the answer is:
+# from outside, by one of two routes.
 #
-# Both base images are pinned by digest as well as by tag (docs/AUTH.md §12
+#   mount it       the deployment's answer, and the default. GC_WEB_DIR points
+#                  at /app/ui, and docker/docker-compose.prod.yml bind-mounts
+#                  the built UI over it read-only. A UI release is then a
+#                  directory swap and a `docker compose up`, with no rebuild of
+#                  an image whose contents did not change — which is the right
+#                  shape for two repositories that release on their own clocks.
+#
+#   bake it        copy ghostclick-web's dist/ into this context and build with
+#                  --build-arg GC_WEB_SRC=<that path>. Right for an air-gapped
+#                  registry, or anywhere a running container must not depend on
+#                  a directory on the host.
+#
+# With neither, /app/ui is the placeholder committed at docker/no-ui/, whose
+# index.html says what is missing and how to supply it. That is deliberate: the
+# image must still RUN with no UI — the API, the socket and the recorder
+# hand-off are all useful without one — and an operator who has skipped the
+# mount should meet a page that explains itself rather than a 503 or a 404. It
+# is also a page nobody can mistake for the app, which the empty directory it
+# replaced was not.
+#
+# The base image is pinned by digest as well as by tag (docs/AUTH.md §12
 # [ops-supply-3]): a tag is a name the registry can point somewhere else
-# tomorrow, a digest is the image that was tested. To move, look the new one
-# up with `docker buildx imagetools inspect <image:tag>` and change both.
-FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS ui
-WORKDIR /app
-ARG VITE_AUTH_URL=""
-COPY package.json package-lock.json ./
-# --ignore-scripts: nothing the build needs runs a lifecycle script, and a
-# package's install hook is arbitrary code from the registry running as the
-# build. The lockfile decides what is installed; the hooks do not get a say.
-RUN npm ci --ignore-scripts
-# web/ is self-contained on purpose (docs/BOUNDARY.md), so this is all it needs.
-COPY web ./web
-RUN VITE_AUTH_URL="$VITE_AUTH_URL" \
-    node node_modules/vite/bin/vite.js build --config web/vite.config.js
-
-# ---- 2 · the runner --------------------------------------------------------
+# tomorrow, a digest is the image that was tested. To move, look the new one up
+# with `docker buildx imagetools inspect <image:tag>` and change both.
 #
 # The Playwright image already contains the exact browser build this version
 # expects. The tag MUST match the playwright version in package.json — a
@@ -47,13 +53,22 @@ ARG GC_GIT_SHA=""
 ENV GC_GIT_SHA=$GC_GIT_SHA
 
 COPY --chown=pwuser:pwuser package.json package-lock.json ./
-# --ignore-scripts here too. The browser is already in this image, so
-# playwright's install hook has nothing to do, and no other package's hook
-# has a reason to run as the build.
+# --ignore-scripts: nothing here needs a lifecycle script, and a package's
+# install hook is arbitrary code from the registry running as the build. The
+# lockfile decides what is installed; the hooks do not get a say.
+#
+# --omit=dev is kept even though this repository now declares no devDependencies
+# at all. It costs nothing today and it is the line that keeps a bundler out of
+# production on the day somebody adds one for a test runner.
 RUN npm ci --omit=dev --ignore-scripts
 
 COPY --chown=pwuser:pwuser . .
-COPY --from=ui --chown=pwuser:pwuser /app/web/dist ./web/dist
+
+# The UI, from wherever the build was told to take it. The default lands the
+# placeholder; a real build gets --build-arg GC_WEB_SRC=<dir in the context>.
+ARG GC_WEB_SRC=docker/no-ui
+COPY --chown=pwuser:pwuser $GC_WEB_SRC ./ui
+ENV GC_WEB_DIR=/app/ui
 
 # Run as a real user, not root. Chromium refuses to start as root without
 # --no-sandbox, and disabling the sandbox on a service whose entire job is
@@ -69,6 +84,8 @@ RUN mkdir -p /app/.ghostclick && chown pwuser:pwuser /app/.ghostclick
 USER pwuser
 
 EXPOSE 3000
-# `serve`, not `start`: start.js exists to rebuild a stale UI, and there is no
-# bundler in this image by design. The UI was built in stage 1.
+# `serve`, not `start`: start.js refuses to run without a built UI, and a
+# container that must not start because a bind mount was forgotten is a worse
+# outage than one serving a page that says what is missing. server.js is the
+# half that is content either way.
 CMD ["node", "server.js"]

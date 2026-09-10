@@ -467,9 +467,16 @@ else bad('.env.prod.example matches');
  */
 console.log('\n— the supply chain ————————————————————————————————————');
 const digest = /@sha256:[0-9a-f]{64}\b/;
+/**
+ * One stage now, where there were two. The stage that built the UI cannot
+ * exist in a repository with no UI source, so the assertion changes from "both
+ * stages are pinned" to "every stage there is is pinned, and there is exactly
+ * one" — which still fails the day a bundler stage is added back, and that is
+ * the half of the old check worth keeping.
+ */
 const froms = [...runnerImage.matchAll(/^FROM (\S+)/gm)].map((m) => m[1]);
-if (froms.length === 2 && froms.every((f) => digest.test(f))) ok('both runner stages are pinned by digest', froms.map((f) => f.split('@')[0]).join(', '));
-else bad('both runner stages are pinned by digest', froms.join(', '));
+if (froms.length === 1 && digest.test(froms[0])) ok('the runner image is one stage, pinned by digest', froms[0].split('@')[0]);
+else bad('the runner image is one stage, pinned by digest', froms.join(', ') || '(no FROM)');
 const controlFrom = /^FROM (\S+)/m.exec(controlImage)?.[1] ?? '';
 if (digest.test(controlFrom)) ok('and the control image', controlFrom.split('@')[0]);
 else bad('and the control image', controlFrom);
@@ -479,8 +486,8 @@ else bad('and every image compose pulls', pulled.join(', '));
 const playwrightDigest = froms.find((f) => f.startsWith('mcr.microsoft.com/playwright'))?.split('@')[1];
 if (playwrightDigest && workflow.includes(`mcr.microsoft.com/playwright:v1.63.0-noble@${playwrightDigest}`)) ok('CI runs inside the same playwright image, digest and all');
 else bad('CI runs inside the same playwright image, digest and all', 'the browser CI tests is not the browser production runs');
-if (/npm ci --omit=dev --ignore-scripts/.test(runnerImage) && /npm ci --ignore-scripts/.test(runnerImage)) ok('npm ci runs with --ignore-scripts in both stages', 'and --omit=dev for the runner');
-else bad('npm ci runs with --ignore-scripts in both stages', 'an install hook is registry code running as the build');
+if (/npm ci --omit=dev --ignore-scripts/.test(runnerImage)) ok('npm ci runs with --ignore-scripts and --omit=dev', 'an install hook is registry code running as the build');
+else bad('npm ci runs with --ignore-scripts and --omit=dev', 'an install hook is registry code running as the build');
 if (/pip install [^\n]*--require-hashes -r requirements\.txt/.test(controlImage) && !/pip install [^\n]* gunicorn/.test(controlImage)) ok('pip installs with --require-hashes and nothing unhashed', 'gunicorn is pinned in requirements.in');
 else bad('pip installs with --require-hashes and nothing unhashed');
 /**
@@ -552,6 +559,52 @@ console.log('\n— volumes land somewhere writable —————————�
   }
 }
 
+/**
+ * 15 · The UI arrives from the other repository.
+ *
+ *      Every failure in this section has the shape this whole file is about:
+ *      the stack comes up, the edge answers 200 on /app/, every probe in the
+ *      table passes, and the deployment is unusable. The image ships a
+ *      placeholder page precisely so that this failure is legible from a
+ *      browser — which also means nothing downstream of it can tell the
+ *      difference, so the checking has to happen before the deploy.
+ */
+console.log('\n— the UI is somebody else’s build ——————————————————————');
+
+if (/GC_WEB_DIR:\?/.test(compose)) ok('compose demands GC_WEB_DIR', 'no mount, no deploy');
+else bad('compose demands GC_WEB_DIR', 'the runner would serve the placeholder and answer 200');
+if (/\$\{GC_WEB_DIR[^}]*\}:\/app\/ui:ro/.test(compose)) ok('and mounts it read-only over /app/ui', 'nothing in the runner writes to a build');
+else bad('and mounts it read-only over /app/ui');
+// The key, not the word: the comment beside the args block explains where
+// VITE_AUTH_URL went, and prose about a variable is not a variable.
+if (!/^\s+VITE_AUTH_URL:/m.test(compose)) ok('and passes no VITE_AUTH_URL to the build', 'there is no UI build here to pass it to');
+else bad('and passes no VITE_AUTH_URL to the build', 'a build argument for a stage that does not exist');
+
+/**
+ * The Dockerfile's default has to be a page rather than an empty directory.
+ * An empty directory is a 404 on the application's own address, which reads
+ * as a broken deploy and sends whoever is looking into the runner's logs,
+ * where everything is fine.
+ */
+if (/ARG GC_WEB_SRC=docker\/no-ui/.test(runnerImage) && existsSync(new URL('../docker/no-ui/index.html', import.meta.url))) {
+  ok('the image ships a page for having no UI', 'docker/no-ui, so a missing mount explains itself');
+} else bad('the image ships a page for having no UI', 'an empty directory would 404 and read as a broken deploy');
+if (/ENV GC_WEB_DIR=\/app\/ui/.test(runnerImage)) ok('and points the server at where it is mounted', 'GC_WEB_DIR=/app/ui');
+else bad('and points the server at where it is mounted');
+if (!/^COPY --from=/m.test(runnerImage)) ok('and copies nothing out of a build stage', 'there is no build stage');
+else bad('and copies nothing out of a build stage', 'a UI stage is back in the image');
+
+// And the deploy refuses the three ways the mount is wrong, all of which
+// survive compose's own `:?` and every probe in the table.
+if (/no GC_WEB_DIR/.test(deploy)) ok('the deploy refuses an unset GC_WEB_DIR', 'before it starts anything');
+else bad('the deploy refuses an unset GC_WEB_DIR');
+if (/WEB_DIR\/index\.html/.test(deploy)) ok('and a directory that is not a build', 'no index.html in it');
+else bad('and a directory that is not a build');
+if (/never mentions/.test(deploy) && /VITE_AUTH_URL/.test(deploy)) ok('and a bundle built for another host', 'the failure the probe table names and cannot see');
+else bad('and a bundle built for another host');
+if (/^GC_WEB_DIR=/m.test(example)) ok('and .env.prod.example says so', 'the operator is told what to fill in');
+else bad('and .env.prod.example says so');
+
 console.log(failures
   ? `\n  ${failures} FAILED\n`
   : '\n  OK — no secret reaches an image layer, no placeholder or unexpanded\n'
@@ -561,6 +614,7 @@ console.log(failures
     + '       in the runbook is one that runs, the runner has no route to the\n'
     + '       control plane, the edge keeps cookies, tickets and the admin\n'
     + '       where they belong, the key file is root’s and the daemon is\n'
-    + '       reached through sudo, the schedule runs, and every image and\n'
-    + '       package is pinned to the byte.\n');
+    + '       reached through sudo, the schedule runs, every image and package\n'
+    + '       is pinned to the byte, and the UI the other repository built is\n'
+    + '       mounted, checked and built for this host before anything starts.\n');
 process.exit(failures ? 1 : 0);

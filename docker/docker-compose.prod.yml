@@ -93,11 +93,14 @@ services:
       context: ..
       dockerfile: Dockerfile
       args:
-        # Baked into the bundle, so changing it rebuilds the image. The UI
-        # signs in at its own origin — the edge fronts both services.
-        VITE_AUTH_URL: ${PUBLIC_URL:?set PUBLIC_URL in .env.prod}
         # There is no .git in the image; this is how /api/version knows.
         GC_GIT_SHA: ${GC_GIT_SHA:-}
+        # VITE_AUTH_URL is gone from here, and its absence is the deployment's
+        # half of the split. The UI is built in ghostclick-web with that
+        # address baked in — it is still PUBLIC_URL, because the edge fronts
+        # both services — and arrives as the directory mounted below. A UI
+        # release is then a directory swap and a restart, rather than a rebuild
+        # of an image whose own contents did not change.
     restart: unless-stopped
     environment:
       PORT: 3000
@@ -131,6 +134,14 @@ services:
       # organisation, .ghostclick/<org>/. Without this every deploy forgets
       # which origins were allowed and every run ever made.
       - ghostclick-state:/app/.ghostclick
+      # THE UI, built in the other repository and mounted over the placeholder
+      # the image ships. Read-only, because nothing in this container has any
+      # business writing to a build, and required — the `:?` is the point:
+      # without it the runner would come up serving a page that says "no UI is
+      # mounted", the edge would answer 200, and every smoke probe below would
+      # pass a deployment nobody can use. scripts/deploy.sh checks the
+      # directory really is a build before it gets this far.
+      - ${GC_WEB_DIR:?set GC_WEB_DIR in .env.prod — the ghostclick-web build to serve}:/app/ui:ro
     # Chromium is told --disable-dev-shm-usage so it does not need a big /dev/shm,
     # but headroom here is cheap and a starved browser fails in confusing ways.
     shm_size: 512mb

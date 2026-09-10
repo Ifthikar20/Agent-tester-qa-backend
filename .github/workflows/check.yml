@@ -122,8 +122,12 @@ jobs:
           push: false
           load: true
           tags: ghostclick-runner:ci
+          # No VITE_AUTH_URL: there is no UI stage in this image any more. The
+          # app is built in ghostclick-web and mounted at /app/ui, so what is
+          # built here is the runner carrying the placeholder page the
+          # Dockerfile ships — which is exactly the image a deployment starts
+          # from, before the mount arrives.
           build-args: |
-            VITE_AUTH_URL=http://localhost
             GC_GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -138,6 +142,14 @@ jobs:
           cache-to: type=gha,mode=max
       - name: the pinned tag really does carry the browser this build wants
         run: docker run --rm ghostclick-runner:ci node -e "console.log(require('playwright').chromium.executablePath())"
+      - name: and it has something to serve at /app/ui with no mount
+        # The image ships docker/no-ui there. An empty /app/ui would answer 404
+        # on the application's own address, which reads as a broken deploy and
+        # sends whoever is looking into the runner's logs, where everything is
+        # fine. The page is what makes a forgotten bind mount legible.
+        run: |
+          docker run --rm --entrypoint sh ghostclick-runner:ci -c 'test -f /app/ui/index.html && grep -q GC_WEB_DIR /app/ui/index.html'
+          echo "the image explains itself when nobody has mounted a UI"
       - name: and no secret rode in on either build context
         # The runner's context is the repository root — on the host, the
         # directory holding .env.prod, the PEM and the vault. The control

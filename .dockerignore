@@ -21,13 +21,9 @@
 
 # --- the dev tree ----------------------------------------------------------
 # `COPY . .` runs AFTER `npm ci --omit=dev`, so a context carrying node_modules
-# overwrites the production install with the full development one — a bundler
-# and a second Chromium download shipped to production, silently.
+# overwrites the production install with the full development one — a second
+# Chromium download shipped to production, silently.
 node_modules/
-web/node_modules/
-# Built in stage 1 and copied from there. The committed copy is for `npm start`
-# on a laptop and is not what the image should serve.
-web/dist/
 
 # --- history ---------------------------------------------------------------
 # Excluded on purpose. The commit reaches the image as the GC_GIT_SHA build
@@ -47,3 +43,7 @@ docs/
 # Kept deliberately, despite being tempting to exclude: scripts/, suites/,
 # public/ and extension/ are what `npm run check:all` needs, and DEPLOY.md
 # documents running exactly that inside the container.
+#
+# docker/ is kept for one file. docker/no-ui/ is the page the image serves when
+# nobody has mounted a UI over /app/ui, so excluding this directory would give
+# the Dockerfile's default GC_WEB_SRC nothing to copy and fail the build.

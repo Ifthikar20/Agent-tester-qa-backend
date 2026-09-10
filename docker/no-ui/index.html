@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ghostclick — no UI is mounted</title>
+<!--
+  The page a runner serves when nobody has given it a UI.
+
+  This directory is what Dockerfile copies to /app/ui by default, and it is a
+  page rather than an empty directory on purpose. An empty directory produces a
+  404, and a 404 on the application's own address reads as a broken deploy —
+  which sends whoever is looking at it into the runner's logs, where everything
+  is fine. This says what is actually true: the image is running, the API is
+  answering, and the half that comes from the other repository has not been
+  supplied.
+
+  It carries no script, no stylesheet and no image, so it cannot be mistaken
+  for a stripped-down version of the app, and it needs nothing from the CSP.
+-->
+<style>
+  body { margin: 0; font: 15px/1.6 ui-sans-serif, system-ui, sans-serif; color: #1c1c1e; background: #fafafa; }
+  main { max-width: 40rem; margin: 12vh auto; padding: 0 1.5rem; }
+  h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
+  p.lede { color: #5a5a60; margin: 0 0 2rem; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: #8a8a90; margin: 2rem 0 .5rem; }
+  pre { background: #fff; border: 1px solid #e5e5e8; border-radius: 6px; padding: .8rem 1rem; overflow-x: auto; font-size: 13px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  a { color: #1c1c1e; }
+</style>
+<main>
+  <h1>The runner is up. The UI is not here.</h1>
+  <p class="lede">
+    ghostclick is two repositories. This one holds the runner and the control
+    plane; the app you are looking for is built in <code>ghostclick-web</code>
+    and handed to this server as a directory.
+  </p>
+
+  <h2>Mount it</h2>
+  <p>The usual answer, and what the production compose file does. Build the UI
+    in its own repository, then bind-mount the result over <code>/app/ui</code>:</p>
+<pre><code>cd ghostclick-web
+VITE_AUTH_URL=https://your.host npm run build
+
+# .env.prod
+GC_WEB_DIR=/srv/ghostclick-web/dist</code></pre>
+  <p>The address in <code>VITE_AUTH_URL</code> is baked into the bundle at build
+    time, so a UI built without it shows no sign-in at all, whatever this
+    runner is configured to require.</p>
+
+  <h2>Or bake it into the image</h2>
+<pre><code>cp -r ../ghostclick-web/dist ./web-dist
+docker build --build-arg GC_WEB_SRC=web-dist -t ghostclick-runner .</code></pre>
+
+  <h2>Or point the server somewhere else entirely</h2>
+<pre><code>GC_WEB_DIR=/some/other/build node server.js</code></pre>
+
+  <p>Everything that is not the app is working meanwhile:
+    <a href="/healthz">/healthz</a> says whether the browser came up, and
+    <a href="/api/version">/api/version</a> says which commit this is.</p>
+</main>
