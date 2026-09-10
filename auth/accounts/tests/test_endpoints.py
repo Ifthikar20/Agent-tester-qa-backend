@@ -15,6 +15,7 @@ import re
 import sys
 
 from allauth.account.models import EmailAddress
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -159,11 +160,24 @@ class EndpointTests(TestCase):
         self.assertEqual(self.c.get('/auth/me').status_code, 401)
 
     def test_login_cycles_the_session_key(self):
-        self.c.get('/auth/csrf')
-        before = self.c.cookies.get('sessionid')
-        before = before.value if before else None
+        """
+        A REAL pre-login session, and the keys compared (docs/AUTH.md §5.2).
+
+        Reading the cookie after GET /auth/csrf proved nothing: an anonymous
+        session is empty and SessionMiddleware sets no cookie for an empty
+        session, so `before` was None on every run and the assertion reduced
+        to "a session cookie exists after login" — green even if allauth
+        stopped cycling, which is a session-fixation regression.
+        """
+        s = self.c.session
+        s['probe'] = 1
+        s.save()
+        before = s.session_key
+        self.assertIsNotNone(before)
+        self.c.cookies[settings.SESSION_COOKIE_NAME] = before
         self.api.login('qa@example.com')
-        self.assertNotEqual(self.c.cookies['sessionid'].value, before)
+        self.assertNotEqual(self.c.session.session_key, before)
+        self.assertEqual(self.c.cookies['sessionid'].value, self.c.session.session_key)
 
     def test_the_session_endpoint_says_who(self):
         self.assertEqual(self.api.current().status_code, 401)

@@ -37,9 +37,9 @@ from tenants import plans
 from tenants.session import describe, selected
 
 from . import google, mfa, turnstile
-from .events import LOGIN_AT, auth_events, record
+from .events import LOGIN_AT, auth_events, pwned_for, record
 from .models import AuthEvent
-from .ratelimit import over
+from .ratelimit import count
 from .tokens import (
     NoSigningKey, STEP_UP_SECONDS, jwk, kid_of, load_private, mint, public_pem, session_id,
 )
@@ -54,7 +54,8 @@ def whoami(request):
     The answer to "who am I", for a signed-in request (docs/AUTH.md §10).
 
       {user: {id, email, name}, org: {slug, name, role}, orgs: [...],
-       entitlements: {...}, mfa: {required, enrolled}, flags: {}}
+       entitlements: {...}, mfa: {required, enrolled, reasons},
+       mustChangePassword: bool, flags: {}}
 
     There is no isStaff and there will not be one. Staff is a control-plane
     fact that opens /admin/, and a flag the browser was shown is a flag the
@@ -71,6 +72,12 @@ def whoami(request):
         'user': _shape(request.user),
         **describe(request),
         'mfa': mfa.describe(request.user),
+        # Whether PasswordChangeRequired is holding this session down. The SPA
+        # learned it only from a 403 on the first mint, so a RELOAD landed on
+        # whatever page the router chose and every call answered
+        # `password_change_required` with nothing routing on it. Not a secret:
+        # the session already knows, and every other endpoint says it out loud.
+        'mustChangePassword': pwned_for(request.session, request.user),
         'flags': {},
     }
 
@@ -189,8 +196,15 @@ def executor_token(request):
     # The session key is the bucket: a stolen cookie mints against its own
     # limit and nobody else's, and a script minting on every call is stopped
     # without touching the person's other sessions.
-    if over('mint', request.session.session_key or '-', settings.GC_MINT_RATE):
-        record(AuthEvent.Kind.MINT_REFUSED, request, user=request.user, reason='rate_limited')
+    past = count('mint', request.session.session_key or '-', settings.GC_MINT_RATE)
+    if past:
+        # ONE row per window, not one per attempt. §8.3 asks for a row per
+        # mint; the refusal row is an addition, and it was the unbounded one
+        # — a script hammering this endpoint with one valid cookie wrote an
+        # AuthEvent per request forever, making the cheap refusal the
+        # expensive one.
+        if past == 1:
+            record(AuthEvent.Kind.MINT_REFUSED, request, user=request.user, reason='rate_limited')
         return JsonResponse({'error': 'rate_limited'}, status=429)
 
     membership = selected(request)

@@ -29,10 +29,21 @@ import { dirname, join } from 'node:path';
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const WIN = process.platform === 'win32';
 
-// npm, npx and pip are batch files on Windows, and spawn will not run one
-// without a shell. This is the whole reason `npm install` from a script fails
-// on Git Bash with ENOENT and no explanation.
-const runner = (cmd) => (WIN ? { command: cmd, shell: true } : { command: cmd, shell: false });
+// npm and npx are batch files on Windows, and spawn will not run one without
+// a shell. This is the whole reason `npm install` from a script fails on Git
+// Bash with ENOENT and no explanation.
+//
+// ONLY those, though. `shell: true` makes Node concatenate the arguments
+// unescaped and hand the line to cmd.exe, which then reads its own
+// metacharacters out of them — and the probe below is
+// `node -e "import('playwright').then(async p => { … })"`, whose `=>` cmd.exe
+// takes as an output redirect. That is where the zero-byte file called `{`
+// kept appearing in the repository root: the probe was writing its stdout
+// into it. It also meant the probe never succeeded on Windows, so every
+// `--setup` re-downloaded a browser that was already installed. node and
+// python are real executables and need no shell.
+const SHIMS = new Set(['npm', 'npx', 'yarn', 'pnpm']);
+const runner = (cmd) => ({ command: cmd, shell: WIN && SHIMS.has(cmd) });
 
 /** Run something to completion, inheriting the terminal. */
 function sh(cmd, args, opts = {}) {
@@ -93,6 +104,19 @@ export function envFor(opts, keys, base = {}, root = ROOT) {
     runner: {
       ...base,
       PORT: String(opts.port),
+      // ERASED, not merely absent. The child is spawned with
+      // { ...process.env, ...env.runner }, so a developer who exported
+      // GC_SIGNING_KEY — or an operator who sourced .env.prod into their
+      // shell — would otherwise hand signing material to the process that
+      // drives the browser, and this map is where that is decided. An
+      // `undefined` value removes the variable from the child's environment
+      // rather than passing the string "undefined".
+      GC_SIGNING_KEY: undefined,
+      GC_AUTH_SECRET: undefined,
+      // Same reasoning for the public set with auth off: the runner turns its
+      // gate on purely on the presence of GC_AUTH_PUBLIC_KEYS, so one left in
+      // the shell would gate a run nobody asked to gate.
+      ...(opts.auth ? {} : { GC_AUTH_PUBLIC_KEYS: undefined }),
       ...(opts.auth ? {
         GC_AUTH_PUBLIC_KEYS: JSON.stringify(keys.publicKeys),
         GC_WEB_ORIGIN: webOrigin,

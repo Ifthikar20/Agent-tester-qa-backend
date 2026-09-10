@@ -19,15 +19,22 @@ class MeShapeTests(TestCase):
 
     def test_the_shape(self):
         me = self.api.get('/auth/me').json()
-        self.assertEqual(set(me), {'user', 'org', 'orgs', 'entitlements', 'mfa', 'flags'})
+        self.assertEqual(set(me), {'user', 'org', 'orgs', 'entitlements', 'mfa', 'mustChangePassword', 'flags'})
+        # False here, and the reason it is in the payload at all: the SPA
+        # learned it only from a 403 on the first mint, so a page reload left
+        # its router guard with nothing to route on.
+        self.assertIs(me['mustChangePassword'], False)
         self.assertEqual(me['user'], {'id': self.ada.pk, 'email': 'ada@acme.example', 'name': 'Ada'})
         self.assertEqual(me['org']['slug'], 'ada')
         self.assertEqual(me['org']['role'], 'owner')
         self.assertEqual([(o['slug'], o['role']) for o in me['orgs']], [('ada', 'owner'), ('acme', 'admin')])
         self.assertEqual(me['entitlements']['suites.max'], 3)       # the personal org is free
-        # Staff, and an admin of acme: both name the account (docs/AUTH.md §5.4),
-        # and only the second is said — there is no isStaff [authz-tenancy-6].
-        self.assertEqual(me['mfa'], {'required': True, 'enrolled': True, 'reasons': ['manages_organisation']})
+        # Staff, and an admin of acme: both name the account (docs/AUTH.md §5.4).
+        # The staff one is reported as the neutral 'policy', which is also
+        # what any reason a later flow adds will read as — so the pair cannot
+        # be read back as an isStaff flag [authz-tenancy-6].
+        self.assertEqual(me['mfa'], {'required': True, 'enrolled': True,
+                                     'reasons': ['policy', 'manages_organisation']})
         self.assertEqual(me['flags'], {})
 
     def test_there_is_no_is_staff(self):

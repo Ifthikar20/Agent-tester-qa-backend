@@ -104,7 +104,7 @@ class ProductionProfileTests(SimpleTestCase):
         self.assertEqual(got['GC_APP_URL'], 'https://app.example.com/app')
         self.assertEqual(got['LOGIN_URL'], 'https://app.example.com/app/login')
         self.assertEqual(got['HEADLESS_FRONTEND_URLS']['account_reset_password_from_key'],
-                         'https://app.example.com/app/reset-password/{key}')
+                         'https://app.example.com/app/reset-password?key={key}')
         self.assertTrue(got['HEADLESS_ONLY'])
         self.assertEqual(got['HEADLESS_CLIENTS'], ['browser'])
 
@@ -162,6 +162,58 @@ class RefusalTests(SimpleTestCase):
         self.assertNotEqual(done.returncode, 0, f'it started:\n{done.stdout}')
         for m in mentions:
             self.assertIn(m, done.stderr)
+
+    def test_a_public_url_with_a_path_is_refused(self):
+        """
+        Scheme and host, and nothing after them.
+
+        A path was accepted and produced a deployment broken in the quiet
+        way this one-URL profile exists to abolish: CSRF_TRUSTED_ORIGINS
+        would hold an entry no Origin header can equal, every mail link
+        would carry the prefix twice, GC_WEBAUTHN_ORIGIN would be an origin
+        fido2 refuses, and the edge's route matchers would never match the
+        paths actually served.
+        """
+        for bad in ('https://app.example.com/ghostclick',
+                    'https://app.example.com/app/',
+                    'https://app.example.com?x=1',
+                    'https://app.example.com#frag',
+                    'ftp://app.example.com'):
+            self.refuses({**PRODUCTION, 'GC_PUBLIC_URL': bad}, 'GC_PUBLIC_URL')
+        # A trailing slash is the one variation people type, and it is legal.
+        got = json.loads(load({**PRODUCTION, 'GC_PUBLIC_URL': 'https://app.example.com/'}).stdout)
+        self.assertEqual(got['CSRF_TRUSTED_ORIGINS'], ['https://app.example.com'])
+        self.assertEqual(got['GC_APP_URL'], 'https://app.example.com/app')
+
+    def test_the_public_url_wins_over_a_stray_laptop_origin(self):
+        """
+        GC_WEB_ORIGIN is documented as laptop only, and it used to WIN.
+
+        GC_APP_URL was derived from WEB_ORIGIN, whose own default is
+        PUBLIC_URL — so a stray GC_WEB_ORIGIN left in .env.prod silently
+        became the host [oauth-4] pins Google's callback_url to, the host
+        every allauth mail links to, and (with credentials) an origin that
+        may read /auth/me. GC_WEBAUTHN_ORIGIN had the precedence right two
+        hundred lines earlier; now both do.
+        """
+        got = json.loads(load({**PRODUCTION, 'GC_WEB_ORIGIN': 'https://staging.example.com'}).stdout)
+        self.assertEqual(got['GC_APP_URL'], 'https://app.example.com/app')
+        self.assertEqual(got['GC_WEBAUTHN_ORIGIN'], 'https://app.example.com')
+        # And with no public URL at all — a laptop — it is still the one to use.
+        laptop = json.loads(load({'DJANGO_DEBUG': '1', 'GC_WEB_ORIGIN': 'http://localhost:3000'}).stdout)
+        self.assertEqual(laptop['GC_APP_URL'], 'http://localhost:3000/app')
+
+    def test_an_extension_origin_must_be_an_extension_origin(self):
+        # The same expression mode.js uses, because compose hands both
+        # processes the same line: a value one accepts and the other refuses
+        # is a stack that comes up half. urlsplit alone admitted a wildcard,
+        # which Django turns into a trusted CSRF subdomain pattern.
+        for bad in ('chrome-extension://*', 'moz-extension://*.foo',
+                    'chrome-extension://abc.evil.com', 'chrome-extension://user:pw@x',
+                    'https://evil.example'):
+            self.refuses({**PRODUCTION, 'GC_EXTENSION_ORIGINS': bad}, 'GC_EXTENSION_ORIGINS')
+        got = json.loads(load({**PRODUCTION, 'GC_EXTENSION_ORIGINS': 'chrome-extension://abcdefghijklmnop'}).stdout)
+        self.assertIn('chrome-extension://abcdefghijklmnop', got['CSRF_TRUSTED_ORIGINS'])
 
     def test_wildcard_hosts_are_refused_when_debug_is_off(self):
         self.refuses({**PRODUCTION, 'GC_PUBLIC_URL': '', 'DJANGO_ALLOWED_HOSTS': '*'}, "'*'", 'GC_PUBLIC_URL')
@@ -249,10 +301,17 @@ class RefusalTests(SimpleTestCase):
     def test_the_token_lifetime_is_clamped(self):
         # Ten minutes is the ceiling on what a leaked token is worth; the
         # runner refuses anything longer, so a bigger value here would only
-        # mint tokens nothing accepts [token-4].
+        # mint tokens nothing accepts [token-4]. The floor is two minutes
+        # because the UI renews with a minute still on the clock: at or below
+        # that margin the cache is never warm, every call mints, and
+        # GC_MINT_RATE then tells a signed-in person they are signed out.
         self.assertEqual(json.loads(load({**PRODUCTION, 'GC_TOKEN_TTL': '86400'}).stdout)['GC_TOKEN_TTL'], 600)
-        self.assertEqual(json.loads(load({**PRODUCTION, 'GC_TOKEN_TTL': '5'}).stdout)['GC_TOKEN_TTL'], 60)
+        self.assertEqual(json.loads(load({**PRODUCTION, 'GC_TOKEN_TTL': '5'}).stdout)['GC_TOKEN_TTL'], 120)
+        self.assertEqual(json.loads(load({**PRODUCTION, 'GC_TOKEN_TTL': '60'}).stdout)['GC_TOKEN_TTL'], 120)
         self.assertEqual(json.loads(load({**PRODUCTION, 'GC_TOKEN_TTL': '300'}).stdout)['GC_TOKEN_TTL'], 300)
+        # And an unreadable one is a sentence naming the variable, not a
+        # ValueError traceback out of the import.
+        self.refuses({**PRODUCTION, 'GC_TOKEN_TTL': 'ten minutes'}, 'GC_TOKEN_TTL')
 
 
 class LaptopProfileTests(SimpleTestCase):

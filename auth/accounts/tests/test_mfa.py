@@ -5,15 +5,19 @@ proved one may do that a session that has not may not, and the claims the
 token draws from it.
 """
 import time
+from unittest import mock
 
 from allauth.mfa.models import Authenticator
+from allauth.mfa.recovery_codes.internal.auth import RecoveryCodes
 from django.core import mail
 from django.core.cache import cache
+from django.core.exceptions import ValidationError
 from django.test import TestCase, override_settings
 
 from tenants.models import Role
 from tenants.tests.support import member, org
 
+from .. import mfa
 from ..adapters import MFAAdapter
 from ..events import AUTH_EVENTS
 from ..models import AuthEvent
@@ -127,14 +131,67 @@ class PolicyTests(TestCase):
         self.assertEqual(api.get('/auth/me').json()['mfa']['required'], False)
 
     def test_staff_is_named_but_not_said(self):
-        # Required, and the reasons list is empty: the browser is never told
-        # that an account is staff, not even as the reason for a policy
-        # [authz-tenancy-6].
+        # The rule is that the browser cannot LEARN the account is staff, and
+        # the absent word is not the rule [authz-tenancy-6]. Removing 'staff'
+        # from the list left `required: true` with an empty list, which the
+        # other three reasons can never produce — an isStaff flag arrived at
+        # by elimination, in one line of JavaScript. So the assertion is that
+        # a staff-only account and an account named for a reason the client
+        # does not model are BYTE-IDENTICAL here.
         _, api = self.signed_in('ops@example.com', is_staff=True)
         body = api.get('/auth/me')
-        self.assertEqual(body.json()['mfa'], {'required': True, 'enrolled': False, 'reasons': []})
+        self.assertEqual(body.json()['mfa'], {'required': True, 'enrolled': False, 'reasons': ['policy']})
         self.assertNotIn('staff', body.content.decode())
+        with mock.patch.object(mfa, 'reasons', return_value=['a reason from a later flow']):
+            other = api.get('/auth/me').json()['mfa']
+        self.assertEqual(body.json()['mfa'], other)
         self.assertEqual(api.post('/auth/executor-token').json(), {'error': 'mfa_required'})
+
+    def test_a_google_only_account_cannot_set_a_password_instead_of_enrolling(self):
+        """
+        The policy's exit, closed (docs/AUTH.md §6.5, [oauth-1]).
+
+        `account/password/change` used to be exempt from MfaRequired
+        unconditionally, and for an account with no usable password allauth
+        makes `current_password` optional and treats "no reauthentication
+        flows" as recently authenticated — so a stolen cookie could SET a
+        password, sign in with it, watch `no_password` disappear, and have
+        enrolled nothing at all. The change is now reachable only while the
+        session is marked as holding a breached password, which is the one
+        case where it must come first.
+        """
+        user, api = self.signed_in('google@example.com')
+        user.set_unusable_password()
+        user.save(update_fields=['password'])
+        # Changing the hash would sign this session out; keep it, because
+        # what is under test is what a stolen cookie can do with it.
+        s = api.session
+        s['_auth_user_hash'] = user.get_session_auth_hash()
+        s.save()
+        self.assertEqual(api.get('/auth/me').json()['mfa'],
+                         {'required': True, 'enrolled': False, 'reasons': ['no_password']})
+        r = api.post(f'{HEADLESS}/account/password/change', {'new_password': 'a-brand-new-long-password'})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.json(), {'error': 'mfa_required'})
+        user.refresh_from_db()
+        self.assertFalse(user.has_usable_password())
+        # Enrolling is what is open, and it is what lifts the block.
+        enrol_totp(api)
+        self.assertEqual(api.get('/auth/me').json()['mfa']['enrolled'], True)
+        self.assertEqual(api.post(f'{HEADLESS}/account/password/change',
+                                  {'new_password': 'a-brand-new-long-password'}).status_code, 401)
+
+    def test_a_blocked_account_cannot_bolt_on_another_google_identity(self):
+        # `auth/provider/redirect` asks for no reauthentication at all, so
+        # leaving it exempt let a blocked account complete process=connect on
+        # nothing but the cookie — while REMOVING a provider is gated by
+        # StrongReauthentication. §5.4 does not list it.
+        user, api = self.signed_in('ops@example.com', is_staff=True)
+        r = api.c.post(f'{HEADLESS}/auth/provider/redirect',
+                       {'provider': 'google', 'process': 'connect', 'callback_url': '/app/security'},
+                       HTTP_X_CSRFTOKEN=api.csrf)
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.json(), {'error': 'mfa_required'})
 
     def test_a_plan_that_says_so_is_named_for_every_member(self):
         enterprise = org('globex', plan='enterprise')
@@ -535,6 +592,54 @@ class PasskeyTests(TestCase):
         # And now the sensitive thing goes through.
         self.assertEqual(self.api.add_email('new@example.com').status_code, 200)
 
+    def test_a_stranger_cannot_spend_a_victim_s_second_factor_budget(self):
+        """
+        An unauthenticated caller must not be able to lock an account out.
+
+        `auth/webauthn/login` is the one WebAuthn endpoint anonymous callers
+        reach, and allauth identifies the account from the CLIENT-supplied
+        userHandle and then consumes that account's `mfa-auth-user-<pk>`
+        bucket (login_failed, 5/5m/key) BEFORE verifying the assertion. The
+        handle is base36 of a sequential primary key. Six bogus assertions
+        every five minutes, from nobody, and the victim's own correct TOTP
+        code starts answering too_many_login_attempts.
+        """
+        victim = make_user('victim@example.com')
+        secret = give_authenticator(victim)
+        self.assertEqual(self.add_passkey().status_code, 200)   # ada's, so the handle differs
+        from allauth.account.utils import user_pk_to_url_str
+        handle = user_pk_to_url_str(victim)
+        cache.clear()
+        attacker = Api()
+        for _ in range(8):
+            options = attacker.get(f'{HEADLESS}/auth/webauthn/login').json()['data']['request_options']
+            forged = self.key.assertion(options)
+            forged['response']['userHandle'] = handle
+            r = attacker.post(f'{HEADLESS}/auth/webauthn/login', {'credential': forged})
+            self.assertEqual(r.status_code, 400, r.content)
+        # The victim's own challenge still works.
+        api = Api()
+        r = api.try_login('victim@example.com')
+        self.assertEqual(r.status_code, 401)
+        r = api.post(f'{HEADLESS}/auth/2fa/authenticate', {'code': reuse_code(secret)})
+        self.assertEqual(r.status_code, 200, r.content)
+
+    @override_settings(GC_PASSKEY_LOGIN_RATE='3/m/ip')
+    def test_and_the_endpoint_has_a_budget_of_its_own(self):
+        # The account's bucket is not the one a stranger spends; this one is.
+        self.assertEqual(self.add_passkey().status_code, 200)
+        cache.clear()
+        attacker = Api()
+        codes = []
+        for _ in range(5):
+            options = attacker.get(f'{HEADLESS}/auth/webauthn/login').json()['data']['request_options']
+            codes.append(attacker.post(f'{HEADLESS}/auth/webauthn/login',
+                                       {'credential': self.key.assertion(options, uv=False)}).status_code)
+        self.assertEqual(set(codes), {400})
+        last = attacker.post(f'{HEADLESS}/auth/webauthn/login', {'credential': {'response': {}}})
+        self.assertEqual(last.status_code, 400)
+        self.assertEqual(last.json()['errors'][0]['code'], 'too_many_login_attempts')
+
     def test_removing_a_passkey_needs_a_second_factor_and_is_logged(self):
         added = self.add_passkey().json()['data']['id']
         mail.outbox.clear()
@@ -603,7 +708,10 @@ class EncryptionTests(TestCase):
             fresh = MFAAdapter().encrypt('x')
         with override_settings(GC_MFA_KEY=self.OTHER):
             self.assertEqual(MFAAdapter().decrypt(fresh), 'x')
-            self.assertEqual(MFAAdapter().decrypt(token), '')
+            # A row this key cannot open RAISES. It used to answer '', and an
+            # empty secret is a publicly known one.
+            with self.assertRaises(ValidationError):
+                MFAAdapter().decrypt(token)
 
     def test_a_secret_under_a_lost_key_refuses_every_code_rather_than_crashing(self):
         user = make_user('ada@example.com')
@@ -614,6 +722,38 @@ class EncryptionTests(TestCase):
             r = api.post(f'{HEADLESS}/auth/2fa/authenticate', {'code': totp_code(secret)})
         self.assertEqual(r.status_code, 400)
         self.assertEqual(api.get('/auth/me').status_code, 401)
+
+    def test_the_code_for_an_EMPTY_secret_is_refused_too(self):
+        """
+        The code that actually worked.
+
+        Sending the RIGHT code for the real secret proves nothing about a
+        fail-open: with the key rotated away, decrypt() answered '', allauth
+        validated against an empty secret, and the six-digit code for an
+        empty secret is computable offline by anyone. This sends THAT code,
+        which is the one a lost key used to admit.
+        """
+        user = make_user('ada@example.com')
+        give_authenticator(user)
+        api = Api()
+        api.try_login('ada@example.com')
+        with override_settings(GC_MFA_KEY=self.OTHER):
+            r = api.post(f'{HEADLESS}/auth/2fa/authenticate', {'code': totp_code('')})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(api.get('/auth/me').status_code, 401)
+
+    def test_a_recovery_code_from_an_empty_seed_is_refused_too(self):
+        # Same shape, the other secret: RecoveryCodes.generate_codes() reads
+        # the decrypted seed, so '' would have made every code guessable.
+        user = make_user('ada@example.com')
+        give_authenticator(user)
+        RecoveryCodes.activate(user)
+        api = Api()
+        api.try_login('ada@example.com')
+        with override_settings(GC_MFA_KEY=self.OTHER):
+            with self.assertRaises(ValidationError):
+                RecoveryCodes(Authenticator.objects.get(
+                    user=user, type=Authenticator.Type.RECOVERY_CODES)).generate_codes()
 
 
 class AdduserTests(TestCase):

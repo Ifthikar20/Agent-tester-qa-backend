@@ -79,6 +79,33 @@ def _check_cap(inviter, role):
         raise Refused('only an owner grants admin or owner', forbidden=True)
 
 
+def _check_cap_still_holds(invitation, org):
+    """
+    The same cap, asked again at ACCEPTANCE.
+
+    Checked only at issue, [authz-tenancy-5] holds for a moment and then
+    stops: an outstanding invitation survives the inviter's demotion and even
+    their removal from the organisation, so a taken-over owner who is demoted
+    keeps minting owners for seven days unless somebody also notices and
+    revokes every pending grant by hand. That falsifies the sentence at the
+    top of this module — that the set of people who can manage an
+    organisation grows only by an owner's hand.
+
+    A deleted account is SET_NULL on invited_by, so there is no live inviter
+    to ask: such an invitation is refused and has to be issued again by
+    somebody who is still here.
+    """
+    if invitation.invited_by_id is None:
+        raise Refused('the inviter no longer has an account', forbidden=True)
+    inviter = Membership.objects.filter(organization=org, user_id=invitation.invited_by_id).first()
+    if inviter is None:
+        raise Refused('the inviter is no longer in this organisation', forbidden=True)
+    try:
+        _check_cap(inviter, invitation.role)
+    except Refused:
+        raise Refused('the inviter may no longer grant this role', forbidden=True) from None
+
+
 def _check_seats(org):
     cap = org.entitlements().get('members.max')
     if cap is not None and org.seats_taken() >= cap:
@@ -196,6 +223,8 @@ def _consume(pk, user):
         if not email_verified(user):
             raise Refused('address not verified')
         org = invitation.organization
+        # The role cap, re-asked now rather than trusted from a week ago.
+        _check_cap_still_holds(invitation, org)
         existing = Membership.objects.filter(organization=org, user=user).first()
         if existing is None:
             # The cap is re-checked here, not only at issue: the plan may have
@@ -223,3 +252,30 @@ def revoke(invitation):
         invitation.revoked_at = timezone.now()
         invitation.save(update_fields=['revoked_at'])
     return invitation
+
+
+def revoke_ungrantable(org, user):
+    """
+    Revoke every live invitation `user` issued to `org` that they could no
+    longer issue today.
+
+    Called when their role changes or they leave (tenants.members). The
+    re-check at acceptance already refuses these, so this is the tidy half:
+    an invitation that can never be accepted should not sit in the listing
+    looking pending, and its seat should not keep counting against
+    members.max.
+    """
+    live = Invitation.objects.live().filter(organization=org, invited_by=user)
+    inviter = Membership.objects.filter(organization=org, user=user).first()
+    doomed = []
+    for invitation in live:
+        if inviter is None:
+            doomed.append(invitation.pk)
+            continue
+        try:
+            _check_cap(inviter, invitation.role)
+        except Refused:
+            doomed.append(invitation.pk)
+    if doomed:
+        Invitation.objects.filter(pk__in=doomed).update(revoked_at=timezone.now())
+    return len(doomed)

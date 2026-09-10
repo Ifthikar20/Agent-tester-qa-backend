@@ -65,8 +65,20 @@ def seed(apps, schema_editor):
 
 
 def unseed(apps, schema_editor):
-    # Rolling back removes what this made and nothing else; organisations
-    # created since are somebody's data and stay.
+    """
+    The reverse, and what it really costs.
+
+    It deletes EVERY personal organisation, not only the ones this migration
+    backfilled — there is nothing on the row that says which — and with them
+    their memberships and invitations, by cascade. That is harmless while the
+    whole app is being unapplied, because 0001 drops the tables next. It is
+    destructive in the one case anybody actually runs it alone: rolling back
+    to 0001 on a live database to re-run the data step. Do not; re-run the
+    idempotent `manage.py personal_orgs` instead, which is what that step
+    calls anyway.
+
+    The three seeded plan rows go only if nothing is on them.
+    """
     Organization = apps.get_model('tenants', 'Organization')
     Plan = apps.get_model('tenants', 'Plan')
     Organization.objects.filter(personal_of__isnull=False).delete()

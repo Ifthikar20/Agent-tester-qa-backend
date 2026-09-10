@@ -266,17 +266,43 @@ else bad('and the runner is the bare fallback handle');
 
 // A socket ticket rides in the query string. The access log must not keep it.
 const logBlock = /log \{([\s\S]*?)\n\t\}/.exec(caddy)?.[1] ?? '';
-if (/request>uri query \{[\s\S]*?delete ticket/.test(logBlock)) ok('the access log deletes the ticket parameter');
-else bad('the access log deletes the ticket parameter', 'a ticket in a log is a ticket');
+/**
+ * Every parameter a mail or a socket can carry, named in the filter — and
+ * every credential the deployment puts in a URL carried as a PARAMETER, so
+ * the filter can reach it.
+ *
+ * `delete ticket` alone was not the rule it looked like: the invitation link
+ * is `?token=` (seven days, single-use, grants a Membership) and the
+ * password-reset link was a PATH segment (one hour, single-use, account
+ * takeover) that no query filter can touch. Both were written verbatim into
+ * `request>uri` in a JSON access log on a shared volume [ops-supply-4].
+ */
+const CARRIED = ['ticket', 't', 'token', 'key'];
+const missed = CARRIED.filter((p) => !new RegExp(`request>uri query \\{[\\s\\S]*?delete ${p}\\b`).test(logBlock));
+if (!missed.length) ok('the access log deletes every parameter a link can carry', CARRIED.join(', '));
+else bad('the access log deletes every parameter a link can carry', `${missed.join(', ')} would be logged in full`);
+// And the settings module has to keep putting them where the filter looks.
+const settingsPy = read('../auth/config/settings.py');
+const inPath = /reset_password_from_key.*reset-password\/\{\{key\}\}/.test(settingsPy);
+if (!inPath && /reset_password_from_key.*reset-password\?key=\{\{key\}\}/.test(settingsPy)) ok('and the reset key is a parameter, not a path segment', 'so `delete key` reaches it');
+else bad('and the reset key is a parameter, not a path segment', 'a one-hour takeover credential in request>uri');
 if (/request>headers>Authorization delete/.test(logBlock) && /request>headers>Cookie delete/.test(logBlock)) ok('and never logs a credential header');
 else bad('and never logs a credential header');
 if (/^\tadmin off/m.test(caddy) || /^\s*admin off/m.test(caddy)) ok('the Caddy admin API is off');
 else bad('the Caddy admin API is off', 'it can rewrite the running config');
 
 /**
- * 11 · Compose: two networks and which side of the line each service is on.
+ * 11 · Compose: three networks and which side of each line a service is on.
  *      The runner — and the Chromium it drives — has no route to the control
  *      plane or the stores; the stores have no route to the internet.
+ *
+ *      The PROPERTY is asserted first and the membership map second, because
+ *      the map alone could not fail: `{caddy: [edge], runner: [edge],
+ *      control: [edge, data]}` was satisfied BY the layout that put the
+ *      runner and the control plane on one bridge, where Docker's DNS
+ *      resolves `control` and port 8000 is open — so this section printed a
+ *      green "the runner has no route to the control plane" for exactly the
+ *      configuration that gave it one.
  */
 console.log('\n— the networks —————————————————————————————————————————');
 const service = (name) => {
@@ -286,9 +312,18 @@ const service = (name) => {
   return m ? m[1] : '';
 };
 const nets = (name) => /networks: \[([^\]]*)\]/.exec(service(name))?.[1].split(',').map((s) => s.trim()) ?? [];
-if (/^networks:\n  edge:\n  data:\n    internal: true/m.test(compose)) ok('edge and data networks exist, data is internal');
-else bad('edge and data networks exist, data is internal', 'the stores could reach the internet, or be reached');
-const expected = { caddy: ['edge'], runner: ['edge'], control: ['edge', 'data'], postgres: ['data'], redis: ['data'] };
+if (/^networks:\n  edge:\n  front:\n  data:\n    internal: true/m.test(compose)) ok('edge, front and data networks exist, data is internal');
+else bad('edge, front and data networks exist, data is internal', 'the stores could reach the internet, or be reached');
+// The rule itself, as a property of whatever the file says: no network the
+// runner is on may be one the control plane or a store is on. A shared
+// bridge is bidirectional, so sharing one IS the route.
+const shared = nets('runner').filter((n) => ['control', 'postgres', 'redis'].some((s) => nets(s).includes(n)));
+if (nets('runner').length && !shared.length) ok('the runner shares no network with control, postgres or redis', `runner: ${nets('runner').join(', ')}`);
+else bad('the runner shares no network with control, postgres or redis', shared.length ? `both are on "${shared.join('", "')}"` : 'the runner is on no network at all');
+// And caddy can still reach both, or the edge answers 502 for everything.
+if (nets('caddy').some((n) => nets('runner').includes(n)) && nets('caddy').some((n) => nets('control').includes(n))) ok('and caddy reaches both of them');
+else bad('and caddy reaches both of them', `caddy: ${nets('caddy').join(', ')}`);
+const expected = { caddy: ['edge', 'front'], runner: ['edge'], control: ['front', 'data'], postgres: ['data'], redis: ['data'] };
 for (const [name, want] of Object.entries(expected)) {
   const got = nets(name);
   if (got.length === want.length && want.every((n) => got.includes(n))) ok(`${name} is on ${want.join(' + ')} only`);
@@ -300,8 +335,18 @@ for (const name of Object.keys(expected)) {
   if (/cap_drop: \[ALL\]/.test(service(name))) ok(`${name} drops every capability`);
   else bad(`${name} drops every capability`);
 }
-if (/--requirepass \\"\$\$REDIS_PASSWORD\\"/.test(service('redis'))) ok('redis requires a password', '"internal network" is about routing, not who is on it');
+// A password, and NOT in argv: `--requirepass <value>` on the command line
+// is the plaintext in /proc/<pid>/cmdline and in `ps aux`, readable by every
+// local user — including the deploy user, who is kept out of the docker
+// group and out of .env.prod precisely so they cannot read secrets
+// [ops-supply-1].
+if (/requirepass %s/.test(service('redis')) && /redis-server \/tmp\/redis\.conf/.test(service('redis'))) ok('redis requires a password', 'from a config file it writes itself');
 else bad('redis requires a password');
+// Comment lines dropped first: this file explains the trap it closes, and
+// the explanation names the flag.
+const redisRuns = service('redis').split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join('\n');
+if (!/--requirepass/.test(redisRuns)) ok('and the password is not in its command line', 'not in /proc/<pid>/cmdline, not in ps');
+else bad('and the password is not in its command line', 'every local user on the host can read it');
 if (/scram-sha-256/.test(service('postgres')) && /POSTGRES_HOST_AUTH_METHOD: scram-sha-256/.test(service('postgres'))) ok('postgres authenticates with scram-sha-256');
 else bad('postgres authenticates with scram-sha-256');
 if (/DATABASE_URL: postgres:\/\/ghostclick:\$\{POSTGRES_PASSWORD/.test(service('control')) && /GC_REDIS_URL: redis:\/\/:\$\{REDIS_PASSWORD/.test(service('control'))) ok('the control plane is given both stores by URL');
@@ -313,8 +358,13 @@ else bad('hosts are derived from PUBLIC_URL, not set separately', 'two values th
 // environment, on the data network only.
 if (/^  scheduler:\n/m.test(compose) && /"manage\.py", "housekeeping"/.test(service('scheduler')) && /image: ghostclick-control/.test(service('scheduler'))) ok('a scheduler runs manage.py housekeeping from the control image');
 else bad('a scheduler runs manage.py housekeeping from the control image', 'sessions, stale addresses and the audit log would only be purged by a deploy');
-if (/environment: \*control-env/.test(service('scheduler')) && /environment: &control-env/.test(service('control'))) ok('with the control plane’s own environment', 'one anchor, so the two cannot drift');
+if (/<<: \*control-env/.test(service('scheduler')) && /environment: &control-env/.test(service('control'))) ok('with the control plane’s own environment', 'one anchor, so the two cannot drift');
 else bad('with the control plane’s own environment');
+// Minus the two keys. §12 says the Ed25519 private key is in the control
+// plane's environment ONLY, and inheriting the anchor whole put it in a
+// second container for a process that neither mints nor decrypts anything.
+if (/GC_SIGNING_KEY: ''/.test(service('scheduler')) && /GC_MFA_KEY: ''/.test(service('scheduler')) && /GC_NO_MINT: '1'/.test(service('scheduler'))) ok('minus the signing and second-factor keys', 'GC_NO_MINT=1 says why the boot refusal does not apply');
+else bad('minus the signing and second-factor keys', 'the private key would be in two containers');
 if (nets('scheduler').join() === 'data' && /cap_drop: \[ALL\]/.test(service('scheduler'))) ok('on the data network only, every capability dropped');
 else bad('on the data network only, every capability dropped', nets('scheduler').join(', '));
 if (/--forwarded-allow-ips", "\*"/.test(controlImage)) ok('gunicorn trusts X-Forwarded-* from the edge', "--forwarded-allow-ips='*'; only the edge can reach it");
@@ -363,15 +413,39 @@ if (/stat -c '%U:%a' \.env\.prod/.test(deploy) && /root:600/.test(deploy)) ok('a
 else bad('and a .env.prod that is not root:600', 'the signing key would be readable by whatever runs as the deploy user');
 if (!/\bgrep [^\n]*\.env\.prod\b/.test(deploy.slice(deploy.indexOf('# ---- the refusals'), deploy.indexOf('ok_disk=')))) ok('and reads the file through sudo -n cat, never directly', 'envfile(); values never leave the box');
 else bad('and reads the file through sudo -n cat, never directly', 'a root-owned file cannot be grepped by the deploy user');
-if (/exec sudo -n GC_GIT_SHA=/.test(gc) && /docker compose -f docker\/docker-compose\.prod\.yml --env-file \.env\.prod/.test(gc)) ok('scripts/gc runs compose as root through sudo', 'GC_GIT_SHA passed by name');
+if (/sudo -n GC_GIT_SHA=[^\n]*\/usr\/local\/sbin\/gc/.test(gc) && /docker compose -f docker\/docker-compose\.prod\.yml --env-file \.env\.prod/.test(gc)) ok('scripts/gc runs compose as root through sudo', 'GC_GIT_SHA passed by name');
 else bad('scripts/gc runs compose as root through sudo');
+/**
+ * The sudo TARGET must not be a file the invoker can write.
+ *
+ * /opt/ghostclick is chowned to the deploy user so that `git pull` works, so
+ * a rule naming /opt/ghostclick/scripts/gc named a file that user owns:
+ * append one line, run `sudo -n scripts/gc`, read the signing key. The
+ * target is a root-owned shim the bootstrap writes before the clone exists.
+ */
 for (const [name, text] of [['bootstrap-ec2.sh', bootstrap], ['aws-up.sh', awsUp]]) {
-  if (/NOPASSWD:SETENV: \/opt\/ghostclick\/scripts\/gc/.test(text) && /NOPASSWD: \/usr\/bin\/cat \/opt\/ghostclick\/\.env\.prod/.test(text) && /visudo -cf/.test(text)) ok(`${name} writes the sudoers line and checks it`);
+  if (/NOPASSWD:SETENV: \/usr\/local\/sbin\/gc/.test(text) && /NOPASSWD: \/usr\/bin\/cat \/opt\/ghostclick\/\.env\.prod/.test(text) && /visudo -cf/.test(text)) ok(`${name} writes the sudoers line and checks it`);
   else bad(`${name} writes the sudoers line and checks it`);
+  if (/chown root:root \/usr\/local\/sbin\/gc/.test(text) && /chmod 755 \/usr\/local\/sbin\/gc/.test(text)) ok('and its sudo target is root-owned, outside the checkout');
+  else bad('and its sudo target is root-owned, outside the checkout', 'the deploy user could edit what it runs as root');
+  if (/NOPASSWD: ALL/.test(text)) ok('and reports the cloud image’s blanket grant', 'until it is gone the two rules narrow nothing');
+  else bad('and reports the cloud image’s blanket grant');
   // Code lines only: the comment that says "NOT usermod -aG docker" is the point.
   if (!text.split('\n').some((l) => !/^\s*#/.test(l) && /usermod -aG docker/.test(l))) ok('and does not put the user in the docker group');
   else bad('and does not put the user in the docker group', 'the group is root with no log');
 }
+/**
+ * And every `sudo -n cat` of it names the SAME absolute path the sudoers
+ * rule does. sudo matches arguments literally — no canonicalisation — so
+ * `sudo -n cat .env.prod` is compared as ".env.prod" against
+ * "/opt/ghostclick/.env.prod" and refused: on a host carrying only these two
+ * rules the deploy died with "cannot read .env.prod" and the rule correctly
+ * in place. It appeared to work only under the blanket grant above.
+ */
+const catsRelative = [['deploy.sh', deploy], ['docs/DEPLOY.md', doc]]
+  .filter(([, text]) => /sudo -n(?: \/usr\/bin)? cat (?!\/|"\$)/.test(text) || /sudo cat \.env\.prod/.test(text));
+if (!catsRelative.length) ok('every sudo read of .env.prod uses an absolute path', 'sudo matches arguments literally');
+else bad('every sudo read of .env.prod uses an absolute path', `${catsRelative.map(([n]) => n).join(', ')} would be refused by the rule that permits it`);
 if (/install -m 600 -o root -g root \.env\.prod\.new \.env\.prod/.test(awsUp) && !/\bsg docker\b/.test(awsUp)) ok('aws-up.sh installs .env.prod root-owned and runs the stack through gc');
 else bad('aws-up.sh installs .env.prod root-owned and runs the stack through gc');
 if (/HTTP_CIDR=\$\{HTTP_CIDR:-\}/.test(awsUp) && /set HTTP_CIDR to who may reach the app/.test(awsUp) && !/HTTP_CIDR:-0\.0\.0\.0\/0/.test(awsUp)) ok('aws-up.sh requires an explicit HTTP_CIDR', 'the internet is typed, never defaulted');
@@ -409,10 +483,24 @@ if (/npm ci --omit=dev --ignore-scripts/.test(runnerImage) && /npm ci --ignore-s
 else bad('npm ci runs with --ignore-scripts in both stages', 'an install hook is registry code running as the build');
 if (/pip install [^\n]*--require-hashes -r requirements\.txt/.test(controlImage) && !/pip install [^\n]* gunicorn/.test(controlImage)) ok('pip installs with --require-hashes and nothing unhashed', 'gunicorn is pinned in requirements.in');
 else bad('pip installs with --require-hashes and nothing unhashed');
-const hashed = (requirements.match(/--hash=sha256:[0-9a-f]{64}/g) ?? []).length;
-const pins = (requirements.match(/^[a-zA-Z0-9_.\[\]-]+==\S+/gm) ?? []).length;
-if (hashed >= pins && pins >= 20 && /^gunicorn==/m.test(requirements)) ok('requirements.txt is pinned with hashes, gunicorn included', `${pins} packages, ${hashed} hashes`);
-else bad('requirements.txt is pinned with hashes, gunicorn included', `${pins} pins, ${hashed} hashes`);
+/**
+ * PER REQUIREMENT, not in aggregate.
+ *
+ * `hashed >= pins` compared two totals, so a file where thirty-two packages
+ * lost their hashes and one kept four hundred would have passed. It also
+ * under-counted: the name pattern excluded the comma in
+ * `django-allauth[headless,mfa,socialaccount]==`, so the one package whose
+ * extras the spec names by hand was the one pin the check never looked at.
+ *
+ * pip-compile writes one block per requirement, each starting at column 0.
+ */
+const blocks = requirements.split(/\n(?=[^\s#])/).filter((b) => /^[^\s=]+==/.test(b));
+const unhashed = blocks.filter((b) => !/--hash=sha256:[0-9a-f]{64}/.test(b)).map((b) => /^([^\s=]+)==/.exec(b)[1]);
+const hashes = (requirements.match(/--hash=sha256:[0-9a-f]{64}/g) ?? []).length;
+if (!unhashed.length && blocks.length >= 20 && /^gunicorn==/m.test(requirements)) ok('every requirement is pinned WITH a hash, gunicorn included', `${blocks.length} packages, ${hashes} hashes`);
+else bad('every requirement is pinned WITH a hash, gunicorn included', unhashed.length ? `no hash for ${unhashed.join(', ')}` : `${blocks.length} pins`);
+if (blocks.some((b) => /^django-allauth\[/.test(b))) ok('and the extras this design names are pinned like the rest', 'django-allauth[headless,mfa,socialaccount]');
+else bad('and the extras this design names are pinned like the rest');
 if (existsSync(new URL('../auth/requirements.in', import.meta.url)) && /GENERATED by pip-compile/.test(requirements)) ok('and is generated from requirements.in', 'the file a person edits');
 else bad('and is generated from requirements.in');
 if (/^permissions:\n  contents: read/m.test(workflow)) ok('the workflow token can only read', 'permissions: contents: read');

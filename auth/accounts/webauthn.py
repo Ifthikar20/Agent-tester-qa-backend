@@ -85,6 +85,19 @@ def origin_of(credential):
 
 
 def check_origin(credential):
-    """Refuse a credential made on any origin but the app's own, with allauth's own error."""
-    if not isinstance(credential, dict) or origin_of(credential) != expected_origin():
+    """
+    Refuse a credential made on any origin but the app's own, with allauth's
+    own error.
+
+    An UNCONFIGURED pin is a refusal, not a pass. `expected_origin()` is ''
+    on a bare `manage.py runserver` with neither GC_PUBLIC_URL nor
+    GC_WEB_ORIGIN set, and `origin_of()` is '' for anything it cannot read —
+    so comparing the two used to make `{'response': {}}` ACCEPTABLE. fido2
+    rejects such a credential a moment later, but a check whose unconfigured
+    state is "allow" is one refactor away from being the only one left.
+    """
+    expected = expected_origin()
+    if not expected:
+        raise get_adapter().validation_error('incorrect_code')
+    if not isinstance(credential, dict) or origin_of(credential) != expected:
         raise get_adapter().validation_error('incorrect_code')

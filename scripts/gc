@@ -16,11 +16,27 @@
 # key and is root-owned, 0600, so no process running as the deploy user can
 # read it; the deploy user is NOT in the docker group, because that group is
 # root by another name and nothing logs its use; and every command that
-# reaches the daemon goes through one sudoers line for this script, which
-# means every one of them is in auth.log with who ran it. bootstrap-ec2.sh
-# and aws-up.sh write that line:
+# reaches the daemon goes through one sudoers line, which means every one of
+# them is in auth.log with who ran it. bootstrap-ec2.sh and aws-up.sh write
+# that line, and it names a file in /usr/local/sbin:
 #
-#   ubuntu ALL=(root) NOPASSWD:SETENV: /opt/ghostclick/scripts/gc
+#   ubuntu ALL=(root) NOPASSWD:SETENV: /usr/local/sbin/gc
+#
+# NOT this file. This file lives in the checkout, which the deploy user owns
+# and pulls into — so pointing sudo at it made
+# \`echo 'cat .env.prod' >> scripts/gc && sudo -n scripts/gc\` a one-line way
+# to read the signing key, which is the exact thing [ops-supply-1] is for.
+# /usr/local/sbin/gc is root:root 0755, written by the bootstrap before the
+# clone exists, and it does the one thing this wrapper's last line does.
+#
+# WHAT THIS DOES NOT BUY. Compose still reads docker/compose.prod.yml out of
+# the checkout, and a compose file can mount any host path into a container:
+# a deploy user who can edit that file can still become root the slow way.
+# \`gc\` is root-equivalent by design, and the control it establishes is the
+# auth.log record of who ran what and the fact that .env.prod itself stays
+# unreadable — not confinement. Confining it would mean putting the compose
+# file out of the deploy user's reach too, which is a different deployment
+# shape than "git pull and run".
 #
 # SETENV, so GC_GIT_SHA — the one variable the deploy sets in the shell for
 # compose to bake into the runner image — survives sudo's environment reset.
@@ -35,7 +51,15 @@ if [ "$(id -u)" != 0 ] && ! docker info >/dev/null 2>&1; then
   # password prompt inside an ssh session hangs rather than asks; the
   # sudoers line above is what makes this succeed, and its absence is the
   # message below.
-  exec sudo -n GC_GIT_SHA="${GC_GIT_SHA:-}" "$ROOT/scripts/gc" "$@" || {
-    echo "sudo -n $ROOT/scripts/gc failed: add the sudoers line at the top of this file" >&2; exit 1; }
+  # No `exec` on this path. exec REPLACES this shell, so when sudo runs and
+  # then refuses — the exact case the message below is for — the wrapper is
+  # already gone and all the operator sees is sudo's own "a password is
+  # required". One extra fork buys the sentence that names the sudoers line.
+  sudo -n GC_GIT_SHA="${GC_GIT_SHA:-}" /usr/local/sbin/gc "$@"
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "sudo -n /usr/local/sbin/gc exited $status — is the sudoers line at the top of this file in place?" >&2
+  fi
+  exit "$status"
 fi
 exec docker compose -f docker/docker-compose.prod.yml --env-file .env.prod "$@"

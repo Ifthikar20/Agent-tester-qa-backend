@@ -106,9 +106,9 @@ def token_from_mail(message=None, param='token'):
 
 
 def key_from_mail(message=None):
-    """The password-reset key in the newest mail: the last path segment of the link."""
+    """The password-reset key in the newest mail: the link's `key` parameter."""
     body = (message or last_mail()).body
-    found = re.search(r'/reset-password/([^\s/]+)', body)
+    found = re.search(r'/reset-password\?key=([^\s&]+)', body)
     assert found, body
     return found.group(1)
 

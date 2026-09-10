@@ -39,6 +39,19 @@ def over(name, key, rate):
     boundary, which is fine for what this protects — a guess at an invitation
     token is worth one in 2^256 either way — and costs one cache call.
     """
+    return count(name, key, rate) > 0
+
+
+def count(name, key, rate):
+    """
+    The same count, as a number: 0 while within the rate, and 1 for the FIRST
+    attempt past it, 2 for the second, and so on.
+
+    `over` cannot tell those apart, and a caller that writes an audit row on
+    every refusal therefore does unbounded work past the limit — which is the
+    opposite of what a limiter is for. A caller that wants one row per window
+    asks for the first.
+    """
     limit, seconds = parse(rate)
     ck = f'gc:rl:{name}:{key}'
     cache.add(ck, 0, seconds)
@@ -48,4 +61,4 @@ def over(name, key, rate):
         # The key expired between add and incr; this attempt opens a window.
         cache.set(ck, 1, seconds)
         n = 1
-    return n > limit
+    return max(0, n - limit)

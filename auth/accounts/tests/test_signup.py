@@ -112,6 +112,15 @@ class OpenSignupTests(TestCase):
         told = [m for m in mail.outbox if m.to == ['taken@example.com']]
         self.assertEqual(len(told), 1)
         self.assertIn('already exists', told[0].body)
+        # And the audit log has it. §4.6 asks for a row for every refusal,
+        # and this branch — the one an enumeration campaign walks — wrote
+        # none at all in open and domain mode, because the code branched on
+        # the sign-up POLICY rather than on whether the address exists. With
+        # a uniform response and a 10/h/ip limit, the log was the only other
+        # place it could show up.
+        rows = AuthEvent.objects.filter(kind=AuthEvent.Kind.SIGNUP_REFUSED)
+        self.assertEqual([(r.email, r.detail['reason']) for r in rows],
+                         [('taken@example.com', 'address already has an account')])
 
     def test_the_two_branches_take_the_same_time(self):
         # The creation branch hashes a password with Argon2id; the "already
@@ -204,10 +213,20 @@ class InviteSignupTests(TestCase):
             api.verify('000000')
         self.assertTrue(Invitation.objects.get(pk=inv.pk).is_live)
         self.assertFalse(Membership.objects.filter(organization=self.acme, user__email='bob@acme.example').exists())
-        # Somebody else with the mailbox's cooperation can still complete it later.
-        api2 = Api()
-        api2.signup('bob@acme.example', PASSWORD)    # "exists" branch: mail says so
-        self.assertEqual(api2.get('/auth/me').status_code, 401)
+        # The unverified account row SURVIVES the abort, and that is the part
+        # worth pinning: a second sign-up for this address is not a second
+        # chance at the code. allauth's assess_unique_email reports an
+        # unverified row as taken under ACCOUNT_PREVENT_ENUMERATION, so a
+        # repeat goes down the "already exists" branch and no code is sent —
+        # the invited person's way in is Forgot password on the account they
+        # did not finish making, then the code at their next sign-in.
+        #
+        # This comment used to say somebody could simply sign up again and
+        # complete it later, which is not what happens. Nothing about the
+        # repeat is asserted here, because what a repeat gets also depends on
+        # the sign-up rate limit, and that belongs to PolicyTests.
+        self.assertFalse(EmailAddress.objects.get(email='bob@acme.example').verified)
+        self.assertEqual(Api().get('/auth/me').status_code, 401)
 
     def test_an_uninvited_address_is_answered_exactly_like_an_invited_one(self):
         self.invite('bob@acme.example')
@@ -223,7 +242,8 @@ class InviteSignupTests(TestCase):
         self.assertIn('by invitation', told[0].body)
         self.assertNotRegex(told[0].body, r'\b\d{6}\b')
         ev = AuthEvent.objects.get(kind=AuthEvent.Kind.SIGNUP_REFUSED)
-        self.assertEqual((ev.email, ev.detail['reason']), ('eve@acme.example', 'no live invitation'))
+        self.assertEqual((ev.email, ev.detail['reason']),
+                         ('eve@acme.example', 'no live invitation for this address'))
 
     def test_a_used_or_revoked_invitation_does_not_admit(self):
         inv = self.invite('bob@acme.example')
@@ -293,6 +313,21 @@ class PolicyTests(TestCase):
             allowed.assert_called()
         self.assertTrue(hasattr(AccountAdapter, 'clean_email'))
 
-    def test_signup_rate_limit_is_per_address_and_per_account(self):
-        # ACCOUNT_RATE_LIMITS['signup'] = '10/h/ip,3/h/key'
-        self.assertEqual(Api().get(f'{HEADLESS}/config').status_code, 200)
+    @override_settings(ACCOUNT_RATE_LIMITS={'signup': '2/h/ip'})
+    def test_the_signup_rate_limit_is_per_address_of_the_caller(self):
+        """
+        The limit that actually stands in front of sign-up.
+
+        This test asserted nothing at all — its whole body was that
+        /config answers 200 — and its name and comment described
+        '10/h/ip,3/h/key', which is not what settings.py configures.
+        allauth applies the limit before the form is read, so there is no
+        email to key on and the per-address half cannot exist here; the
+        per-address limit that DOES exist is on the code a sign-up then
+        needs, and test_the_code_can_be_resent asserts its 429.
+        """
+        cache.clear()
+        self.assertEqual(Api().signup('one@example.com', PASSWORD).status_code, 401)
+        self.assertEqual(Api().signup('two@example.com', PASSWORD).status_code, 401)
+        self.assertEqual(Api().signup('three@example.com', PASSWORD).status_code, 429)
+        self.assertFalse(User.objects.filter(email='three@example.com').exists())

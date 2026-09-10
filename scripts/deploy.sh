@@ -42,8 +42,20 @@ read -r -d '' EDGE <<'EDGE' || true
 # deploy user can read the signing key in it. This script needs the file's
 # shape — which keys, is the URL http — never a value, and reads it through
 # the one sudoers line that allows exactly `cat` of exactly this file.
-envfile() { if [ -r .env.prod ]; then cat .env.prod; else sudo -n cat .env.prod 2>/dev/null || true; fi; }
-PUBLIC_URL=$(envfile | grep -E '^PUBLIC_URL=' | cut -d= -f2- | tr -d '\r' | sed 's#/*$##')
+# The ABSOLUTE path, because sudo matches a command's arguments literally —
+# fnmatch against the sudoers text, with no canonicalisation. A relative
+# `cat .env.prod` is compared as ".env.prod" against "/opt/ghostclick/.env.prod"
+# and refused, so on a host carrying only the two sudoers lines this read
+# returned nothing and every deploy died at the "cannot read .env.prod"
+# refusal with the sudoers line already correctly in place. It looked like it
+# worked only because a stock Ubuntu image still grants `ubuntu ALL=NOPASSWD:
+# ALL`, which matches everything.
+ENVPATH="$PWD/.env.prod"
+envfile() { if [ -r "$ENVPATH" ]; then cat "$ENVPATH"; else sudo -n /usr/bin/cat "$ENVPATH" 2>/dev/null || true; fi; }
+# `|| true`: with no PUBLIC_URL= line grep exits 1, and under `set -euo
+# pipefail` that took the whole remote script down through the command
+# substitution — silently, before the refusal below could name the problem.
+PUBLIC_URL=$(envfile | grep -E '^PUBLIC_URL=' | cut -d= -f2- | tr -d '\r' | sed 's#/*$##' || true)
 SCHEME=${PUBLIC_URL%%://*}
 HOSTPORT=${PUBLIC_URL#*://}
 HOST=${HOSTPORT%%:*}
@@ -88,7 +100,7 @@ REMOTE
   inspect-env)
     # NAMES only. There is deliberately no mode that prints values: the whole
     # point of the vault is that secrets do not travel back over this link.
-    remote "cd $REMOTE_DIR && { cat .env.prod 2>/dev/null || sudo -n cat .env.prod; } | grep -oE '^[A-Z_]+' | sort"
+    remote "cd $REMOTE_DIR && { cat .env.prod 2>/dev/null || sudo -n /usr/bin/cat $REMOTE_DIR/.env.prod; } | grep -oE '^[A-Z_]+' | sort"
     exit 0 ;;
 
   deploy|rollback) : ;;
@@ -139,7 +151,7 @@ case "\$owner" in
 esac
 $EDGE
 ENVTXT=\$(envfile)
-[ -n "\$ENVTXT" ] || { echo "  cannot read .env.prod: it is root-owned and 'sudo -n cat .env.prod' is refused."
+[ -n "\$ENVTXT" ] || { echo "  cannot read \$ENVPATH: it is root-owned and 'sudo -n /usr/bin/cat \$ENVPATH' is refused."
   echo "  Add the sudoers line from scripts/bootstrap-ec2.sh (docs/DEPLOY.md)."; exit 1; }
 envgrep() { printf '%s\n' "\$ENVTXT" | grep "\$@"; }
 
@@ -263,7 +275,14 @@ esac
 ok_disk=\$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
 if [ "\${ok_disk:-99}" -lt 8 ]; then
   echo "  only \${ok_disk}G free — the image build needs room. Pruning."
-  docker image prune -f >/dev/null; docker builder prune -f >/dev/null
+  # Through the wrapper, which is the only thing with sudo rights on the
+  # daemon: this script refuses to run for a user in the docker group, so a
+  # bare \`docker\` here was guaranteed permission-denied on the socket — and
+  # under \`set -euo pipefail\` that aborted the deploy in exactly the case
+  # the branch exists to rescue. \`|| true\` because a prune that cannot run
+  # is not a reason to stop either.
+  $GC image prune -f >/dev/null 2>&1 || true
+  $GC builder prune -f >/dev/null 2>&1 || true
 fi
 
 # ---- move to the target commit ---------------------------------------------
@@ -312,14 +331,30 @@ $GC up -d --build
 # means the driven Chromium can read instance credentials, and that stack
 # is taken down rather than left up.
 if [ "\$imds" != 000 ]; then
-  hop=\$($GC exec -T runner node -e "fetch('http://169.254.169.254/latest/api/token',{method:'PUT',headers:{'X-aws-ec2-metadata-token-ttl-seconds':'60'},signal:AbortSignal.timeout(3000)}).then(r=>console.log(r.status)).catch(()=>console.log('unreachable'))" 2>/dev/null | tr -d '\r' || echo unreachable)
+  # The exec's own exit status, kept apart from what node printed. Folding
+  # them together (\`|| echo unreachable\`) made "the probe could not run" —
+  # container not up, exec refused, service renamed — indistinguishable from
+  # node's own "unreachable", which is the PASS. The one check §11 upgrades
+  # from "the bring-up script set it" to "the deploy proves it" could
+  # therefore be no check at all.
+  hop=\$($GC exec -T runner node -e "fetch('http://169.254.169.254/latest/api/token',{method:'PUT',headers:{'X-aws-ec2-metadata-token-ttl-seconds':'60'},signal:AbortSignal.timeout(3000)}).then(r=>console.log(r.status)).catch(()=>console.log('unreachable'))" 2>/dev/null | tr -d '\r') || probe_failed=1
+  if [ "\${probe_failed:-0}" = 1 ] || [ -z "\$hop" ]; then
+    echo "  could not run the IMDS probe inside the runner — the hop limit is UNPROVEN."
+    $GC logs --tail=20 runner || true
+    exit 1
+  fi
   case "\$hop" in
     200)
       echo "  THE RUNNER CAN REACH INSTANCE CREDENTIALS: the IMDS hop limit is not 1. Taking it down."
       echo "    aws ec2 modify-instance-metadata-options --instance-id <id> \\\\"
       echo "      --http-tokens required --http-put-response-hop-limit 1 --http-endpoint enabled"
       $GC down; exit 1 ;;
-    *) echo "  IMDS is out of the runner's reach (hop limit 1): \${hop:-unreachable}" ;;
+    unreachable) echo "  IMDS is out of the runner's reach (hop limit 1): the token PUT timed out" ;;
+    ''|*[!0-9]*)
+      echo "  the IMDS probe answered \"\$hop\", which is neither a status nor 'unreachable'."
+      echo "  The hop limit is UNPROVEN; not leaving this stack up."
+      $GC down; exit 1 ;;
+    *) echo "  IMDS answered \$hop to an untokened runner — not 200, so no credentials, but look at it." ;;
   esac
 fi
 

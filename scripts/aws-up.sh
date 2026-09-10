@@ -189,10 +189,29 @@ auth() {
 }
 # The description is not free text: EC2 takes only a-zA-Z0-9. _-:/()#,@[]+=&;{}!$*
 # there, so the apostrophe in "operator's" failed the whole call.
+# Ranges the app is NO LONGER meant to be reachable from, revoked before the
+# new one is added. `auth` only ADDS, so on a group made by an earlier run of
+# this script — which defaulted HTTP_CIDR to 0.0.0.0/0 — an operator rerunning
+# with their own address was told "http from <their ip>" while the internet
+# rule sat there untouched. A narrowing that reports success and narrows
+# nothing is worse than no narrowing.
+unauth_others() {
+  existing=$(aws_ ec2 describe-security-groups --group-ids "$SG" \
+    --query "SecurityGroups[0].IpPermissions[?FromPort==\`$1\`].IpRanges[].CidrIp" \
+    --output text 2>/dev/null || true)
+  for cidr in $existing; do
+    [ "$cidr" = "$HTTP_CIDR" ] && continue
+    aws_ ec2 revoke-security-group-ingress --group-id "$SG" \
+      --ip-permissions "IpProtocol=tcp,FromPort=$1,ToPort=$1,IpRanges=[{CidrIp=$cidr}]" >/dev/null 2>&1 || true
+    ok "revoked $cidr on $1"
+  done
+}
 auth 22 "$SSH_CIDR" "deploys from one laptop"
+unauth_others 80
 auth 80 "$HTTP_CIDR" "the app"
 # 443 as well: with a hostname in PUBLIC_URL, Caddy answers there and uses
 # 80 only to redirect and to prove the domain to Let's Encrypt.
+unauth_others 443
 auth 443 "$HTTP_CIDR" "the app over tls"
 ok "security group $SG"
 
@@ -302,10 +321,33 @@ fi
 # file itself is root-owned below (docs/AUTH.md §12 [ops-supply-1]). A box
 # from before this rule has ubuntu in the group; it is taken out.
 if id -nG ubuntu | grep -qw docker; then sudo gpasswd -d ubuntu docker >/dev/null; fi
-printf 'ubuntu ALL=(root) NOPASSWD:SETENV: /opt/ghostclick/scripts/gc\nubuntu ALL=(root) NOPASSWD: /usr/bin/cat /opt/ghostclick/.env.prod\n' \
+# The sudo TARGET is root-owned and outside the checkout. Named at
+# /opt/ghostclick/scripts/gc it was a file `ubuntu` owns and git pulls into,
+# so appending a line to it and running `sudo -n scripts/gc` read the signing
+# key — the control [ops-supply-1] exists for, undone by its own target.
+sudo tee /usr/local/sbin/gc >/dev/null <<'SHIM'
+#!/bin/sh
+# Written by scripts/aws-up.sh. root:root 0755 on purpose: this is what the
+# sudoers rule names, so the deploy user must not be able to edit it. The
+# friendly wrapper is /opt/ghostclick/scripts/gc, which calls this.
+set -eu
+cd /opt/ghostclick
+exec docker compose -f docker/docker-compose.prod.yml --env-file .env.prod "$@"
+SHIM
+sudo chown root:root /usr/local/sbin/gc
+sudo chmod 755 /usr/local/sbin/gc
+printf 'ubuntu ALL=(root) NOPASSWD:SETENV: /usr/local/sbin/gc\nubuntu ALL=(root) NOPASSWD: /usr/bin/cat /opt/ghostclick/.env.prod\n' \
   | sudo tee /etc/sudoers.d/ghostclick >/dev/null
 sudo chmod 440 /etc/sudoers.d/ghostclick
 sudo visudo -cf /etc/sudoers.d/ghostclick >/dev/null
+# The stock cloud image's blanket grant matches everything the two rules
+# above narrow, so until it is gone they restrict nothing. Reported, not
+# removed: an operator locked out of their own box has a worse day.
+if sudo -nl 2>/dev/null | grep -qE '\(ALL(:ALL)?\) NOPASSWD: ALL'; then
+  echo "  ! ubuntu still has a blanket NOPASSWD:ALL grant (usually"
+  echo "    /etc/sudoers.d/90-cloud-init-users); the two rules above restrict"
+  echo "    nothing until it is removed."
+fi
 
 # 4 GB is enough to RUN the stack and tight to BUILD it. Swap is what stops the
 # OOM killer taking Chromium during the first image build.

@@ -48,8 +48,11 @@ as the UI, and never executes it — a human presses Run.
 browser makes is checked against the address it resolves to, and one bound for
 loopback, RFC 1918, link-local (the instance metadata service included), a
 bare compose hostname, `*.internal` or `*.local` is aborted. The compose
-networks give the runner no route to the control plane or the stores anyway;
-this is the check that holds when a page at an allowed origin tries. The
+networks give the runner no route to the control plane or the stores anyway —
+the runner is on `edge`, the control plane on `front` and `data`, and nothing
+is on both; this is the check that holds when a page at an allowed origin
+tries, and against the host's own metadata service, which is on no compose
+network at all. The
 bundled demo pages are not served on a gated runner (`GC_DEMO=1` brings them
 back), and its own origin is not seeded as drivable.
 
@@ -115,8 +118,12 @@ change a piece of it.
 
 One EC2 host, Docker Compose, everything behind a single Caddy so the whole app
 is **one origin** — which removes CORS, cross-site cookies and a build-time URL
-from the problem entirely — and **two networks**, so the process that holds a
-browser other people drive cannot reach the process that decides who they are.
+from the problem entirely — and **three networks**, so the process that holds
+a browser other people drive cannot reach the process that decides who they
+are. Three, because a bridge network is bidirectional: caddy shares `edge`
+with the runner and `front` with the control plane, and the runner is on
+`edge` alone, so there is no network the runner and the control plane are
+both on.
 
 ```
                     you  ──►  https://<host>/      (or http://<ip>/ for a demo)
@@ -289,13 +296,41 @@ That installs Docker, adds the swapfile, creates `/opt/ghostclick`, writes
 `/etc/sudoers.d/ghostclick`, and stops. It does **not** put you in the docker
 group, on purpose (docs/AUTH.md §12): that group is root by another name and
 nothing logs its use. Instead the sudoers file lets you run exactly
-`scripts/gc` — the stack's own compose wrapper — as root, so every command
-that reaches the daemon is in `auth.log` with who ran it, and lets the deploy
-script read `.env.prod`'s key *names* through `sudo cat`:
+`/usr/local/sbin/gc` — a root-owned shim that runs the stack's compose file —
+as root, so every command that reaches the daemon is in `auth.log` with who
+ran it, and lets the deploy script read `.env.prod`'s key *names* through
+`sudo -n /usr/bin/cat /opt/ghostclick/.env.prod` — the absolute path, because
+sudo matches a command's arguments literally and a relative `cat .env.prod`
+does not match the rule that permits it:
 
 ```
-ubuntu ALL=(root) NOPASSWD:SETENV: /opt/ghostclick/scripts/gc
+ubuntu ALL=(root) NOPASSWD:SETENV: /usr/local/sbin/gc
 ubuntu ALL=(root) NOPASSWD: /usr/bin/cat /opt/ghostclick/.env.prod
+```
+
+Two details that are easy to get wrong and quiet when you do.
+
+**The target is not in the checkout.** `/opt/ghostclick` is owned by `ubuntu`
+so that `git pull` works, so a sudoers rule naming
+`/opt/ghostclick/scripts/gc` would be a rule naming a file the deploy user can
+edit — `echo 'cat .env.prod' >> scripts/gc && sudo -n scripts/gc` and the
+signing key is on your screen. The shim is written by the bootstrap, before
+the clone exists, and `scripts/gc` in the checkout calls it.
+
+**It is still root-equivalent, and that is the design.** Compose reads
+`docker/docker-compose.prod.yml` out of the checkout, and a compose file can
+mount any host path into a container — so somebody who can edit the checkout
+can become root the slow way whatever the sudoers rule says. What these two
+lines buy is the `auth.log` record of who ran what, and `.env.prod` staying
+unreadable to every process that is not root. Not confinement.
+
+**And on a stock Ubuntu image they buy nothing yet.** `cloud-init` writes
+`/etc/sudoers.d/90-cloud-init-users` with `ubuntu ALL=(ALL) NOPASSWD:ALL`,
+which matches everything. Both bootstrap scripts say so if they find it. Once
+you are sure you can reach the host another way:
+
+```bash
+sudo rm /etc/sudoers.d/90-cloud-init-users
 ```
 
 Then:
@@ -424,8 +459,12 @@ application" — with the authorised redirect URI set to exactly
 and `PUBLIC_URL` as the authorised JavaScript origin. That path is the only
 thing under `/accounts/` the edge routes and the only thing the control plane
 mounts there: the sign-in is started by a CSRF-protected POST under
-`/_allauth/`, a `GET` can never start one, and Google's One Tap endpoint does
-not exist in this deployment. Then `bash scripts/deploy.sh`; the button
+`/_allauth/`, and a `GET` can never start one. Google's One Tap endpoint
+answers 404: allauth's provider `login/token/` URL is never mounted, and its
+headless `auth/provider/token` — which the headless url block mounts whether
+you want it or not — is shadowed by a 404 view in `config/urls.py`, because it
+would sign an id_token holder in with no state, no PKCE, and none of the
+refusal-normalising the Google callback does. Then `bash scripts/deploy.sh`; the button
 appears on the sign-in and sign-up pages and "Connect a Google account" under
 Security.
 
@@ -472,7 +511,8 @@ It SSHes in itself. What it does, in order:
    `GC_AUTH_PUBLIC_KEYS` (or a private one there), a leftover
    `GC_AUTH_SECRET` line, a `DJANGO_ALLOWED_HOSTS` line (nothing reads it;
    `'*'` in particular), a `GC_TOKEN_TTL` outside 60–600, or a store password
-   that is not URL-safe. It reads the file's *shape* through `sudo cat`;
+   that is not URL-safe. It reads the file's *shape* through
+   `sudo -n /usr/bin/cat "$PWD/.env.prod"`;
    no value leaves the box.
 2. **Refuses** a box where IMDSv1 is still enabled (an untokened GET of the
    metadata service answering 200); off EC2 there is no metadata service
@@ -718,14 +758,15 @@ From `/opt/ghostclick` on the host.
 | Run every housekeeping task now | `... exec -T control python manage.py housekeeping --once` |
 | Remove stale unverified address claims by hand | `... exec -T control python manage.py purge_unverified_emails` |
 | Remove audit rows older than ninety days by hand | `... exec -T control python manage.py purge_auth_events [--dry-run]` |
-| Which origins an organisation allows | `sudo docker run --rm -v ghostclick_ghostclick-state:/s alpine cat /s/<org>/origins.json` |
+| Which origins an organisation allows | `./scripts/gc run --rm --no-deps -v ghostclick_ghostclick-state:/s alpine cat /s/<org>/origins.json` |
 | A database shell | `... exec postgres psql -U ghostclick` |
 | Container status | `./scripts/gc ps` |
-| Memory, when it feels slow | `sudo docker stats --no-stream` |
+| Memory, when it feels slow | `./scripts/gc stats --no-stream` |
 
-`...` is `./scripts/gc`, which runs compose as root through the sudoers line;
-the two `docker` commands above go through `sudo` for the same reason, since
-the deploy user is not in the docker group.
+`...` is `./scripts/gc`. Every command here goes through it, because it is the
+one thing the sudoers file permits — the deploy user is not in the docker
+group, and a bare `sudo docker …` matches no rule, so the two one-off
+containers above are `./scripts/gc run` rather than `sudo docker run`.
 
 ## Housekeeping
 
@@ -790,7 +831,8 @@ somewhere else, three things, and one of them is deliberately not a table:
    `GC_SIGNING_KEY`, `GC_MFA_KEY` and `DJANGO_SECRET_KEY`. Losing the MFA key
    makes every enrolled second factor unreadable (people re-enrol; nothing
    else breaks); losing the signing key means `signing_key --new` and a
-   runner restart. Copy it with `sudo cat .env.prod | age -r … > env.age` —
+   runner restart. Copy it with
+   `sudo -n /usr/bin/cat /opt/ghostclick/.env.prod | age -r … > env.age` —
    it is root-owned — and keep it apart from the database dump, because the
    whole point of a separate key is that the two are two things to steal.
 
@@ -798,7 +840,7 @@ somewhere else, three things, and one of them is deliberately not a table:
    allowlists, the vaults, the run history.
 
    ```bash
-   sudo docker run --rm -v ghostclick_ghostclick-state:/s alpine tar czf - -C /s . \
+   ./scripts/gc run --rm --no-deps -v ghostclick_ghostclick-state:/s alpine tar czf - -C /s . \
      | age -r … > ghostclick-state-$(date +%F).tgz.age
    ```
 

@@ -20,6 +20,7 @@ from django.db import transaction
 from accounts.events import record
 from accounts.models import AuthEvent
 
+from . import invitations
 from .models import RANK, Membership, Role
 
 
@@ -80,6 +81,11 @@ def change_role(me, user_id, role, request=None):
     was = target.role
     target.role = role
     target.save(update_fields=['role'])
+    # A grant they can no longer make must not survive as a pending
+    # invitation: a demoted owner's outstanding `owner` invitations would
+    # otherwise keep landing for the rest of the week [authz-tenancy-5].
+    # Acceptance re-checks the cap too; this is so the listing agrees.
+    invitations.revoke_ungrantable(me.organization, target.user)
     record(AuthEvent.Kind.MEMBER_ROLE_CHANGED, request, user=me.user,
            org=me.organization.slug, member=target.user_id, was=was, now=role)
     return target
@@ -101,6 +107,9 @@ def remove(me, user_id, request=None):
         if me.role == Role.ADMIN and target.role != Role.MEMBER:
             raise Refused('an admin removes members only')
     target.delete()
+    # After the delete, so the check sees an inviter who is no longer here:
+    # every grant they had outstanding is one nobody can make now.
+    invitations.revoke_ungrantable(me.organization, target.user)
     record(AuthEvent.Kind.MEMBER_REMOVED, request, user=me.user,
            org=me.organization.slug, member=target.user_id, role=target.role, left=leaving)
     return target

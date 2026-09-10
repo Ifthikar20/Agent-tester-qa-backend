@@ -118,6 +118,23 @@ class MintTests(TestCase):
         self.assertEqual(r.json()['error'], 'rate_limited')
         self.assertTrue(AuthEvent.objects.filter(kind=AuthEvent.Kind.MINT_REFUSED).exists())
 
+    def test_the_refusal_is_one_row_per_window_not_one_per_attempt(self):
+        """
+        Past the limit the endpoint must get CHEAPER, not more expensive.
+
+        A row on every over-limit POST let a script holding one valid cookie
+        write an AuthEvent per request, indefinitely — turning the one
+        refusal §8.3 wants cheap into the unbounded one. One row says the
+        window tripped; the twentieth says nothing the first did not.
+        """
+        self.login()
+        for _ in range(12):
+            self.mint()
+        for _ in range(8):
+            self.assertEqual(self.mint().status_code, 429)
+        self.assertEqual(
+            AuthEvent.objects.filter(kind=AuthEvent.Kind.MINT_REFUSED, detail__reason='rate_limited').count(), 1)
+
     def test_the_limit_is_per_session_not_per_account(self):
         self.login()
         for _ in range(12):

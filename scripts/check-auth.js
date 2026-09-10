@@ -29,7 +29,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, createHmac, generateKeyPairSync, sign as cryptoSign } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
@@ -115,7 +115,19 @@ refuses('a different asymmetric algorithm is refused', sign(claimsFor(), { heade
 refuses('a kid the runner was not given is refused', sign(claimsFor(), { header: { alg: 'EdDSA', typ: 'JWT', kid: 'someone-else' } }));
 refuses('a token with no kid is refused', sign(claimsFor(), { header: { alg: 'EdDSA', typ: 'JWT' } }));
 refuses('another Ed25519 key does not sign for us', sign(claimsFor(), { key: other.privateKey }));
-refuses('the right kid over the wrong key is still refused', sign(claimsFor(), { key: other.privateKey }));
+// With BOTH public keys in the set, a token signed by the key the kid does not
+// name verifies under the other entry — so this case passes only if the kid
+// selects one key rather than the verifier trying the whole set.
+const OTHER_KID = kidOf(other.publicKey);
+const TWO = parseKeys(JSON.stringify({
+  [KID]: PUBLIC_PEM,
+  [OTHER_KID]: other.publicKey.export({ type: 'spki', format: 'pem' }),
+}));
+refuses('the kid chooses the key; it is not a search of the set', sign(claimsFor(), { key: other.privateKey }), TWO);
+try {
+  verify(sign(claimsFor(), { key: other.privateKey, header: { alg: 'EdDSA', typ: 'JWT', kid: OTHER_KID } }), TWO);
+  ok('and the other key in the same set does verify under its own kid');
+} catch (err) { bad('and the other key in the same set does verify under its own kid', err.message); }
 refuses('an empty key set accepts nothing', sign(claimsFor()), new Map());
 
 // Forgery, in the shapes it actually takes.
@@ -326,7 +338,11 @@ console.log('\n— the reach of the driven page ——————————�
 
 const PRIVATE = ['127.0.0.1', '127.9.9.9', '10.0.0.1', '172.16.0.1', '172.31.255.255', '192.168.1.1',
                  '169.254.169.254', '169.254.1.1', '0.0.0.0', '100.100.100.100', '::1', '::', 'fe80::1', 'fd00::1',
-                 '::ffff:10.0.0.1', '[::1]'];
+                 '::ffff:10.0.0.1', '[::1]',
+                 // The canonical spelling of the four above: a URL parser rewrites the
+                 // dotted quad into hex pieces, so these — not '::ffff:10.0.0.1' — are
+                 // the strings the rule is actually asked about at runtime.
+                 '::ffff:7f00:1', '::ffff:a00:1', '::ffff:a9fe:a9fe', '::ffff:c0a8:1'];
 const PUBLIC = ['8.8.8.8', '1.1.1.1', '172.32.0.1', '172.15.0.1', '192.169.0.1', '100.128.0.1', '2606:4700::1111'];
 const wrongPrivate = PRIVATE.filter((a) => !isPrivateAddress(a));
 const wrongPublic = PUBLIC.filter((a) => isPrivateAddress(a));
@@ -358,6 +374,30 @@ if ((await blocked('http://169.254.169.254/latest/meta-data/')) && (await blocke
 } else bad('literals and bare names never reach the resolver');
 if ((await blocked('data:text/html,hi')) === null) ok('and a data: URL is not the network');
 else bad('and a data: URL is not the network');
+// Through a URL, not through the predicate: the parser canonicalizes an
+// IPv4-mapped literal into hex, so a rule that only satisfies
+// isPrivateAddress() on the dotted form still leaks the whole matrix here.
+/**
+ * The interception has to be the ONLY door, and Playwright does not run a
+ * route handler for a service worker's requests — its own types say so and
+ * recommend serviceWorkers: 'block' when intercepting. A page at an allowed
+ * https origin is a secure context, which is all a worker needs, so one
+ * `fetch` from inside one would have reached this container's network with
+ * reach.js never consulted and nothing in the log.
+ *
+ * Asserted as source rather than driven, because the coupling is the thing
+ * worth pinning: whenever the reach rule is on, workers are off.
+ */
+const serverSrc = readFileSync(join(ROOT, 'server.js'), 'utf8');
+if (/serviceWorkers: BLOCK_PRIVATE \? 'block' : 'allow'/.test(serverSrc)) {
+  ok('service workers are off wherever the reach rule is on', "newPage({ serviceWorkers: 'block' })");
+} else {
+  bad('service workers are off wherever the reach rule is on', 'a worker’s fetch does not reach the route handler');
+}
+const mappedImds = await blocked('http://[::ffff:169.254.169.254]/latest/meta-data/');
+const mappedLoop = await blocked('http://[::ffff:127.0.0.1]:8000/');
+if (mappedImds && mappedLoop) ok('an IPv4-mapped IPv6 URL is refused as the address it is', mappedImds);
+else bad('an IPv4-mapped IPv6 URL is refused as the address it is', `imds=${mappedImds} loopback=${mappedLoop}`);
 
 // ---------------------------------------------------------------------------
 console.log('\n— a signing key stops the runner ——————————————————————');
@@ -375,6 +415,17 @@ if (withSecret.status !== 0 && /must not hold a signing key/.test(withSecret.std
   ok('GC_AUTH_SECRET in the environment refuses to start', `exit ${withSecret.status}`);
 } else {
   bad('GC_AUTH_SECRET in the environment refuses to start', `exit ${withSecret.status} — the old shared key was tolerated`);
+}
+// The live private key, not the retired one: an operator who sourced
+// .env.prod into their shell must not be able to start the runner with it.
+const withSigningKey = spawnSync(process.execPath, [join(ROOT, 'scripts/start.js')], {
+  cwd: ROOT, timeout: 25000, encoding: 'utf8',
+  env: { ...process.env, PORT: '3405', GC_SKIP_BUILD: '1', GC_SIGNING_KEY: PRIVATE_PEM },
+});
+if (withSigningKey.status !== 0 && /must not hold a signing key/.test(withSigningKey.stderr ?? '')) {
+  ok('GC_SIGNING_KEY in the environment refuses to start', `exit ${withSigningKey.status}`);
+} else {
+  bad('GC_SIGNING_KEY in the environment refuses to start', `exit ${withSigningKey.status} — the private key was tolerated`);
 }
 const badKeys = spawnSync(process.execPath, [join(ROOT, 'scripts/start.js')], {
   cwd: ROOT, timeout: 25000, encoding: 'utf8',

@@ -6,10 +6,10 @@ import io
 from django.core.management import call_command
 from django.test import TestCase
 
-from ..models import Membership, Organization, Role
+from ..models import Membership, Organization, Plan, Role
 from ..personal import ensure_personal_org
 from ..slugs import RESERVED, is_slug, personal_slug
-from .support import User, user
+from .support import PASSWORD, User, user
 
 
 class PersonalOrgTests(TestCase):
@@ -28,6 +28,15 @@ class PersonalOrgTests(TestCase):
 
     def test_the_name_falls_back_to_the_local_part(self):
         self.assertEqual(user('grace.hopper@navy.example').personal_organization.name, 'grace.hopper')
+
+    def test_a_slug_already_taken_by_a_plain_organisation_is_stepped_over(self):
+        # The candidate is chosen by reading and then writing, so the write
+        # has to be able to lose: a name taken between the two is retried
+        # rather than raised. (The real race is two sign-ups in the same
+        # instant; this is the same code path, made deterministic.)
+        Organization.objects.create(slug='ada', name='Ada Ltd', plan=Plan.objects.get(slug='free'))
+        made = User.objects.create_user(email='ada@example.com', password=PASSWORD)
+        self.assertEqual(made.personal_organization.slug, 'ada-2')
 
     def test_two_adas_get_two_slugs(self):
         user('ada@acme.example')

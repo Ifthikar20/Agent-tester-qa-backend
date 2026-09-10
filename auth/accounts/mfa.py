@@ -77,18 +77,30 @@ def blocked(user):
     return required(user) and not enrolled(user)
 
 
+#: What 'staff' is called on the way out. A neutral word rather than a hole,
+#: because a hole is an oracle: the list can only hold manages_organisation,
+#: plan or no_password, so `required: true` with an EMPTY list identified a
+#: staff account exactly — which is the isStaff flag [authz-tenancy-6]
+#: forbids, arrived at by elimination. 'policy' is also what any future reason
+#: the client does not model will read as, so the two are indistinguishable.
+PRIVATE_REASON = 'policy'
+#: Reasons the browser is allowed to see spelled out. Everything else — today
+#: only 'staff' — is reported as PRIVATE_REASON.
+PUBLIC_REASONS = frozenset({'manages_organisation', 'plan', 'no_password'})
+
+
 def describe(user):
     """
-    The `mfa` block of /auth/me. `reasons` leaves out 'staff': there is no
-    isStaff in what the browser is told and a reason that spells it is one
-    in disguise [authz-tenancy-6]. A staff account with no other reason
-    sees `required` and an empty list, and the enrolment page says the
-    policy names the account without saying why.
+    The `mfa` block of /auth/me. A reason the browser may not learn is
+    replaced by a neutral word rather than removed, so an account the policy
+    names for a private reason is byte-identical to one named for any reason
+    the client does not model. The enrolment page then says the policy names
+    the account without saying why.
     """
     return {
         'required': required(user),
         'enrolled': enrolled(user),
-        'reasons': [r for r in reasons(user) if r != 'staff'],
+        'reasons': [r if r in PUBLIC_REASONS else PRIVATE_REASON for r in reasons(user)],
     }
 
 

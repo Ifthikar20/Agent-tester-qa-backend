@@ -54,6 +54,16 @@ function isPrivateV6(a) {
   if (lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) return true; // link-local
   if (lower.startsWith('fc') || lower.startsWith('fd')) return true;   // unique local
   // IPv4-mapped (::ffff:10.0.0.1) and IPv4-compatible forms carry a v4 verdict.
+  // The hex spelling comes first because it is the one that actually arrives:
+  // every URL reaching blocked() has been through a URL parser, and the WHATWG
+  // serializer rewrites `[::ffff:169.254.169.254]` as `[::ffff:a9fe:a9fe]`, so
+  // a rule that only knew the dotted form would let the IMDS address through.
+  const hex = /^(?:::ffff:|::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(lower);
+  if (hex) {
+    const hi = parseInt(hex[1], 16);
+    const lo = parseInt(hex[2], 16);
+    return isPrivateV4(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+  }
   const mapped = /^(?:::ffff:|::)(\d+\.\d+\.\d+\.\d+)$/.exec(lower);
   if (mapped) return isPrivateV4(mapped[1]);
   return false;

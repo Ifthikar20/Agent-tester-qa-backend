@@ -36,6 +36,18 @@ import { suitesDir } from './org.js';
 const now = () => new Date().toISOString();
 const rid = (p) => `${p}_${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-3)}`;
 
+/**
+ * "There is no such suite" as a type rather than a sentence.
+ *
+ * An id belonging to another organisation must answer exactly as an id nobody
+ * ever made does — a 404, never a 403 (docs/AUTH.md §10). Every route used to
+ * decide that for itself by matching on the message, and the nested ones got
+ * it wrong; a class lets `fail` map it once, so a route added tomorrow cannot.
+ */
+export class NoSuchSuite extends Error {
+  constructor(id) { super(`No suite "${id}"`); this.name = 'NoSuchSuite'; }
+}
+
 /** A filename you can recognise in a diff, and that cannot escape the folder. */
 function slugify(name) {
   const s = String(name).toLowerCase().normalize('NFKD')
@@ -135,9 +147,23 @@ export function forOrg(org) {
       .sort((a, b) => (a.name > b.name ? 1 : -1));
   }
 
+  /**
+   * A suite id is a slug, and anything else is "no suite" rather than a
+   * rewritten one.
+   *
+   * This used to STRIP the characters it did not like and read whatever the
+   * remainder named, which made `a/../../local/treasury-demo` a legal way to
+   * ask for `alocaltreasury-demo` — and then `remove()` unlinked the raw id,
+   * so the two disagreed about which file was meant and one organisation could
+   * delete another's (docs/AUTH.md §10). Refusing here means every path in this
+   * module is built from an id the check has already seen.
+   */
+  const isId = (id) => /^[a-z0-9-]{1,64}$/.test(String(id));
+
   function get(id) {
-    const s = read(`${String(id).replace(/[^a-z0-9-]/gi, '')}.json`);
-    if (!s) throw new Error(`No suite "${id}"`);
+    if (!isId(id)) throw new NoSuchSuite(id);
+    const s = read(`${id}.json`);
+    if (!s) throw new NoSuchSuite(id);
     return s;
   }
 
@@ -174,9 +200,12 @@ export function forOrg(org) {
   }
 
   function remove(id) {
-    get(id);                                    // 404 before unlink
-    unlinkSync(join(DIR, `${id}.json`));
-    return { id, removed: true };
+    // The id off the SUITE, never the caller's string: `get` has validated the
+    // one it returns, and building the path from anything else is how a
+    // traversal gets in.
+    const s = get(id);
+    unlinkSync(join(DIR, `${s.id}.json`));
+    return { id: s.id, removed: true };
   }
 
   // ------------------------------------------------------------------ pages

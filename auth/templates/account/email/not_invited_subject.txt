@@ -1,1 +1,1 @@
-{% autoescape off %}Sign-up is by invitation{% endautoescape %}
+{% autoescape off %}{% if mode == 'domain' %}Sign-up is limited to your organisation's domain{% else %}Sign-up is by invitation{% endif %}{% endautoescape %}

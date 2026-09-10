@@ -30,10 +30,17 @@ misuse the browser it already owns; it cannot become anybody.
 | **Edge** (Caddy) | operator config | TLS, routing, header hygiene, admin IP allowlist | — |
 | **Google** | — | a verified email and a `sub` | id_token via OAuth code + PKCE |
 
-Network layout (compose): two networks. `edge` carries caddy ↔ runner and caddy
-↔ control. `data` (`internal: true`) carries control ↔ postgres and control ↔
-redis. The runner — and therefore the driven Chromium — has no route to control,
-postgres or redis `[transport-3] [ops-supply-5]`. The runner never calls the
+Network layout (compose): **three** networks. `edge` carries caddy ↔ runner.
+`front` carries caddy ↔ control. `data` (`internal: true`) carries control ↔
+postgres and control ↔ redis. The runner — and therefore the driven Chromium —
+has no route to control, postgres or redis `[transport-3] [ops-supply-5]`.
+
+Three and not two, because a bridge network is bidirectional and Docker's
+embedded DNS answers for every name on it: with caddy, runner and control all
+on one `edge`, "caddy may reach control" and "the runner may not" are the same
+sentence, and the runner could open `control:8000` exactly the way caddy does.
+Two networks cannot express caddy↔runner and caddy↔control without also
+expressing runner↔control. The runner never calls the
 control plane at all: its trust anchor is delivered in its environment
 `[token-3]`.
 
@@ -80,11 +87,19 @@ ALLAUTH_TRUSTED_PROXY_COUNT = 1                           # the edge; Caddy repl
   authenticates by cookie, so the runner never sees one `[session-1]`.
 - The edge routes to the control plane exactly: `/auth/*`, `/_allauth/*`,
   `/accounts/google/login/callback/`, `/admin/*`, `/static/*`. Not `/accounts/*`
-  wholesale: the One Tap token endpoint is csrf-exempt and stays unrouted
-  `[oauth-3]`. Everything else goes to the runner.
+  wholesale: allauth's provider urlconf would mount a GET sign-in and a
+  csrf-exempt One Tap endpoint there, and neither is included at all.
+  `/_allauth/*` IS routed, and allauth's headless urls mount as one block with
+  no setting to leave anything out — so the two social endpoints this
+  deployment does not have, `auth/provider/token` (One Tap) and
+  `auth/provider/signup`, are shadowed with a 404 in `config/urls.py`, ahead of
+  that include `[oauth-3]`. Everything else goes to the runner.
 - `/admin/*` is additionally restricted at the edge to `GC_ADMIN_CIDRS`.
-- The edge's access log deletes the `ticket` query parameter and never logs
-  credentials `[ops-supply-4]`.
+- The edge's access log deletes every parameter a link of ours can carry —
+  `ticket`, `t`, `token`, `key` — and never logs credentials
+  `[ops-supply-4]`. That is why the password-reset key is a query parameter
+  and not a path segment: a query filter cannot reach inside a path, and a
+  second log block to rewrite one would log every request twice.
 - Absolute lifetime: a `login_at` stamp is written in one `user_logged_in`
   receiver with `setdefault`, so a Google "connect" or a reauthentication never
   restarts the 7-day clock; the middleware flushes the session and answers 401
@@ -142,7 +157,20 @@ ACCOUNT_RATE_LIMITS = {
 MFA_TOTP_TOLERANCE = 0
 GC_MINT_RATE = '12/10m'      # per session key, on POST /auth/executor-token [token-5]
 GC_ACCEPT_RATE = '10/m/ip'   # invitation acceptance
+GC_INVITE_RATE = '20/h/user' # invitation ISSUE — the endpoint that mails strangers
+GC_PASSKEY_LOGIN_RATE = '10/m/ip'   # POST auth/webauthn/login, keyed on the caller
 ```
+
+The last two are additions to what this section first listed, and both close
+the same shape of gap: an endpoint whose budget was somebody else's.
+`members.max` bounds how many invitations may be LIVE, not how many are sent,
+so revoke-and-reissue mailed arbitrary third parties without limit. And
+`auth/webauthn/login` is reachable unauthenticated, where allauth identifies
+the account from a client-supplied handle and consumes THAT account's
+`login_failed` bucket before verifying anything — six forged assertions every
+five minutes were a permanent denial of sign-in for any enrolled account, from
+nobody. The endpoint now spends the caller's own address, and the account's
+bucket is refunded on any failure.
 
 Two departures in the built settings, each explained beside the value in
 `auth/config/settings.py`: the per-account lockout is `login_failed`'s
@@ -202,8 +230,17 @@ Rules:
    `[credentials-3]`.
 4. In `open` mode, `POST auth/signup` requires a Turnstile token when
    `GC_TURNSTILE_SECRET` is set.
-5. On verification, a personal organisation is created on plan `free` with the
-   user as owner, and the session begins.
+5. The personal organisation is created on plan `free` with the user as owner
+   when the ACCOUNT ROW is (a `post_save` receiver on the user model, so
+   `createsuperuser`, `adduser`, the admin and the sign-up form all get one),
+   and the session begins on verification. As built rather than as first
+   written: an unverified password sign-up therefore holds an organisation and
+   its slug before the code is entered, which is why the `personal_of`
+   one-to-one and the `slugs.py` retry matter. It gains nothing else — no
+   invitation is consumed and no membership beyond its own is made
+   `[credentials-6]` — and `purge_unverified_emails` leaves a sign-up's
+   primary address alone, so an abandoned sign-up keeps its slug.
+   `manage.py personal_orgs` is the idempotent backfill.
 6. Every sign-up, verification and refusal writes an `AuthEvent`.
 
 The UI: `/app/signup`, `/app/verify` (six-digit code, resend), one password
@@ -283,7 +320,9 @@ ACCOUNT_MAX_EMAIL_ADDRESSES = 2
 3. Sign-up through Google goes through `signup_allowed(email, hd)` and consumes
    the `signup` rate limit `[oauth-5]`. `domain` mode reads `hd` from the
    id_token, never from the email suffix.
-4. Google tokens are not stored. One Tap is not enabled.
+4. Google tokens are not stored. One Tap is not enabled: neither allauth's
+   provider `login/token/` URL (never mounted) nor its headless
+   `auth/provider/token` (mounted by the block, shadowed with a 404).
 5. A Google-only account has no reauthentication method, so it falls under the
    MFA policy in §5.4 and must enrol an authenticator before anything sensitive
    `[oauth-1]`.
@@ -365,7 +404,10 @@ Minting — `POST /auth/executor-token` (session + CSRF; the body is ignored):
   `[mfa-recovery-2]`.
 - `sid` lets the runner revoke by session.
 - `exp - iat` is at most 600 and the control plane clamps `GC_TOKEN_TTL` to
-  60–600 `[token-4]`.
+  120–600 `[token-4]`. The floor is 120 and not 60 because of the other end:
+  the SPA renews with a minute still on the clock, so a TTL at or below that
+  margin means every API call mints and `GC_MINT_RATE` then answers 429 — a
+  signed-in person told they are signed out.
 
 Verification on the runner (`auth.js`), for every `/api` call:
 
@@ -440,8 +482,13 @@ reauthenticates (strong factor if the account has one), re-mints, retries.
   with `entitlements_version` bumped on any change. Only the runner-enforced
   subset rides in the token.
 - `/auth/me` returns `{user:{id,email,name}, org:{slug,name,role}, orgs:[…],
-  entitlements, mfa:{required, enrolled}, flags}`. There is no `isStaff`
-  `[authz-tenancy-6]`. Staff is a control-plane-only fact that opens `/admin/`.
+  entitlements, mfa:{required, enrolled, reasons}, mustChangePassword, flags}`.
+  There is no `isStaff` `[authz-tenancy-6]`. Staff is a control-plane-only fact
+  that opens `/admin/` — and it is not in `reasons` either: a reason list that
+  can only hold three other words identifies a staff account by ELIMINATION,
+  so staff is reported as the neutral `policy`, which is also how any reason a
+  later flow adds will read. `mustChangePassword` is there so a page reload
+  lands on the change page rather than waiting for the first 403.
 - In the admin, `is_superuser` and `user_permissions` are read-only for
   non-superusers `[authz-tenancy-6]`.
 
@@ -474,6 +521,7 @@ fetches, and the page runs inside the runner's network namespace
   address is caught too. The runner's own origin is never seeded as drivable in
   production.
 - The compose networks give the runner no route to control, redis or postgres
+  — three networks, because two cannot say it (see §0)
   regardless.
 - IMDSv2 with hop limit 1 is required by the deploy script, not just the
   bring-up script.
@@ -501,7 +549,11 @@ fetches, and the page runs inside the runner's network namespace
 
 ## 12. Keys, secrets, backups, supply chain (F11)
 
-- The Ed25519 private key is in the control plane's environment only, delivered
+- The Ed25519 private key is in the control plane's environment only — the
+  `scheduler` container runs the same IMAGE and is given the same environment
+  map with `GC_SIGNING_KEY` and `GC_MFA_KEY` blanked and `GC_NO_MINT=1`, since
+  `manage.py housekeeping` neither mints a token nor reads a second factor —
+  delivered
   by a root-owned `.env.prod` read by `docker compose` under `sudo`; the deploy
   user is not in the docker group `[ops-supply-1]`. Rotation: `signing_key --new`,
   add the new public key to the runner's set, restart, then remove the old key
@@ -585,7 +637,7 @@ Each step is one commit series, each leaves every check green, and each keeps
 laptop mode working.
 
 1. **foundation** — §1 §2 §3: settings profile, Argon2 and validators, Redis
-   and Postgres and Caddy in compose with the two networks, `AuthEvent`,
+   and Postgres and Caddy in compose with the three networks, `AuthEvent`,
    absolute lifetime middleware, deploy-script checks, requirements pinning.
 2. **tenants** — §10 control-plane half: models, personal org, roles,
    invitations, entitlement resolution, `/auth/me`, admin hardening.

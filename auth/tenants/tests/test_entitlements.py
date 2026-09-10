@@ -35,6 +35,28 @@ class SeedTests(TestCase):
 
 
 class ResolutionTests(TestCase):
+    def test_a_count_the_plan_does_not_mention_is_the_free_floor(self):
+        """
+        An unspoken count means the STRICTEST thing, not the loosest.
+
+        None is this design's word for unlimited, so `.get(key)` for a key
+        neither the plan nor the overrides mention resolved a missing
+        suites.max to unlimited suites. Plan.clean closes the admin form and
+        the seed migration is complete, but the realistic case is the next
+        one: adding a key to KEYS makes every existing plan row incomplete,
+        and therefore unlimited on it, until somebody backfills three rows.
+        (BOOL keys already failed closed, because None is falsy — the
+        asymmetry was the tell.)
+        """
+        partial = {k: v for k, v in plans.PLANS['team']['entitlements'].items() if k != 'suites.max'}
+        got = plans.resolve(partial, {})
+        self.assertEqual(got['suites.max'], plans.PLANS['free']['entitlements']['suites.max'])
+        self.assertEqual(got['runs.per_day'], 500)
+        # A plan that DOES say "unlimited" still means it.
+        self.assertIsNone(plans.resolve(plans.PLANS['enterprise']['entitlements'], {})['suites.max'])
+        # And an override still wins, including an override that says None.
+        self.assertIsNone(plans.resolve(partial, {'suites.max': None})['suites.max'])
+
     def test_defaults_come_from_the_plan(self):
         acme = org('acme', plan='team')
         self.assertEqual(acme.entitlements(), plans.PLANS['team']['entitlements'])
@@ -94,6 +116,51 @@ class ValidationTests(TestCase):
 
 
 class VersionTests(TestCase):
+    def test_a_save_that_names_its_columns_still_bumps(self):
+        """
+        The bump is a column like any other, so a save that lists its
+        columns has to list it.
+
+        `save(update_fields=['entitlement_overrides'])` wrote the overrides
+        and silently dropped the version — the in-memory row said 2 and the
+        database row still said 1. No caller does that today, which makes it
+        a booby trap rather than a bug: the counter it disarms is the one
+        thing that makes a downgrade take effect before the old tokens
+        expire (§8.6), and the next person to write
+        `save(update_fields=['plan'])` gets a no-op with no error.
+        """
+        acme = org('acme')
+        acme.entitlement_overrides = {'suites.max': 9}
+        acme.save(update_fields=['entitlement_overrides'])
+        self.assertEqual(Organization.objects.get(pk=acme.pk).entitlements_version, 2)
+        self.assertEqual(acme.entitlements_version, 2)
+        acme.plan = Plan.objects.get(slug='enterprise')
+        acme.save(update_fields=['plan'])
+        self.assertEqual(Organization.objects.get(pk=acme.pk).entitlements_version, 3)
+
+    def test_two_concurrent_edits_do_not_collapse_into_one_version(self):
+        """
+        The bump is an expression, not a read-modify-write.
+
+        Two instances of the same row loaded independently, each given
+        different overrides and saved, used to leave the row at version 2
+        with only the second edit's numbers — so a runner caching
+        entitlements by (org, ent_v) could keep enforcing the FIRST edit's
+        numbers against a token minted after the second, which is the
+        uneven, silent enforcement the version exists to prevent.
+        """
+        acme = org('acme')
+        one = Organization.objects.get(pk=acme.pk)
+        two = Organization.objects.get(pk=acme.pk)
+        one.entitlement_overrides = {'suites.max': 9}
+        one.save()
+        two.entitlement_overrides = {'runs.per_day': 5}
+        two.save()
+        self.assertEqual(Organization.objects.get(pk=acme.pk).entitlements_version, 3)
+        # And each instance carries the number it really wrote, not an
+        # unevaluated expression.
+        self.assertEqual((one.entitlements_version, two.entitlements_version), (2, 3))
+
     """
     entitlements_version is what a downgrade looks like to the runner, which
     otherwise trusts the numbers in a token until it expires.

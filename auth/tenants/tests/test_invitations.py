@@ -2,6 +2,7 @@
 Invitations: hashed, email-bound, a week long, single-use, rate limited and
 logged [credentials-6].
 """
+import json
 from datetime import timedelta
 
 from django.core import mail
@@ -133,6 +134,64 @@ class AcceptTests(TestCase):
         self.assertEqual(invitations.accept(self.raw, self.bob).role, Role.ADMIN)
 
 
+class CapAtAcceptanceTests(TestCase):
+    """
+    [authz-tenancy-5] holds until the token is spent, not until it is issued.
+
+    Checked only at issue, an outstanding invitation survived the inviter's
+    demotion and even their removal — so a taken-over owner who was demoted
+    kept minting owners for seven days unless somebody also revoked every
+    pending grant by hand. That falsifies this module's own claim that the
+    set of people who can manage an organisation grows only by an owner's
+    hand.
+    """
+
+    def setUp(self):
+        self.acme = org('acme', plan='team')
+        self.owner = member(self.acme, user('owner@acme.example'), Role.OWNER)
+        self.second = member(self.acme, user('second@acme.example'), Role.OWNER)
+        self.bob = user('bob@acme.example')
+
+    def test_a_demoted_inviter_s_outstanding_grant_is_refused(self):
+        _, raw = issue(self.owner, 'bob@acme.example', Role.OWNER)
+        self.owner.role = Role.MEMBER
+        self.owner.save(update_fields=['role'])
+        with self.assertRaises(invitations.Refused) as caught:
+            invitations.accept(raw, self.bob)
+        self.assertEqual(caught.exception.reason, 'the inviter may no longer grant this role')
+        self.assertFalse(Membership.objects.filter(organization=self.acme, user=self.bob).exists())
+
+    def test_an_inviter_who_has_left_grants_nothing(self):
+        _, raw = issue(self.owner, 'bob@acme.example', Role.ADMIN)
+        self.owner.delete()
+        with self.assertRaises(invitations.Refused) as caught:
+            invitations.accept(raw, self.bob)
+        self.assertEqual(caught.exception.reason, 'the inviter is no longer in this organisation')
+
+    def test_and_a_deleted_account_is_no_inviter_at_all(self):
+        _, raw = issue(self.owner, 'bob@acme.example', Role.ADMIN)
+        # SET_NULL on invited_by: there is nobody to ask, so it is refused
+        # and has to be issued again by somebody who is still here.
+        self.owner.user.delete()
+        with self.assertRaises(invitations.Refused) as caught:
+            invitations.accept(raw, self.bob)
+        self.assertEqual(caught.exception.reason, 'the inviter no longer has an account')
+
+    def test_a_grant_the_inviter_may_still_make_is_untouched(self):
+        _, raw = issue(self.owner, 'bob@acme.example', Role.ADMIN)
+        self.assertEqual(invitations.accept(raw, self.bob).role, Role.ADMIN)
+
+    def test_demoting_the_inviter_revokes_the_grant_in_the_listing_too(self):
+        from .. import members
+        inv, _ = issue(self.owner, 'bob@acme.example', Role.OWNER)
+        keep, _ = issue(self.owner, 'carol@acme.example', Role.MEMBER)
+        members.change_role(self.second, self.owner.user_id, Role.ADMIN)
+        inv.refresh_from_db()
+        keep.refresh_from_db()
+        # An admin may still invite a member, so that one stands.
+        self.assertEqual((inv.state, keep.state), ('revoked', 'pending'))
+
+
 @override_settings(GC_ACCEPT_RATE='3/m/ip')
 class AcceptEndpointTests(TestCase):
     def setUp(self):
@@ -165,6 +224,20 @@ class AcceptEndpointTests(TestCase):
         self.assertEqual(wrong, mismatch)
         self.assertEqual(wrong['error'], invitations.REFUSAL)
 
+    @override_settings(GC_ACCEPT_RATE='30/m/ip')
+    def test_a_token_outside_the_alphabet_is_the_same_refusal(self):
+        # by_token measured the length and then hashed, and hash_token does
+        # raw.encode('ascii') — so a non-ASCII string of the right length
+        # raised UnicodeEncodeError out of the view: a distinguishable 500
+        # (plus, in production, an ADMINS traceback per attempt) from the one
+        # endpoint whose every refusal must read the same [credentials-6].
+        api = Api()
+        api.login('bob@acme.example')
+        for token in ['\u00e9' * 30, 'x' * 20 + '!', 'x' * 19, 'x' * 129, 'x y' * 10]:
+            r = api.post('/auth/invitations/accept', {'token': token})
+            self.assertEqual(r.status_code, 400, token)
+            self.assertEqual(r.json()['error'], invitations.REFUSAL, token)
+
     def test_attempts_are_rate_limited_by_address(self):
         api = Api()
         api.login('bob@acme.example')
@@ -174,17 +247,89 @@ class AcceptEndpointTests(TestCase):
         # shape a guessing loop actually has.
         self.assertEqual(Api().post('/auth/invitations/accept', {'token': self.raw}).status_code, 429)
 
-    def test_the_rate_limit_is_keyed_on_the_edge_s_address(self):
+    def guess(self, api, token, forwarded=None):
+        extra = {'HTTP_X_FORWARDED_FOR': forwarded} if forwarded else {}
+        return api.c.post('/auth/invitations/accept', data=json.dumps({'token': token}),
+                          content_type='application/json', HTTP_X_CSRFTOKEN=api.csrf, **extra)
+
+    def test_with_no_trusted_proxy_the_forwarded_header_is_ignored(self):
         api = Api()
         api.login('bob@acme.example')
         for _ in range(3):
             api.post('/auth/invitations/accept', {'token': 'x' * 43})
         # A client that could set its own address would reset the counter. On
         # a laptop (no trusted proxy) the header is ignored and the fourth is
-        # still refused.
-        r = api.c.post('/auth/invitations/accept', data='{"token": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}',
-                       content_type='application/json', HTTP_X_CSRFTOKEN=api.csrf, HTTP_X_FORWARDED_FOR='1.2.3.4')
-        self.assertEqual(r.status_code, 429)
+        # still refused. That is the DEFAULT branch of client_ip; the
+        # production branch is the test below, which this one used to be
+        # named after without exercising.
+        self.assertEqual(self.guess(api, 'x' * 43, forwarded='1.2.3.4').status_code, 429)
+
+    @override_settings(ALLAUTH_TRUSTED_PROXY_COUNT=1)
+    def test_behind_the_edge_the_bucket_follows_the_hop_a_client_cannot_write(self):
+        """
+        [credentials-2] is about the trusted-proxy case. Caddy REPLACES
+        X-Forwarded-For with the peer it accepted, so the LAST hop is the
+        client and everything to its left is the client's own writing — and
+        moving the left-hand part must not buy a fresh budget.
+        """
+        api = Api()
+        api.login('bob@acme.example')
+        for _ in range(3):
+            self.assertEqual(self.guess(api, 'x' * 43, forwarded='10.0.0.9, 198.51.100.7').status_code, 400)
+        # Same edge hop, a different left-hand hop: the same bucket.
+        self.assertEqual(self.guess(api, 'x' * 43, forwarded='9.9.9.9, 198.51.100.7').status_code, 429)
+        # And a genuinely different client is not paying for it.
+        self.assertEqual(self.guess(api, 'x' * 43, forwarded='203.0.113.4').status_code, 400)
+
+
+class IssueRateTests(TestCase):
+    """
+    Issuing is counted (docs/AUTH.md §3).
+
+    members.max bounds how many invitations may be LIVE at once, which is no
+    bound at all on how many are SENT: revoke-and-reissue in a loop mails
+    arbitrary third-party addresses through this service's mailer, and on a
+    plan whose members.max is null even the per-moment cap is gone. §3 gave
+    acceptance and minting a budget and left the one endpoint that mails
+    strangers without one.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.acme = org('acme', plan='enterprise')
+        self.owner = member(self.acme, user('owner@acme.example'), Role.OWNER)
+        give_authenticator(self.owner.user)
+        self.api = self.as_('owner@acme.example')
+
+    def as_(self, email):
+        api = Api()
+        api.login(email)
+        self.assertEqual(api.post('/auth/org', {'org': 'acme'}).status_code, 200)
+        return api
+
+    @override_settings(GC_INVITE_RATE='2/h/user')
+    def test_a_manager_cannot_mail_strangers_without_limit(self):
+        codes = [self.api.post('/auth/invitations', {'email': f'p{i}@other.example'}).status_code
+                 for i in range(4)]
+        self.assertEqual(codes, [201, 201, 429, 429])
+        self.assertEqual(len(mail.outbox), 2)
+        self.assertEqual(Invitation.objects.count(), 2)
+
+    @override_settings(GC_INVITE_RATE='2/h/user')
+    def test_and_revoking_does_not_buy_a_fresh_budget(self):
+        first = self.api.post('/auth/invitations', {'email': 'p0@other.example'})
+        self.api.delete(f"/auth/invitations/{first.json()['invitation']['id']}")
+        self.assertEqual(self.api.post('/auth/invitations', {'email': 'p1@other.example'}).status_code, 201)
+        self.assertEqual(self.api.post('/auth/invitations', {'email': 'p2@other.example'}).status_code, 429)
+
+    @override_settings(GC_INVITE_RATE='2/h/user')
+    def test_the_budget_is_the_manager_s_own(self):
+        other = member(self.acme, user('admin@acme.example'), Role.ADMIN)
+        give_authenticator(other.user)
+        for i in range(2):
+            self.assertEqual(self.api.post('/auth/invitations', {'email': f'p{i}@other.example'}).status_code, 201)
+        theirs = self.as_('admin@acme.example')
+        self.assertEqual(theirs.post('/auth/invitations', {'email': 'p9@other.example'}).status_code, 201)
 
 
 class ManageEndpointTests(TestCase):

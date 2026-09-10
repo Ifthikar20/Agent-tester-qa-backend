@@ -39,9 +39,11 @@ from allauth.headless.internal.restkit import inputs
 from allauth.headless.mfa import inputs as mfa_inputs
 from allauth.headless.mfa import response as mfa_response
 from allauth.headless.mfa import views as mfa_views
+from allauth.headless.socialaccount import views as socialaccount_views
 from allauth.headless.usersessions import views as usersessions_views
 from allauth.mfa.base.forms import ReauthenticateForm
 from django.core.exceptions import ValidationError
+from django.http import Http404
 
 from . import policy, turnstile, webauthn
 from .events import client_ip, record
@@ -107,9 +109,20 @@ class RequestPasswordResetInput(ResetPasswordForm, inputs.Input):
     def clean_email(self):
         from allauth.core import context
         email = super().clean_email()
-        # allauth found the accounts that hold this address now; add the one
-        # that held it until a week ago. The mail still goes to the address
-        # typed, so this is the old mailbox resetting the account it lost.
+        # One row per request, for every path through it. Only the rare
+        # previous-address case below used to be written down, which left the
+        # endpoint that mails ANY address on request
+        # (ACCOUNT_EMAIL_UNKNOWN_ACCOUNTS is True) invisible in the audit log
+        # while its unusual cousin was not — and §4.6 asks for every one. An
+        # address matching nobody gets a row saying so, because a sweep over
+        # addresses is exactly the shape worth seeing there.
+        for found in self.users:
+            record(AuthEvent.Kind.PASSWORD_RESET_REQUESTED, context.request, user=found, email=email, known=True)
+        if not self.users:
+            record(AuthEvent.Kind.PASSWORD_RESET_REQUESTED, context.request, email=email, known=False)
+        # Then the account that held this address until a week ago. The mail
+        # still goes to the address typed, so this is the old mailbox
+        # resetting the account it lost.
         seen = {u.pk for u in self.users}
         for user in PreviousEmail.users_for(email):
             if user.pk not in seen:
@@ -159,7 +172,57 @@ class ReauthenticateWebAuthnInput(PinnedOrigin, mfa_inputs.ReauthenticateWebAuth
 
 
 class LoginWebAuthnInput(PinnedOrigin, mfa_inputs.LoginWebAuthnInput):
-    pass
+    """
+    Passkey sign-in, which is the one WebAuthn endpoint an ANONYMOUS caller
+    may reach — and therefore the one whose budget a stranger must not be
+    able to spend on somebody else's account.
+
+    allauth identifies the account from the `userHandle` the CLIENT supplied
+    and then consumes that account's second-factor bucket
+    (`mfa-auth-user-<pk>`, ACCOUNT_RATE_LIMITS['login_failed'], 5/5m/key)
+    BEFORE the assertion has been verified; the clear only happens on
+    success. The handle is base36 of a sequential primary key, so it is
+    guessable — six bogus assertions every five minutes, from nobody, and
+    the victim's own correct TOTP code starts answering
+    `too_many_login_attempts` at auth/2fa/authenticate. A permanent,
+    unauthenticated denial of sign-in for any enrolled account.
+
+    So the budget this endpoint really spends is the caller's own address,
+    and the account's bucket is refunded whenever the ceremony fails: an
+    unverified assertion is not evidence about the account it names.
+    """
+
+    def clean_credential(self):
+        from allauth.account import app_settings as account_settings
+        from allauth.account.adapter import get_adapter as get_account_adapter
+        from allauth.core import context
+        from allauth.core.internal import ratelimit as allauth_ratelimit
+        from allauth.mfa.webauthn.internal import auth as webauthn_auth
+        from django.conf import settings
+
+        from .ratelimit import over
+
+        request = context.request
+        if over('passkey-login', client_ip(request) or 'unknown', settings.GC_PASSKEY_LOGIN_RATE):
+            raise get_account_adapter().validation_error('too_many_login_attempts')
+        # Who the credential CLAIMS to be, read before allauth spends their
+        # budget, so the refund below knows whose to give back. A handle that
+        # names nobody needs no refund.
+        try:
+            victim = webauthn_auth.extract_user_from_response(self.cleaned_data.get('credential') or {})
+        except ValidationError:
+            victim = None
+        try:
+            return super().clean_credential()
+        except ValidationError:
+            if victim is not None:
+                allauth_ratelimit.clear(
+                    request,
+                    config=account_settings.RATE_LIMITS,
+                    action='login_failed',
+                    key=f'mfa-auth-user-{victim.pk}',
+                )
+            raise
 
 
 class ManageWebAuthnView(mfa_views.ManageWebAuthnView):
@@ -229,6 +292,49 @@ class ReauthenticateView(mfa_views.ReauthenticateView):
     # docs/AUTH.md §7.4 wants ("this cookie proved the app again at 14:02")
     # needs the form that says so.
     input_class = ReauthenticateInput
+
+
+# ---------------------------------------------------------------- Google
+
+class RedirectToProviderView(socialaccount_views.RedirectToProviderView):
+    """
+    Starting a Google sign-in, with the refusal written down.
+
+    allauth validates `callback_url` here — through
+    accounts.adapters.AccountAdapter.is_safe_url, which is the [oauth-4] pin
+    — and answers an unsafe one by redirecting back with `error=unknown`.
+    That refusal never reaches accounts/google.py's callback wrapper, which
+    is the only writer of a Google refusal row, so the ONE refusal in this
+    flow shaped like an attack left no trace at all while "someone pressed
+    Back on Google" left one. §4.6 asks for a row for every refusal.
+    """
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        location = response.get('Location', '') if 300 <= response.status_code < 400 else ''
+        # A started sign-in redirects to Google; anything else is a refusal,
+        # and the app's own origin is where allauth sends one back to.
+        if location and not location.startswith('https://accounts.google.com'):
+            record(AuthEvent.Kind.GOOGLE_REFUSED, request, reason='unsafe callback_url',
+                   callback_url=str(request.POST.get('callback_url', ''))[:300],
+                   process=str(request.POST.get('process', ''))[:32])
+        return response
+
+
+def absent(request, *args, **kwargs):
+    """
+    A path allauth mounts and this deployment does not have.
+
+    Mounted ahead of allauth's include so it wins, because allauth's headless
+    urls come as one block: there is no setting that leaves out
+    `auth/provider/token` — Google's One Tap door, which signs an id_token
+    holder straight in with no state and no PKCE — or `auth/provider/signup`.
+    Both are outside the one wrapped path this flow's defence is built on
+    (accounts/google.py normalises every refusal to one word and writes the
+    audit row; neither of these would), and §6.4 and [oauth-3] say One Tap is
+    not enabled here. A 404 is what "not enabled" looks like from outside.
+    """
+    raise Http404
 
 
 # ---------------------------------------------------------------- sessions

@@ -62,9 +62,19 @@ if (on.control.GC_SIGNING_KEY === KEYS.privatePem) ok('the control plane is hand
 else bad('the control plane is handed the private key', String(on.control.GC_SIGNING_KEY).slice(0, 30));
 if (on.runner.GC_AUTH_PUBLIC_KEYS === JSON.stringify(KEYS.publicKeys)) ok('and the runner the public set', 'kid-1');
 else bad('and the runner the public set', String(on.runner.GC_AUTH_PUBLIC_KEYS).slice(0, 30));
-const leaked = Object.entries(on.runner).filter(([k, v]) => k === 'GC_SIGNING_KEY' || k === 'GC_AUTH_SECRET' || /PRIVATE KEY/.test(String(v)));
+const leaked = Object.entries(on.runner).filter(([, v]) => v !== undefined && /PRIVATE KEY/.test(String(v)));
 if (!leaked.length) ok('and never the private key, nor the old shared secret');
 else bad('and never the private key, nor the old shared secret', leaked.map(([k]) => k).join(', '));
+/**
+ * Absent is not enough, because the runner is spawned with
+ * { ...process.env, ...env.runner }: a name this map does not mention is
+ * INHERITED from whatever the operator has exported. So the two signing-key
+ * names must be present here with an undefined value, which is how a variable
+ * is removed from a child's environment.
+ */
+const erased = ['GC_SIGNING_KEY', 'GC_AUTH_SECRET'].filter((k) => !(k in on.runner) || on.runner[k] !== undefined);
+if (!erased.length) ok('and an exported one is erased, not inherited', 'GC_SIGNING_KEY, GC_AUTH_SECRET');
+else bad('and an exported one is erased, not inherited', `${erased.join(', ')} would reach the runner from the shell`);
 if (!('GC_AUTH_SECRET' in on.control)) ok('and the control plane is not handed the old secret either');
 else bad('and the control plane is not handed the old secret either');
 
@@ -97,6 +107,8 @@ else bad('--auth keeps the demo apps drivable', JSON.stringify({ GC_DEMO: on.run
 const offEnv = envFor(parseArgs([]), null);
 if (!offEnv.runner.GC_AUTH_PUBLIC_KEYS && !offEnv.control.GC_SIGNING_KEY) ok('and without --auth no key is passed at all');
 else bad('and without --auth no key is passed at all', 'the gate would turn itself on');
+if ('GC_AUTH_PUBLIC_KEYS' in offEnv.runner && offEnv.runner.GC_AUTH_PUBLIC_KEYS === undefined) ok('and one in the shell is erased too', 'the gate cannot turn itself on');
+else bad('and one in the shell is erased too', 'an exported GC_AUTH_PUBLIC_KEYS would be inherited');
 if (offEnv.runner.GC_DEMO === undefined && offEnv.runner.GC_BLOCK_PRIVATE === undefined) ok('nor a demo or reach flag', 'the laptop defaults stand');
 else bad('nor a demo or reach flag');
 if (offEnv.build.VITE_AUTH_URL === '') ok('so the UI is built with no sign-in', 'VITE_AUTH_URL=""');

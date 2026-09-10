@@ -28,7 +28,7 @@ from tenants.tests.support import member, org
 
 from .. import google
 from ..adapters import app_url
-from ..events import AUTH_EVENTS
+from ..events import AUTH_EVENTS, LOGIN_AT
 from ..models import AuthEvent, EmailAddressAdded
 from .support import HEADLESS, PASSWORD, Api, give_authenticator, make_user, prove_strong
 
@@ -173,6 +173,11 @@ class SignInTests(GoogleCase):
         self.assertEqual(r['Location'], CALLBACK)
         self.assertSignedIn(api, 'ada@example.com')
         self.assertEqual(SocialAccount.objects.get(user=user).uid, '2002')
+        # From the ROW, not from the object make_user built: allauth's
+        # authenticate-by-email flow calls wipe_password on every link, and
+        # only returns early because the local address is verified. Read from
+        # memory the assertion would hold even if that guard went away.
+        user.refresh_from_db()
         self.assertTrue(user.has_usable_password())   # linking never wipes a password
         self.assertTrue(AuthEvent.objects.filter(kind=AuthEvent.Kind.GOOGLE_CONNECTED, user=user).exists())
 
@@ -232,6 +237,16 @@ class RefusalTests(GoogleCase):
             # login page with its own word; no state was made, so nothing
             # can come back through the callback either.
             self.assertTrue(r['Location'].startswith(CALLBACK), (bad, r['Location']))
+        # §4.6 wants a row for every refusal, and this is the one shaped
+        # like an attack: it is refused at the redirect endpoint, which never
+        # reaches accounts/google.py's callback wrapper — the only other
+        # writer of a Google refusal row. A script probing redirect targets
+        # used to leave no trace at all while "somebody pressed Back on
+        # Google" left one.
+        rows = AuthEvent.objects.filter(kind=AuthEvent.Kind.GOOGLE_REFUSED,
+                                        detail__reason='unsafe callback_url')
+        self.assertEqual(rows.count(), 9)
+        self.assertEqual(rows.first().detail['callback_url'], r'http://testserver\@evil.example/app/')
         self.assertTrue(app_url(CALLBACK))
         self.assertTrue(app_url(f'{APP}/login?next=%2Fsuites'))
         self.assertTrue(app_url(f'{APP}/security'))
@@ -352,8 +367,11 @@ class RefusalTests(GoogleCase):
         # spec's and the test says so in the one place both can read.
         from pathlib import Path
         source = Path(__file__).resolve().parents[3] / 'web' / 'src' / 'components' / 'ProviderError.vue'
-        if source.exists():
-            self.assertIn(GENERIC, source.read_text(encoding='utf8'))
+        # Not `if source.exists()`: this is the single pin tying the spec's
+        # [credentials-3] sentence to the built UI, and a guarded assertion
+        # passes silently the day the component is renamed or moved.
+        self.assertTrue(source.exists(), source)
+        self.assertIn(GENERIC, source.read_text(encoding='utf8'))
 
     def test_a_get_cannot_start_a_sign_in_and_one_tap_does_not_exist(self):
         # SOCIALACCOUNT_LOGIN_ON_GET is off and, better, the URLs are not
@@ -362,6 +380,18 @@ class RefusalTests(GoogleCase):
         self.assertEqual(Api().c.post('/accounts/google/login/token/', {'credential': 'x'}).status_code, 404)
         r = Api().c.get(f'{HEADLESS}/auth/provider/redirect', {'provider': 'google', 'callback_url': CALLBACK, 'process': 'login'})
         self.assertNotEqual(r.status_code, 302)
+        # And the door that IS mounted and IS routed at the edge. The two
+        # URLs above are allauth's provider urlconf, which this project never
+        # includes, so asserting on them said nothing about
+        # /_allauth/browser/v1/auth/provider/token — which allauth's headless
+        # urls mount as one block, and which signs an id_token holder
+        # straight in with no state and no PKCE ([oauth-3], §6.4).
+        api = Api()
+        for path in ('auth/provider/token', 'auth/provider/signup'):
+            r = api.c.post(f'{HEADLESS}/{path}',
+                           data='{"provider": "google", "process": "login", "token": {}}',
+                           content_type='application/json', HTTP_X_CSRFTOKEN=api.csrf)
+            self.assertEqual(r.status_code, 404, path)
 
     def test_the_redirect_endpoint_needs_a_csrf_token(self):
         api = Api()
@@ -393,12 +423,16 @@ class ConnectTests(GoogleCase):
 
     def test_connect_then_list_then_disconnect(self):
         security = f'{APP}/security'
+        began = self.api.session[LOGIN_AT]
         api, r = self.sign_in(payload(sub='7007'), api=self.api, process='connect', callback_url=security)
         self.assertEqual(r['Location'], security)
         self.assertEqual(SocialAccount.objects.get(user=self.user).uid, '7007')
         self.assertTrue(AuthEvent.objects.filter(kind=AuthEvent.Kind.GOOGLE_CONNECTED, user=self.user).exists())
-        # Still the same session, still the same seven-day clock.
+        # Still the same session, still the same seven-day clock: a connect
+        # fires user_logged_in, and [session-2] says the absolute lifetime
+        # must not restart when somebody proves who they are again.
         self.assertSignedIn(api, 'ada@example.com')
+        self.assertEqual(api.session[LOGIN_AT], began)
 
         listed = api.get(f'{HEADLESS}/account/providers').json()['data']
         self.assertEqual([(a['provider']['id'], a['uid']) for a in listed], [('google', '7007')])

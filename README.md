@@ -164,7 +164,8 @@ else can post a recording to a gated runner.
 
 Deployed, the same three services sit behind one Caddy on one URL
 (`PUBLIC_URL`), from which every host, origin and cookie rule is derived, with
-the runner on a network that has no route to the control plane or its stores,
+the runner on a network of its own that has no route to the control plane or
+its stores,
 a scheduler that clears sessions and the audit log, hashed and digest-pinned
 dependencies, and a root-owned key file that the deploy user reaches only
 through `sudo`. See [docs/DEPLOY.md](docs/DEPLOY.md).

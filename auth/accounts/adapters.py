@@ -133,7 +133,12 @@ class AccountAdapter(DefaultAccountAdapter):
             log.warning('Have I Been Pwned unreachable at sign-in; not checked: %s', err)
             return
         if hits:
-            request.session[PWNED] = True
+            # The account's primary key, not True. This runs while the sign-in
+            # is still anonymous, and login() preserves the session's data
+            # across its key cycle — so a boolean left behind by a sign-in
+            # abandoned at the second-factor stage would follow the browser
+            # onto whoever signs in next (accounts.events.pwned_for).
+            request.session[PWNED] = user.pk
             record(AuthEvent.Kind.PASSWORD_PWNED, request, user=user, breaches=int(hits))
 
     # ---------------------------------------------------------------- sign-up
@@ -152,14 +157,32 @@ class AccountAdapter(DefaultAccountAdapter):
         # The discarded password is not passed this far, and Argon2id costs
         # the same for any input, so a random one pays the same bill.
         make_password(secrets.token_urlsafe(24))
-        if policy.signup_allowed(email).allowed:
-            # A real "you already have an account" — the address exists.
+        # Which mail to send is a question about the ADDRESS, not about the
+        # deployment's sign-up policy. Branching on the policy sent the owner
+        # of an existing account a note saying "sign-up here is by invitation
+        # and this address does not hold one … no account was made", which is
+        # false and points them away from Sign in and Forgot password; in
+        # domain mode it said "by invitation" in a deployment where sign-up is
+        # nothing of the kind. The refusal wording belongs to the branch that
+        # really is a refusal.
+        exists = (EmailAddress.objects.filter(email__iexact=email).exists()
+                  or get_user_model().objects.filter(email__iexact=email).exists())
+        if exists:
+            # §4.6 asks for a row for every refusal, and this is the branch an
+            # address-enumeration campaign walks: the response is uniform on
+            # purpose, so the audit log is the only place it shows up at all.
+            record(AuthEvent.Kind.SIGNUP_REFUSED, self.request, email=email,
+                   reason='address already has an account')
             return super().send_account_already_exists_mail(email)
         # Nobody invited this address, and the browser was told the same
         # thing it is told for an address that exists: check your mail.
-        # The mail is the one place the truth can go.
-        record(AuthEvent.Kind.SIGNUP_REFUSED, self.request, email=email, reason='no live invitation')
-        mailer.send('account/email/not_invited', email)
+        # The mail is the one place the truth can go, and it says which door
+        # is shut rather than assuming it is the invitation one.
+        decision = policy.signup_allowed(email)
+        record(AuthEvent.Kind.SIGNUP_REFUSED, self.request, email=email,
+               reason=decision.reason or 'not allowed to sign up')
+        mailer.send('account/email/not_invited', email,
+                    {'mode': policy.mode(), 'reason': decision.reason or ''})
 
     # ---------------------------------------------------------------- recovery
 
@@ -342,13 +365,25 @@ class MFAAdapter(DefaultMFAAdapter):
 
     def decrypt(self, encrypted_text):
         try:
-            return self.fernet().decrypt(str(encrypted_text).encode('ascii')).decode('utf-8')
+            secret = self.fernet().decrypt(str(encrypted_text).encode('ascii')).decode('utf-8')
         except (InvalidToken, ValueError, UnicodeDecodeError):
-            # A row this key cannot open verifies no code and says so as an
-            # incorrect code, which is what the person can act on; the
-            # operator finds the rotated-away key in the log, not the user.
+            secret = ''
+        if not secret:
+            # FAIL CLOSED. This used to answer '' and let allauth carry on,
+            # and an empty secret is a PUBLICLY KNOWN secret: the six-digit
+            # code for it is computable offline by anyone, and the recovery
+            # codes generated from an empty seed likewise. Any GC_MFA_KEY
+            # mismatch — a rotation that dropped the old key, a database
+            # restored beside a different .env.prod, a laptop whose
+            # DJANGO_SECRET_KEY changed — therefore turned every enrolled
+            # account's second factor into a BYPASS rather than a lockout,
+            # which is the exact inverse of [ops-supply-2] and defeats §7.2's
+            # strong reauthentication with it. A person who cannot use their
+            # authenticator is the correct outcome of a lost key; the operator
+            # finds the reason in the log, and the row verifies nothing.
             log.error('an authenticator secret could not be decrypted with GC_MFA_KEY; was the key rotated away?')
-            return ''
+            raise self.validation_error('incorrect_code')
+        return secret
 
     # ---------------------------------------------------------------- the relying party
 

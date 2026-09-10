@@ -79,6 +79,15 @@ def invitation_list(request):
         data = _body(request)
     except ValueError as err:
         return JsonResponse({'error': str(err)}, status=400)
+    # Issuing is counted, and keyed on the manager who asked. members.max
+    # bounds how many invitations may be LIVE, which is no bound at all on
+    # how many are SENT: revoke-and-reissue in a loop mails arbitrary
+    # third-party addresses through this service's mailer, and on a plan
+    # whose members.max is null even the per-moment cap is gone. §3 counted
+    # acceptance and minting and left the one endpoint that mails strangers
+    # uncounted.
+    if over('invite', str(request.user.pk), settings.GC_INVITE_RATE):
+        return JsonResponse({'error': 'rate_limited'}, status=429)
     role = str(data.get('role') or Role.MEMBER)
     try:
         invitation = invitations.issue(me, str(data.get('email', '')), role, request)

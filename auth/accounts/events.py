@@ -15,6 +15,7 @@ The same receivers keep the session's list of authentication events, which
 is what the executor token's amr, auth_time and su are computed from — never
 from a flag a view set [mfa-recovery-2].
 """
+import ipaddress
 import time
 from datetime import timedelta
 
@@ -43,8 +44,20 @@ AUTH_EVENTS = 'gc_auth_events'
 # needs the most recent of each kind.
 MAX_EVENTS = 20
 # Set on the session when the password that signed it in is in a breach
-# corpus; read by accounts.middleware.PasswordChangeRequired.
+# corpus; read by accounts.middleware.PasswordChangeRequired. The value is
+# the PRIMARY KEY of the account it was found for, not a boolean: the flag is
+# written while the sign-in is still anonymous, and django.contrib.auth.login
+# cycles the session key but PRESERVES its data — so a sign-in abandoned at
+# the second-factor stage used to leave the mark behind for whoever signed in
+# next in that browser, which on a shared machine is a cheap way to lock a
+# stranger out of everything but a password change they do not need.
 PWNED = 'gc_password_pwned'
+
+
+def pwned_for(session, user):
+    """Is this session's breach mark about the account now signed in?"""
+    marked = session.get(PWNED)
+    return marked is not None and user is not None and marked == getattr(user, 'pk', None)
 
 # allauth's names for how someone proved who they were, in the vocabulary
 # the token uses (docs/AUTH.md §5.3). A method with no entry is not a
@@ -70,14 +83,24 @@ def client_ip(request):
     header is a lie by definition and the peer address is the client.
 
     Same arithmetic as django-allauth's, so the address a rate limit is keyed
-    on and the address the audit row records are the same address.
+    on and the address the audit row records are the same address — and, like
+    allauth's, the value is PARSED before it is believed. AuthEvent.ip is an
+    inet column written without full_clean, so a header carrying anything but
+    an address would raise DataError out of the INSERT: the request would 500
+    AND the audit row would be lost, which is a way to suppress one's own
+    login_failed rows. Unparseable means "the header said nothing", so the
+    peer address answers instead.
     """
     trusted = getattr(settings, 'ALLAUTH_TRUSTED_PROXY_COUNT', 0)
     forwarded = request.META.get('HTTP_X_FORWARDED_FOR', '')
     if trusted > 0 and forwarded:
         hops = [h.strip() for h in forwarded.split(',')]
         if len(hops) >= trusted:
-            return hops[-trusted] or None
+            candidate = hops[-trusted]
+            try:
+                return str(ipaddress.ip_address(candidate.strip('[]')))
+            except ValueError:
+                pass
     return request.META.get('REMOTE_ADDR') or None
 
 

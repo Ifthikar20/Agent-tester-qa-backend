@@ -7,21 +7,33 @@
 # one the stack cannot come up correctly without, and the deploy script
 # refuses a .env.prod that only looks filled in.
 #
-# Two networks, and which side of the line each service is on is the whole
+# THREE networks, and which side of each line a service is on is the whole
 # point (docs/AUTH.md §0):
 #
-#   edge   caddy <-> runner, caddy <-> control. The internet reaches caddy.
+#   edge   caddy <-> runner. The internet reaches caddy.
+#   front  caddy <-> control.
 #   data   control <-> postgres, control <-> redis. `internal`: no route out.
+#
+# Three and not two, because a bridge network is BIDIRECTIONAL and Docker's
+# embedded DNS resolves every name on it. With caddy, runner and control all
+# on one `edge`, "caddy may reach control" and "the runner may not" are the
+# same sentence — the runner could resolve `control` and open port 8000 on
+# it, which is exactly how caddy does it. The rule §0 states cannot be
+# expressed with two networks, so there are three: the runner shares one
+# with caddy and one with nothing else.
 #
 # The runner — and therefore the Chromium it drives at pages other people
 # choose — is on `edge` only. It has no route to the control plane, the
 # database or the cache, so a page that escapes the browser lands in a
-# container that cannot reach the thing that decides who anyone is.
+# container that cannot reach the thing that decides who anyone is. reach.js
+# blocks the names and the addresses too; this is the half that also holds
+# against a compromised runner PROCESS, which is the attacker §13 bounds.
 
 name: ghostclick
 
 networks:
   edge:
+  front:
   data:
     internal: true
 
@@ -59,7 +71,9 @@ services:
       - caddy-config:/config
       # Django's admin CSS, collected by the deploy script.
       - control-static:/srv/static:ro
-    networks: [edge]
+    # Both front-side networks: the runner is on `edge`, the control plane
+    # is on `front`, and caddy is the only thing that can see both.
+    networks: [edge, front]
     cap_drop: [ALL]
     # The one capability the edge needs: ports 80 and 443. Docker lets a
     # container bind them without it since 20.10, but saying so costs nothing
@@ -204,7 +218,9 @@ services:
     volumes:
       - control-static:/app/staticfiles
     expose: ["8000"]
-    networks: [edge, data]
+    # `front` and `data`. NOT `edge`: that is the runner's network, and the
+    # runner having no route here is the rule this file exists to enforce.
+    networks: [front, data]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     healthcheck:
@@ -235,7 +251,23 @@ services:
     restart: unless-stopped
     depends_on:
       control: { condition: service_healthy }
-    environment: *control-env
+    # The control plane's environment with the two KEYS blanked. Nothing
+    # `housekeeping` runs mints a token or decrypts an authenticator, and §12
+    # says the Ed25519 private key is in the control plane's environment
+    # only — inheriting the anchor whole put it in a second container for
+    # nothing. The names are still present and empty rather than absent
+    # because the settings module reads them at import; the runtime paths
+    # that need them (accounts.tokens, accounts.adapters) refuse with a
+    # sentence naming the variable, which is the right answer for a process
+    # that should never reach them.
+    environment:
+      <<: *control-env
+      GC_SIGNING_KEY: ''
+      GC_MFA_KEY: ''
+      # Says out loud that this process never mints, so the settings module's
+      # boot refusal — which is right for the control plane — does not stop
+      # a container that has no business holding the key.
+      GC_NO_MINT: '1'
     networks: [data]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -292,7 +324,22 @@ services:
     # restart forgetting them is a restart handing out a few extra attempts,
     # not a restart losing data. requirepass because "internal network" is a
     # statement about routing, not about who is on it.
-    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --save '' --appendonly no --maxmemory 64mb --maxmemory-policy allkeys-lru"]
+    #
+    # The password reaches redis-server through a config file it writes for
+    # itself, never through argv. `--requirepass "$REDIS_PASSWORD"` put the
+    # plaintext into the process's command line, where /proc/<pid>/cmdline
+    # and `ps aux` show it to every local user on the host — including the
+    # deploy user, who is deliberately kept out of the docker group and out
+    # of .env.prod (root:600) so that they cannot read secrets
+    # [ops-supply-1]. The impact was bounded — this holds rate-limit
+    # counters and sits on the internal network that user has no route to —
+    # but handing a secret over for nothing is still handing it over.
+    command:
+      - sh
+      - -c
+      - umask 077 && printf 'requirepass %s\n' "$$REDIS_PASSWORD" > /tmp/redis.conf
+        && exec redis-server /tmp/redis.conf --save '' --appendonly no
+        --maxmemory 64mb --maxmemory-policy allkeys-lru
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.prod}
       # redis-cli reads this for the healthcheck, so the password is not in

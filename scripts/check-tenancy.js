@@ -99,7 +99,7 @@ writeFileSync(join(scratch, '.ghostclick', 'runs.json'), '{"runs":[]}');
 writeFileSync(join(scratch, 'suites', 'old.json'), '{"id":"old"}');
 mkdirSync(join(scratch, 'suites', 'check-acme'));
 writeFileSync(join(scratch, 'suites', 'check-acme', 'theirs.json'), '{"id":"theirs"}');
-const moved = migrate(scratch);
+const { moved, failed } = migrate(scratch);
 const after = [
   existsSync(join(scratch, '.ghostclick', LOCAL, 'origins.json')),
   existsSync(join(scratch, '.ghostclick', LOCAL, 'runs.json')),
@@ -108,13 +108,35 @@ const after = [
   !existsSync(join(scratch, 'suites', 'old.json')),
   existsSync(join(scratch, 'suites', 'check-acme', 'theirs.json')),
 ];
-if (after.every(Boolean) && moved.length === 3) ok('flat state and suites move under local, once', moved.length + ' moves');
-else bad('flat state and suites move under local, once', JSON.stringify({ after, moved }));
-if (migrate(scratch).length === 0) ok('and a second boot moves nothing');
+if (after.every(Boolean) && moved.length === 3 && failed.length === 0) ok('flat state and suites move under local, once', moved.length + ' moves');
+else bad('flat state and suites move under local, once', JSON.stringify({ after, moved, failed }));
+if (migrate(scratch).moved.length === 0) ok('and a second boot moves nothing');
 else bad('and a second boot moves nothing');
 writeFileSync(join(scratch, 'suites', 'old.json'), '{"id":"old-again"}');
-if (migrate(scratch).length === 0 && existsSync(join(scratch, 'suites', 'old.json'))) ok('a file whose destination exists is left where it is', 'never overwritten');
+if (migrate(scratch).moved.length === 0 && existsSync(join(scratch, 'suites', 'old.json'))) ok('a file whose destination exists is left where it is', 'never overwritten');
 else bad('a file whose destination exists is left where it is');
+/**
+ * A move that cannot happen must not stop the runner.
+ *
+ * migrate() runs at module scope in server.js, so a throw here is a runner
+ * that refuses to boot on a checkout it used to serve fine — a read-only bind
+ * mount, a repository owned by another user. The failure is reported and the
+ * banner says so; nothing is lost, because nothing was moved.
+ */
+const locked = mkdtempSync(join(tmpdir(), 'gc-tenancy-ro-'));
+mkdirSync(join(locked, '.ghostclick'), { recursive: true });
+writeFileSync(join(locked, '.ghostclick', 'origins.json'), '{"origins":[]}');
+// A file where the destination DIRECTORY has to be is a write this cannot do,
+// on every platform — which is the point, since chmod is a no-op on Windows.
+writeFileSync(join(locked, '.ghostclick', LOCAL), 'not a directory');
+try {
+  const ro = migrate(locked);
+  if (ro.moved.length === 0 && ro.failed.length === 1) ok('a move it cannot make is reported, not thrown', ro.failed[0]);
+  else bad('a move it cannot make is reported, not thrown', JSON.stringify(ro));
+} catch (err) {
+  bad('a move it cannot make is reported, not thrown', `it threw ${err.code ?? err.message}`);
+}
+rmSync(locked, { recursive: true, force: true });
 rmSync(scratch, { recursive: true, force: true });
 
 // ---------------------------------------------------------------------------
@@ -224,13 +246,21 @@ const ticketFor = async (tok) => (await call(tok, '/api/socket-ticket', { method
 async function socketFor(tok) {
   const ticket = await ticketFor(tok);
   const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws?ticket=${ticket}`, { origin: BASE });
-  const got = { events: [], frames: 0, closed: null };
-  ws.on('message', (d, bin) => { if (bin) got.frames++; else { try { got.events.push(JSON.parse(d)); } catch { /* ignore */ } } });
+  // Frame SIZES as well as the count, because "a frame arrived" and "a
+  // picture of somebody's page arrived" are different claims: a freshly
+  // reset context is on about:blank, whose JPEG is a few hundred bytes of
+  // white, while a rendered page is tens of kilobytes.
+  const got = { events: [], frames: 0, bytes: [], closed: null };
+  ws.on('message', (d, bin) => {
+    if (bin) { got.frames++; got.bytes.push(d.length); }
+    else { try { got.events.push(JSON.parse(d)); } catch { /* ignore */ } }
+  });
   ws.on('close', (code) => { got.closed = code; });
   await new Promise((res) => { ws.on('open', res); ws.on('error', res); setTimeout(res, 8000); });
   // The greeting arrives right after the open.
   await wait(300);
-  return { ws, got, send: (m) => ws.send(JSON.stringify(m)), reset: () => { got.events.length = 0; got.frames = 0; } };
+  return { ws, got, send: (m) => ws.send(JSON.stringify(m)),
+           reset: () => { got.events.length = 0; got.frames = 0; got.bytes.length = 0; } };
 }
 /** Wait until `pred` finds an event, or give up. */
 const until = async (got, pred, ms = 8000) => {
@@ -267,8 +297,23 @@ try {
   if (!bList.some((s) => s.id === sid)) ok('nor listed for anyone else');
   else bad('nor listed for anyone else');
   const bCases = (await call(B, `/api/suites/${sid}/cases`, { method: 'POST', body: { name: 'x', flow: 'goto https://a.example/' } })).status;
-  if (bCases === 400 || bCases === 404) ok('a case cannot be added to it from outside', String(bCases));
+  if (bCases === 404) ok('a case cannot be added to it from outside', '404 from the nested route too, never a 403');
   else bad('a case cannot be added to it from outside', String(bCases));
+  /**
+   * The id reaches the filesystem as a path, so it is validated as a slug or
+   * it is "no suite" — never stripped down to something else and then unlinked
+   * raw. Sanitising in the reader and trusting the caller in the writer let
+   * `a/../../local/<id>` read one file and delete another organisation's.
+   */
+  const decoy = await call(B, '/api/suites', { method: 'POST', body: { name: 'alocalcheck traversal victim', baseUrl: 'https://b.example' } });
+  const victim = join(ROOT, 'suites', LOCAL, 'check-traversal-victim.json');
+  mkdirSync(join(ROOT, 'suites', LOCAL), { recursive: true });
+  writeFileSync(victim, '{"id":"check-traversal-victim","name":"Victim","pages":[],"cases":[]}');
+  const traversal = await call(B, `/api/suites/${encodeURIComponent('a/../../local/check-traversal-victim')}`, { method: 'DELETE' });
+  if (traversal.status === 404 && existsSync(victim)) ok('a suite id that is not a slug deletes nothing', `404, and suites/${LOCAL}/ is untouched`);
+  else bad('a suite id that is not a slug deletes nothing', `${traversal.status}, victim ${existsSync(victim) ? 'survived' : 'WAS DELETED'}`);
+  rmSync(victim, { force: true });
+  if (decoy.body.suite?.id) await call(B, `/api/suites/${decoy.body.suite.id}`, { method: 'DELETE' });
 
   // -- the plan -------------------------------------------------------------
   const codes = [];
@@ -424,6 +469,48 @@ try {
   const ended = await until(b.got, (e) => e.t === 'run.end', 25000);
   if (vaultRefusal?.limit === 'vault.enabled' && vaultRefusal.plan === 'free' && ended && ended.ok === false) ok('a plan without the vault cannot resolve a $KEY', JSON.stringify(vaultRefusal));
   else bad('a plan without the vault cannot resolve a $KEY', JSON.stringify({ vaultRefusal, ended }));
+
+  // Now the same lapse the other way, and the assertion this file used to
+  // skip: the organisation that takes a lapsed lock must inherit nothing of
+  // the page the previous one left open.
+  b.send({ t: 'frame.request' });
+  await wait(200);
+  a.reset(); b.reset();
+  const released2 = await until(a.got, (e) => e.t === 'driving' && e.held === false, IDLE_MS + 4000);
+  if (released2 && released2.org === 'check-globex') ok('the second driver goes quiet in its turn', `after ~${IDLE_MS}ms idle`);
+  else bad('the second driver goes quiet in its turn', JSON.stringify(a.got.events.filter((e) => e.t === 'driving')));
+  a.reset(); b.reset();
+  /**
+   * The direction that actually matters, and the one this file used to skip.
+   *
+   * The waiting organisation claims the lapsed lock WITHOUT opening anything,
+   * so whatever it now sees it inherited. It must see nothing: the browser is
+   * reset when the lock changes hands, so there is no frame of the previous
+   * driver's page, no URL, no target list, and a socket opened a moment later
+   * greets with `url: null`. Testing only the case where the newcomer
+   * navigates first proves nothing, because the navigation covers the leak.
+   */
+  a.send({ t: 'command', text: 'click link:Cart' });
+  await wait(2500);
+  const inheritedUrl = a.got.events.find((e) => e.t === 'url' && e.url);
+  const inheritedTargets = a.got.events.find((e) => e.t === 'targets' && (e.url || (e.items ?? []).length));
+  const aTook = a.got.events.find((e) => e.t === 'driving' && e.mine === true);
+  const aState1 = (await call(A, '/api/state')).body;
+  const fresh = await socketFor(A);
+  const greeting = await until(fresh.got, (e) => e.t === 'ready');
+  fresh.ws.close();
+  if (a.got.frames === 0 && !inheritedUrl && !inheritedTargets && aState1.url === null && greeting?.url === null) {
+    ok('the organisation that takes the lapsed lock inherits nothing', 'no frame, no URL, no targets, greeting url null');
+  } else {
+    bad('the organisation that takes the lapsed lock inherits nothing',
+        JSON.stringify({ frames: a.got.frames, bytes: a.got.bytes, url: inheritedUrl?.url, targets: inheritedTargets?.url, state: aState1.url, greeting: greeting?.url }));
+  }
+  // And a plan that never navigates does not get to run on it either: with no
+  // `goto` there is no URL for validate() to check, so the gate would simply
+  // not happen for it (docs/AUTH.md §11).
+  const strayLog = a.got.events.find((e) => e.t === 'log' && /Nothing is open yet/.test(e.msg ?? ''));
+  if (aTook && strayLog) ok('and a plan with no goto is refused rather than run on what was there', strayLog.msg);
+  else bad('and a plan with no goto is refused rather than run on what was there', JSON.stringify(a.got.events.map((e) => e.t)));
 
   // Step-up on the socket, and a member on the socket.
   const staleSu = await socketFor(tokenFor('check-acme', { su: nowS() - 1, sub: 'sub-stale-su' }));

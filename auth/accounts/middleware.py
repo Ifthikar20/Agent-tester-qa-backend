@@ -44,7 +44,7 @@ from django.contrib.auth import SESSION_KEY
 from django.http import HttpResponseRedirect, JsonResponse
 from django.middleware.csrf import get_token
 
-from .events import LOGIN_AT, PWNED, record
+from .events import LOGIN_AT, pwned_for, record
 from .models import AuthEvent
 
 HEADLESS = '/_allauth/browser/v1/'
@@ -77,15 +77,28 @@ class PasswordChangeRequired:
     """
     What a marked session may still reach: the change itself, the answer to
     "who am I" (so the SPA can draw the page that says why), the session
-    endpoints (so signing out is always possible), reauthentication (the
-    change asks for the current password, not this, but a stale session
-    should not be stuck), and the CSRF token. Nothing that mints, invites,
-    or switches organisation.
+    endpoints (so signing out is always possible), EVERY kind of
+    reauthentication, and the CSRF token. Nothing that mints, invites, or
+    switches organisation.
+
+    Every kind, and not only the password one, because of what
+    StrongReauthentication does next: for an account holding an authenticator
+    it refuses the forced change with a 401 naming `mfa_reauthenticate`, once
+    the sign-in proof is older than the reauthentication window. If the two
+    endpoints that could supply that proof are themselves answered
+    `password_change_required`, the account is stuck — the [credentials-1]
+    change becomes impossible for exactly the people who took the strongest
+    precaution, and their only way out is signing out and going through the
+    mailbox. A reauthentication proves something and changes nothing, so it
+    is safe in a marked session, and it is the one thing the refusal asks
+    for.
     """
     ALLOWED = (
         '/_allauth/browser/v1/account/password/change',
         '/_allauth/browser/v1/auth/session',
         '/_allauth/browser/v1/auth/reauthenticate',
+        '/_allauth/browser/v1/auth/2fa/reauthenticate',
+        '/_allauth/browser/v1/auth/webauthn/reauthenticate',
         '/_allauth/browser/v1/config',
         '/auth/me',
         '/auth/csrf',
@@ -97,7 +110,13 @@ class PasswordChangeRequired:
 
     def __call__(self, request):
         session = getattr(request, 'session', None)
-        if session is not None and SESSION_KEY in session and session.get(PWNED):
+        # `pwned_for`, not a truthiness test: the mark names the account it
+        # was found for, because it is written while the sign-in is still
+        # anonymous and login() preserves session data across its key cycle.
+        # A sign-in abandoned at the second-factor stage would otherwise
+        # leave it behind for whoever used that browser next.
+        if (session is not None and SESSION_KEY in session
+                and request.user.is_authenticated and pwned_for(session, request.user)):
             if request.path not in self.ALLOWED:
                 return JsonResponse({'error': 'password_change_required'}, status=403)
         return self.get_response(request)
@@ -108,12 +127,30 @@ class MfaRequired:
     What an account that must enrol may still reach: the enrolment
     endpoints themselves (and listing what it holds), the session endpoints
     (signing out, and the "what is pending" the SPA boots from), every kind
-    of reauthentication (enrolment asks for one), the password change (a
-    breached password is changed first, and the password is this account's
-    strongest factor until it enrols), the Google callback and redirect (a
-    Google-only account arrives through them and must be able to finish),
-    "who am I" and the two read-only helpers. /admin/ is StaffMFARequired's
-    to answer, in HTML; /static/ is not a thing an account does.
+    of reauthentication (enrolment asks for one), the Google callback (a
+    sign-in already in flight must be able to finish), "who am I" and the
+    two read-only helpers. /admin/ is StaffMFARequired's to answer, in HTML;
+    /static/ is not a thing an account does.
+
+    Two things this list used to hold unconditionally and no longer does.
+
+    The password change is now reachable only while PasswordChangeRequired
+    has marked the session, which is the one case where a change must come
+    before enrolment. Unconditionally it was the whole policy's exit for a
+    Google-only account: allauth makes `current_password` optional when the
+    account has no usable password, and treats an account with no
+    reauthentication flows as having recently authenticated — so a stolen
+    cookie could SET a password, sign in with it, and watch `no_password`
+    disappear, having enrolled nothing. That is exactly the account
+    [oauth-1] and §6.5 were written for. Setting a password can wait until
+    there is a factor beside it.
+
+    `auth/provider/redirect` is gone for the same shape of reason: it asks
+    for no reauthentication at all, so a blocked account could complete
+    `process=connect` and bolt an ADDITIONAL Google identity onto itself on
+    nothing but the session cookie — while REMOVING one is gated by
+    StrongReauthentication. §5.4 does not list it, and a blocked account has
+    no business starting a connect before it enrols.
     """
     ALLOWED = (
         '/auth/me',
@@ -125,10 +162,11 @@ class MfaRequired:
         f'{HEADLESS}auth/reauthenticate',
         f'{HEADLESS}auth/2fa/reauthenticate',
         f'{HEADLESS}auth/webauthn/reauthenticate',
-        f'{HEADLESS}auth/provider/redirect',
-        f'{HEADLESS}account/password/change',
         '/accounts/google/login/callback/',
     )
+    #: Reachable only while the session is marked as holding a breached
+    #: password, where PasswordChangeRequired is already forcing the change.
+    ALLOWED_WHEN_PWNED = (f'{HEADLESS}account/password/change',)
     ALLOWED_PREFIXES = (
         f'{HEADLESS}account/authenticators',
         '/admin/',
@@ -142,7 +180,8 @@ class MfaRequired:
         session = getattr(request, 'session', None)
         if session is not None and SESSION_KEY in session and request.user.is_authenticated:
             path = request.path
-            if path not in self.ALLOWED and not path.startswith(self.ALLOWED_PREFIXES):
+            allowed = self.ALLOWED + (self.ALLOWED_WHEN_PWNED if pwned_for(session, request.user) else ())
+            if path not in allowed and not path.startswith(self.ALLOWED_PREFIXES):
                 from . import mfa
                 if mfa.blocked(request.user):
                     return JsonResponse({'error': 'mfa_required'}, status=403)

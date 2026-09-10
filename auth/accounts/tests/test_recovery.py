@@ -45,7 +45,7 @@ class ResetTests(TestCase):
         key = self.request()
         [msg] = mail.outbox
         self.assertEqual(msg.to, ['qa@example.com'])
-        self.assertIn('/app/reset-password/', msg.body)
+        self.assertIn('/app/reset-password?key=', msg.body)
         self.assertIn('one hour', msg.body)
         api = Api()
         r = api.reset(key, NEW_PASSWORD)
@@ -86,7 +86,7 @@ class ResetTests(TestCase):
         self.assertEqual(thief.get('/auth/me').status_code, 401)
         self.assertEqual(owner.get('/auth/me').status_code, 401)
         # The account is told, and the log says how many were ended.
-        notices = [m for m in mail.outbox if 'reset' in m.subject.lower() and 'reset-password/' not in m.body]
+        notices = [m for m in mail.outbox if 'reset' in m.subject.lower() and 'reset-password?key=' not in m.body]
         self.assertEqual(len(notices), 1)
         self.assertEqual(AuthEvent.objects.get(kind=AuthEvent.Kind.PASSWORD_RESET).detail['sessions_ended'], 2)
 
@@ -95,7 +95,7 @@ class ResetTests(TestCase):
         self.assertEqual(r.status_code, 200)
         [msg] = mail.outbox
         self.assertEqual(msg.to, ['nobody@example.com'])
-        self.assertNotIn('/reset-password/', msg.body)
+        self.assertNotIn('/reset-password?key=', msg.body)
 
     @override_settings(ACCOUNT_RATE_LIMITS={'reset_password': '20/m/ip,2/m/key'})
     def test_requests_are_limited_per_address(self):
@@ -201,9 +201,12 @@ class ChangeEmailTests(TestCase):
         self.assertEqual(Api().request_reset('old@example.com').status_code, 200)
         [msg] = mail.outbox
         self.assertEqual(msg.to, ['old@example.com'])
-        self.assertIn('/reset-password/', msg.body)
+        self.assertIn('/reset-password?key=', msg.body)
         self.assertIn('new@example.com', msg.body)
-        self.assertEqual(AuthEvent.objects.get(kind=AuthEvent.Kind.PASSWORD_RESET_REQUESTED).detail['via'], 'previous_email')
+        rows = AuthEvent.objects.filter(kind=AuthEvent.Kind.PASSWORD_RESET_REQUESTED)
+        # Two rows: the ordinary "nobody holds this address now", and the one
+        # that says an account used to.
+        self.assertEqual({r.detail.get('via') or r.detail.get('known') for r in rows}, {'previous_email', False})
         key = key_from_mail(msg)
         Api().reset(key, NEW_PASSWORD)
         # The thief's session — this one — is gone, and the new password works.
@@ -216,7 +219,7 @@ class ChangeEmailTests(TestCase):
         mail.outbox.clear()
         self.assertEqual(Api().request_reset('old@example.com').status_code, 200)
         [msg] = mail.outbox
-        self.assertNotIn('/reset-password/', msg.body)
+        self.assertNotIn('/reset-password?key=', msg.body)
 
     def test_the_old_address_cannot_sign_in(self):
         self.change()

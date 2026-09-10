@@ -22,11 +22,26 @@
 }
 
 {$GC_PUBLIC_URL} {
-	# Caddy already redacts Cookie and Authorization in its logs. The ticket
-	# that opens a socket rides in the query string, because a browser cannot
-	# set headers on a WebSocket, and a URL is exactly what an access log
-	# keeps — so the parameter is deleted before the line is written. A token
-	# that leaks into a log is a token, and this log is on a shared volume.
+	# Caddy already redacts Cookie and Authorization in its logs. Everything
+	# else this deployment can put in a URL is deleted here, because a URL is
+	# exactly what an access log keeps and this log is on a shared volume. A
+	# credential that leaks into a log is a credential [ops-supply-4].
+	#
+	# Every parameter a mail or a socket can carry, by name:
+	#
+	#   ticket, t   the WebSocket ticket — a browser cannot set headers on a
+	#               WebSocket, so it rides in the query string
+	#   token       the invitation link, /app/invite?token=… — seven days,
+	#               single-use, and it grants a Membership
+	#   key         the password-reset link, /app/reset-password?key=… — one
+	#               hour, single-use, and it is account takeover
+	#
+	# `key` is a parameter and not a path segment on purpose: allauth's
+	# default reset link puts the key in the path, where a QUERY filter
+	# cannot reach it and Caddy would need a second log block to rewrite it —
+	# which would log every request twice, the second time unfiltered.
+	# config/settings.py's HEADLESS_FRONTEND_URLS moves it, and the SPA reads
+	# it from the query.
 	log {
 		output stdout
 		format filter {
@@ -35,6 +50,8 @@
 				request>uri query {
 					delete ticket
 					delete t
+					delete token
+					delete key
 				}
 				request>headers>Cookie delete
 				request>headers>Authorization delete
@@ -60,11 +77,21 @@
 
 	# ---- the control plane, by exact prefix ----------------------------------
 	#
-	# Not /accounts/* wholesale: allauth's One Tap token endpoint lives there,
-	# is csrf-exempt, and stays unrouted. Only the Google callback is let
-	# through, and only at its full path. (The control plane mounts nothing
-	# else under /accounts/ either — the sign-in is STARTED by a POST under
-	# /_allauth/ — so this line is the second wall, not the only one.)
+	# Not /accounts/* wholesale: allauth's provider urlconf would put a GET
+	# sign-in and a csrf-exempt One Tap endpoint there. Only the Google
+	# callback is let through, and only at its full path. (The control plane
+	# mounts nothing else under /accounts/ either — the sign-in is STARTED by
+	# a POST under /_allauth/ — so this line is the second wall, not the only
+	# one.)
+	#
+	# /_allauth/* IS routed wholesale, and it has to be: it is allauth's whole
+	# JSON API. The two endpoints under it that this deployment does not have
+	# — auth/provider/token, which is One Tap's door, and
+	# auth/provider/signup — are shadowed with a 404 in the control plane's
+	# own urls.py, because allauth's headless urls mount as one block with no
+	# setting to leave anything out. That refusal belongs there and not here:
+	# a route matcher listing every path allauth ships would go stale on the
+	# next upgrade without saying so.
 	@control path /auth/* /_allauth/* /accounts/google/login/callback/ /admin /admin/*
 	handle @control {
 		# The admin, from the operator's addresses only. GC_ADMIN_CIDRS is

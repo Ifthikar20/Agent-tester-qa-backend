@@ -42,6 +42,18 @@ OURS = [
     path(f'{HEADLESS}account/authenticators/webauthn', headless.ManageWebAuthnView.as_api_view(client=Client.BROWSER)),
     path(f'{HEADLESS}account/authenticators/totp', headless.ManageTOTPView.as_api_view(client=Client.BROWSER)),
     path(f'{HEADLESS}auth/sessions', headless.SessionsView.as_api_view(client=Client.BROWSER)),
+    # Starting a Google sign-in, so an unsafe callback_url is audited rather
+    # than only redirected away from ([oauth-4], §4.6).
+    path(f'{HEADLESS}auth/provider/redirect', headless.RedirectToProviderView.as_api_view(client=Client.BROWSER)),
+    # And the two headless socialaccount endpoints this deployment does not
+    # have. allauth's headless urls mount as one block with no setting to
+    # leave them out, so they are shadowed here: `auth/provider/token` is
+    # One Tap's door, which §6.4 and [oauth-3] say is not enabled, and
+    # `auth/provider/signup` is the other way into a social sign-up that
+    # would skip accounts/google.py's wrapper — the one place a refusal is
+    # normalised to a single word and written to the audit log.
+    path(f'{HEADLESS}auth/provider/token', headless.absent),
+    path(f'{HEADLESS}auth/provider/signup', headless.absent),
 ]
 
 urlpatterns = [

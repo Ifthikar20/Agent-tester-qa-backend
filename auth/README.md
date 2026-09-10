@@ -246,9 +246,14 @@ as a form, with the CSRF token as a field, because the answer is a 302 to
 Google that only a navigation can follow. A `GET` starts nothing
 (`SOCIALACCOUNT_LOGIN_ON_GET` is off, and the GET login URL is not mounted at
 all). Google comes back to `/accounts/google/login/callback/` — the only path
-this project mounts under `/accounts/`, so One Tap's csrf-exempt token
-endpoint does not exist here and the edge's exact route for the callback is a
-second wall rather than the only one. The code is exchanged over PKCE, the
+this project mounts under `/accounts/`, so allauth's provider urlconf (a GET
+sign-in, and One Tap's csrf-exempt `login/token/`) does not exist here and the
+edge's exact route for the callback is a second wall rather than the only one.
+The HEADLESS social endpoints are a different matter: `allauth.headless.urls`
+is one block, so `auth/provider/token` and `auth/provider/signup` are mounted
+by it — and shadowed with a 404 (`accounts.headless.absent`) in
+`config/urls.py`, ahead of the include. `auth/provider/redirect` is subclassed
+rather than shadowed, so an unsafe `callback_url` writes its audit row. The code is exchanged over PKCE, the
 id_token is the only thing read, and no Google token is stored
 (`SOCIALACCOUNT_STORE_TOKENS`). The rules allauth has no setting for are in
 `accounts/adapters.py`:
@@ -316,7 +321,11 @@ agent) pair the account has not seen before is mailed about, except the
 first sign-in ever.
 
 Recovery: a reset link is good for an hour and — because the token is
-derived from the password hash — for one use; it does not sign you in; and
+derived from the password hash — for one use; it carries its key as a QUERY
+parameter (`/app/reset-password?key=…`) rather than a path segment, so the
+edge's access log can delete it and a one-hour takeover credential is not
+written verbatim into `request>uri` `[ops-supply-4]`; it does not sign you in;
+and
 the reset ends every session the account has (`accounts/sessions.py`), as
 does a password change, which also asks for the current password. Changing
 the address is: add the new one, enter the code sent to it, and the old one
@@ -348,12 +357,27 @@ factor and never satisfies the policy `[oauth-1] [oauth-6]`. While such an
 account holds nothing, `accounts.middleware.MfaRequired` answers
 `403 {"error": "mfa_required"}` to everything but enrolment
 (`account/authenticators/*`), the session endpoints, every kind of
-reauthentication, the password change, "who am I" and the read-only
-helpers; `/auth/executor-token` repeats the check itself, because a token
-must never be a middleware ordering away. `/auth/me` reports
-`mfa: {required, enrolled, reasons}` so the enrolment page can say why —
-except that being staff is never given as a reason, since there is no
-`isStaff` in what the browser is told `[authz-tenancy-6]`. For `/admin/`,
+reauthentication, "who am I" and the read-only helpers;
+`/auth/executor-token` repeats the check itself, because a token must never be
+a middleware ordering away.
+
+The password change is NOT on that list unconditionally — only while the
+session is marked as holding a breached password, which is the one case where
+a change must come before enrolment. Left open to everyone it was the whole
+policy's exit for a Google-only account: allauth makes `current_password`
+optional when there is no usable password and treats an account with no
+reauthentication flows as recently authenticated, so a stolen cookie could set
+a password, sign in with it, and watch `no_password` disappear having enrolled
+nothing `[oauth-1]`. `auth/provider/redirect` came off the list for the same
+shape of reason: it needs no proof at all, so a blocked account could bolt an
+additional Google identity on with the cookie alone, while REMOVING one is
+gated.
+
+`/auth/me` reports `mfa: {required, enrolled, reasons}` so the enrolment page
+can say why — with being staff reported as the neutral `policy` rather than
+omitted. Omitted, `required: true` with an empty list could only be a staff
+account, which is the `isStaff` flag `[authz-tenancy-6]` forbids, arrived at
+by elimination. For `/admin/`,
 which is HTML, `StaffMFARequired` redirects an unenrolled staff session to
 the app's enrolment page instead. `adduser --staff` says so.
 
@@ -647,7 +671,7 @@ nothing else.
 ## Tests
 
 ```bash
-python manage.py test          # 379 tests, one module per concern in accounts/tests/ and tenants/tests/
+python manage.py test          # one module per concern in accounts/tests/ and tenants/tests/
 ```
 
 They never touch the network: `accounts/testing.py` is the test runner, and it

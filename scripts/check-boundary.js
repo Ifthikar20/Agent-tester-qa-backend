@@ -90,6 +90,35 @@ const outDir = resolve(config.root ?? WEB, config.build?.outDir ?? 'dist');
 if (inside(WEB, outDir)) ok('the build lands inside web/', relative(ROOT, outDir));
 else bad('the build lands inside web/', `${relative(ROOT, outDir)} is the backend's tree`);
 
+/**
+ * And what is committed there is ONE build, not several piled up.
+ *
+ * web/dist is in git — that is why `npm start` needs no bundler — and vite
+ * names every chunk by a hash of its content, so a rebuild on a checkout
+ * whose line endings differ produces a second complete set under different
+ * names. It happened: forty-four files where twenty-two were reachable, with
+ * nothing to say which half index.html was actually loading. `.gitattributes`
+ * stops it recurring; this notices if it does, by walking the graph rather
+ * than counting.
+ */
+const assetDir = join(outDir, 'assets');
+if (existsSync(assetDir)) {
+  const present = new Set(readdirSync(assetDir));
+  const reached = new Set();
+  const follow = (text) => {
+    for (const m of text.matchAll(/assets\/([A-Za-z0-9._-]+\.(?:js|css))/g)) {
+      if (present.has(m[1]) && !reached.has(m[1])) {
+        reached.add(m[1]);
+        follow(readFileSync(join(assetDir, m[1]), 'utf8'));
+      }
+    }
+  };
+  follow(readFileSync(join(outDir, 'index.html'), 'utf8'));
+  const orphans = [...present].filter((f) => !reached.has(f));
+  if (!orphans.length) ok('and every committed asset is one index.html loads', `${present.size} files, all reachable`);
+  else bad('and every committed asset is one index.html loads', `${orphans.length} orphaned, e.g. ${orphans.slice(0, 3).join(', ')} — rm -rf web/dist/assets && npm run build`);
+}
+
 // ---------------------------------------------------------------------------
 console.log('\n— the backend never looks at the frontend’s source ————');
 

@@ -89,9 +89,23 @@ def validate_entitlements(values, *, complete=False):
 
 
 def resolve(plan_entitlements, overrides):
-    """Plan defaults with the organisation's overrides on top, for every known key."""
+    """
+    Plan defaults with the organisation's overrides on top, for every known
+    key — and the FREE plan's number for a key neither of them mentions.
+
+    `.get(key)` was the obvious spelling and it fails open for counts: None
+    is this design's word for unlimited, so a plan row missing suites.max
+    resolved to unlimited suites rather than to the floor. Plan.clean closes
+    the admin form and the seed migration is complete, but the realistic case
+    is the next one — adding a key to KEYS makes every existing plan row
+    incomplete, and therefore unlimited on it, until somebody backfills three
+    rows. An unspoken count now means the strictest thing there is.
+    (Note the asymmetry this removes: BOOL keys already failed closed,
+    because None is falsy.)
+    """
     merged = {**plan_entitlements, **overrides}
-    return {key: merged.get(key) for key in KEYS}
+    floor = PLANS[DEFAULT_PLAN]['entitlements']
+    return {key: (merged[key] if key in merged else floor.get(key)) for key in KEYS}
 
 
 def runner_subset(entitlements):

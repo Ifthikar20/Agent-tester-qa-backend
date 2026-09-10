@@ -14,6 +14,7 @@ organisation that every downstream check has to remember to refuse.
 """
 import hashlib
 import json
+import re
 import secrets
 
 from django.conf import settings
@@ -124,9 +125,29 @@ class Organization(models.Model):
 
     def save(self, *args, **kwargs):
         loaded = getattr(self, '_loaded', None)
-        if loaded is not None and (loaded[0] != self.plan_id or not _same_json(loaded[1], self.entitlement_overrides)):
-            self.entitlements_version += 1
+        bump = loaded is not None and (loaded[0] != self.plan_id
+                                       or not _same_json(loaded[1], self.entitlement_overrides))
+        if bump:
+            # An expression, not a read-modify-write: two concurrent edits
+            # doing `+= 1` in Python collapse into one version, and a runner
+            # caching entitlements by (org, ent_v) would then keep enforcing
+            # the FIRST edit's numbers against a token minted after the
+            # second — the uneven, silent enforcement the version exists to
+            # prevent. The plan path a few lines up has always used F().
+            self.entitlements_version = F('entitlements_version') + 1
+            # And named in update_fields when the caller gave one, because a
+            # save that lists its columns writes only those: the bump was
+            # silently dropped for `save(update_fields=['plan'])`, which is
+            # the shape of the next person's downgrade.
+            fields = kwargs.get('update_fields')
+            if fields is not None and 'entitlements_version' not in fields:
+                kwargs['update_fields'] = [*fields, 'entitlements_version']
         super().save(*args, **kwargs)
+        if bump:
+            # Read the number back so the in-memory row — and any token
+            # minted from it in this same request — carries the real one
+            # rather than a CombinedExpression.
+            self.refresh_from_db(fields=['entitlements_version'])
         self._loaded = (self.plan_id, self.entitlement_overrides)
 
     @property
@@ -234,9 +255,19 @@ class Invitation(models.Model):
     def new_token(cls):
         return secrets.token_urlsafe(32)
 
+    #: The alphabet secrets.token_urlsafe produces, and therefore the only
+    #: shape a real token can have.
+    TOKEN = re.compile(r'[A-Za-z0-9_-]{20,128}')
+
     @classmethod
     def by_token(cls, raw):
-        if not isinstance(raw, str) or not (20 <= len(raw) <= 128):
+        # Matched against the alphabet, not merely measured. hash_token does
+        # `raw.encode('ascii')`, so a non-ASCII string of the right length
+        # used to raise UnicodeEncodeError out of the view: a 500, and in
+        # production an ADMINS traceback, from the one endpoint whose every
+        # refusal is supposed to read the same [credentials-6]. The ascii
+        # encode below is now an assertion rather than a check.
+        if not isinstance(raw, str) or not cls.TOKEN.fullmatch(raw):
             return None
         return cls.objects.select_related('organization', 'organization__plan').filter(token_hash=hash_token(raw)).first()
 

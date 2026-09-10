@@ -79,6 +79,31 @@ class ClientIpTests(TestCase):
         self.assertEqual(client_ip(self.request(HTTP_X_FORWARDED_FOR='1.2.3.4, 198.51.100.7')), '198.51.100.7')
 
     @override_settings(ALLAUTH_TRUSTED_PROXY_COUNT=1)
+    def test_a_header_that_is_not_an_address_is_the_peer(self):
+        """
+        Parsed before it is believed.
+
+        AuthEvent.ip is an inet column and record() writes it without
+        full_clean, so a non-address in the trusted position raised DataError
+        out of the INSERT: the request 500s AND the audit row is lost, which
+        is a way to suppress one's own login_failed rows. Not reachable
+        through the Caddyfile as written, but it is from anything else that
+        can reach gunicorn, and from any second proxy an operator later puts
+        in front. Unreadable means the header said nothing.
+        """
+        for junk in ('not-an-address', 'localhost', '', '1.2.3.4.5', '999.1.1.1', 'x' * 300):
+            self.assertEqual(client_ip(self.request(HTTP_X_FORWARDED_FOR=junk)), '10.0.0.2', junk)
+        # A real address still answers, in either family, brackets and all.
+        self.assertEqual(client_ip(self.request(HTTP_X_FORWARDED_FOR='[2001:db8::1]')), '2001:db8::1')
+
+    @override_settings(ALLAUTH_TRUSTED_PROXY_COUNT=1)
+    def test_a_junk_header_still_writes_the_audit_row(self):
+        # The point of the parse: the row survives, naming the peer.
+        api = Api(HTTP_X_FORWARDED_FOR='not-an-address')
+        api.try_login('x@example.com', 'a-long-test-password')
+        self.assertEqual(AuthEvent.objects.get(kind=AuthEvent.Kind.LOGIN_FAILED).ip, '127.0.0.1')
+
+    @override_settings(ALLAUTH_TRUSTED_PROXY_COUNT=1)
     def test_behind_the_edge_with_no_header_is_the_peer(self):
         # Only the edge can reach gunicorn, so a request with no header came
         # from it — or from the network the edge is on, which is the same trust.

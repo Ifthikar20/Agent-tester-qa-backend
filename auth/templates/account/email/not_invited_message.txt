@@ -1,7 +1,9 @@
 {% extends "account/email/base_message.txt" %}
 
 {% block content %}{% autoescape off %}Someone — probably you — tried to sign up for ghostclick with this address.
-
+{% if mode == 'domain' %}
+Sign-up here is limited to a list of approved domains, and {{ email }} is not on it. If you have a work address at one of them, sign up with that one; otherwise ask the person who runs your organisation to invite you.
+{% else %}
 Sign-up here is by invitation, and this address does not hold one. If you were expecting one, ask the person who runs your organisation to invite {{ email }}; if you already have an account under another address, sign in with that one instead.
-
+{% endif %}
 If this was not you, there is nothing to do: no account was made.{% endautoescape %}{% endblock content %}

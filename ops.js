@@ -709,5 +709,19 @@ export function validate(plan, { origins = originsOf(LOCAL), baseOrigin = DEFAUL
     }
   });
 
+  /**
+   * Whether this plan says for itself where it runs, and where.
+   *
+   * The allowlist is only consulted for a `goto`, so a plan that opens with a
+   * `click` never meets it at all — there is no URL here to check. That is not
+   * a plan that runs nowhere; it runs on whatever page is already open, which
+   * under tenancy can be another organisation's. Only the caller knows whose
+   * page that is, so the fact is REPORTED rather than assumed away, and
+   * server.js refuses an unanchored plan whose open page the caller may not
+   * drive (docs/AUTH.md §11).
+   */
+  plan.navigates = plan.steps[0]?.op === 'goto';
+  plan.origin = plan.navigates ? origin : null;
+
   return plan;
 }

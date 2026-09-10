@@ -15,7 +15,7 @@ import * as tickets from './tickets.js';
 import * as tenancy from './tenancy.js';
 import { LOCAL } from './org.js';
 import { blocked } from './reach.js';
-import { originOf, pageCheckFlow } from './suites.js';
+import { NoSuchSuite, originOf, pageCheckFlow } from './suites.js';
 import { discover, links } from './targets.js';
 import { parse } from './parse.js';
 import { parseFlow, flatten, toFlow } from './flow.js';
@@ -42,15 +42,23 @@ const VIEW = { width: 1180, height: 760 };
  * GC_AUTH_SECRET still in the environment is refused, not ignored, because it
  * means a deployment that was half moved and still has the old key lying
  * around next to the browser [token-1] [token-2].
+ *
+ * GC_SIGNING_KEY is refused for the same reason and needs saying twice as
+ * loudly, because it is the LIVE private key rather than a retired one: an
+ * operator who sourced .env.prod into their shell before starting the runner
+ * by hand, or a developer who exported it, hands signing material to the
+ * process that drives the browser, and nothing else in the runner would
+ * notice.
  */
-if ('GC_AUTH_SECRET' in process.env) {
+const SIGNING_IN_ENV = ['GC_AUTH_SECRET', 'GC_SIGNING_KEY'].filter((name) => name in process.env);
+if (SIGNING_IN_ENV.length) {
   console.error(
-    '\n  GC_AUTH_SECRET is set, and this process must not hold a signing key.\n' +
+    `\n  ${SIGNING_IN_ENV.join(' and ')} is set, and this process must not hold a signing key.\n` +
     '\n  Tokens are signed with an Ed25519 private key that lives ONLY in the control\n' +
     "  plane (GC_SIGNING_KEY). The runner is given the public half:\n" +
     '\n    cd auth && python manage.py signing_key --new\n' +
-    '\n  and GC_AUTH_PUBLIC_KEYS is the line it prints for the runner. Remove\n' +
-    '  GC_AUTH_SECRET from every environment; nothing reads it any more.\n'
+    '\n  and GC_AUTH_PUBLIC_KEYS is the line it prints for the runner. Keep the\n' +
+    `  private half out of this process's environment; unset ${SIGNING_IN_ENV.join(' and ')}.\n`
   );
   process.exit(1);
 }
@@ -126,6 +134,18 @@ const homeUrl = () => chooseHome({
 let page = null;
 let recorder = null;
 let running = false;
+/**
+ * The rest of the driven session, and why these are `let` rather than `const`.
+ *
+ * There is one Chromium, and the lock on it changes hands between
+ * organisations. A handover REPLACES the browser context (see `resetSession`),
+ * so the CDP session, the cursor drawn over the video and the navigation log
+ * all belong to the page of the moment rather than to the process. Every
+ * caller reads them at request time, which is why rebinding them is enough.
+ */
+let cdp = null;
+let cursor = null;
+let nav = null;
 // Set once the browser is actually up. The port opens ~100 lines before
 // chromium.launch, so "the server answers" and "the app works" are two
 // different facts. /healthz reports this one, and a deploy waits on it.
@@ -137,6 +157,19 @@ let browserReady = false;
  */
 let lastFrame = null;
 const clients = new Set();
+
+/**
+ * The address on the driven page, or null when there is nothing open.
+ *
+ * `about:blank` is where a browser context starts and where a handover leaves
+ * it, and it is truthy — so reporting it verbatim tells a viewer that a page
+ * is open and puts the string in the console's URL bar. Nothing open is a
+ * real state and deserves to be said as one.
+ */
+const currentUrl = () => {
+  const here = page?.url() ?? '';
+  return here && here !== 'about:blank' ? here : null;
+};
 
 /**
  * Who is driving the one browser (tenancy.js). With auth off it is `local`
@@ -307,6 +340,10 @@ const fail = (res, err, code = 400) => {
   }
   if (err instanceof tenancy.RunnerBusy) return res.status(409).json({ ok: false, error: 'runner_busy', org: err.org });
   if (err instanceof tenancy.Forbidden) return res.status(403).json({ ok: false, error: 'forbidden', needs: 'admin' });
+  // A suite this organisation does not have is a 404 from every route that can
+  // reach one — the nested ones used to answer 400, which contradicts §10 for
+  // no gain, since the body is the same either way.
+  if (err instanceof NoSuchSuite) return res.status(404).json({ ok: false, error: err.message });
   return res.status(code).json({ ok: false, error: err.message ?? String(err) });
 };
 const sendOk = (res, body) => res.json({ ok: true, ...body });
@@ -447,6 +484,33 @@ app.get('/api/hero', (_req, res) => {
 /** Parse+validate a flow the way the executor will, against THIS organisation's allowlist. Suites store nothing unrunnable. */
 const checkFlowFor = (space) => (flow) => validate(flatten(parseFlow(flow)), { origins: space.origins });
 
+/**
+ * A plan that does not open a page of its own is refused unless the page
+ * already open is this organisation's to drive.
+ *
+ * validate() checks a URL against the allowlist, and a plan whose first step is
+ * a `click` gives it none — so for that plan the origin gate would simply not
+ * happen (docs/AUTH.md §11, "the gate is not skipped"). Two things have to hold
+ * instead: the browser must already be this organisation's, because inheriting
+ * somebody else's open page is the crossing §10 forbids, and that page must
+ * stand at an origin this organisation has allowed. With auth off there is one
+ * organisation, it always holds the browser, and anything open was opened
+ * through this same gate — so a laptop is unaffected.
+ *
+ * @returns null when the plan may run, otherwise what to tell the caller.
+ */
+const NOTHING_OPEN = 'Nothing is open yet — start the script with a `goto`';
+function unanchored(plan, space) {
+  if (plan.navigates) return null;
+  if (!driver.sees(space.org)) return { error: NOTHING_OPEN };
+  const url = currentUrl();
+  if (!url) return { error: NOTHING_OPEN };
+  let origin;
+  try { origin = new URL(url).origin; } catch { return { error: NOTHING_OPEN }; }
+  if (space.origins.has(origin)) return null;
+  return { origin, url, error: `${origin} is not allowed yet` };
+}
+
 /** The gate, as an answer the UI can act on rather than an error it must read. */
 function gate(res, origin, space) {
   if (space.origins.has(origin)) return false;
@@ -459,10 +523,22 @@ function gate(res, origin, space) {
  * Take the browser for an organisation, telling the room when it changes
  * hands — whoever had it, and whoever was waiting. A failure is a
  * RunnerBusy, which `fail` turns into the 409 the UI reads.
+ *
+ * The lock alone would only decide who may ASK for the browser. There is one
+ * Chromium and one BrowserContext, so a lock that changes hands without
+ * resetting the session hands the incoming organisation the outgoing one's
+ * live page — its last frame, its URL, its target list, its cookies and its
+ * storage — and, worse, the ability to drive that page on an origin the
+ * newcomer never allowed. That is precisely the "view of someone else's
+ * browser" §10 exists to prevent, so the session goes with the lock: awaited,
+ * before the caller is allowed to touch `page`.
  */
-function take(org) {
+async function take(org) {
   const changed = driver.claim(org);
-  if (changed) announceDriving();
+  if (changed) {
+    await resetSession();
+    announceDriving();
+  }
   armRelease();
 }
 
@@ -521,7 +597,7 @@ app.get('/api/state', (req, res) => {
   // runner is busy and nothing about the address on it.
   const mine = driver.sees(req.space.org);
   res.json({
-    url: mine ? page?.url() ?? null : null,
+    url: mine ? currentUrl() : null,
     running: mine && running,
     recording: mine && (recorder?.recording ?? false),
     origins: req.space.origins.list(),
@@ -547,8 +623,8 @@ app.post('/api/origins', (req, res) => {
     // then only with a recent authentication, and then only within the plan.
     tenancy.requireManager(req.user);
     if (!steppedUp(req.user)) return res.status(403).json({ ok: false, error: 'step_up_required' });
-    req.ent.check('origins.max', req.space.origins.list().length);
-    const r = req.space.origins.add(req.body?.origin);
+    const r = req.space.origins.add(req.body?.origin,
+      () => req.ent.check('origins.max', req.space.origins.list().length));
     emitTo(req.space.org, { t: 'origins', origins: req.space.origins.list() });
     sendOk(res, { ...r, origins: req.space.origins.list() });
   } catch (err) { fail(res, err); }
@@ -599,11 +675,11 @@ app.get('/api/suites/:id', (req, res) => {
 });
 app.patch('/api/suites/:id', (req, res) => {
   try { sendOk(res, { suite: req.space.suites.update(req.params.id, req.body ?? {}) }); }
-  catch (err) { fail(res, err, /^No suite/.test(err.message) ? 404 : 400); }
+  catch (err) { fail(res, err); }
 });
 app.delete('/api/suites/:id', (req, res) => {
   try { sendOk(res, req.space.suites.remove(req.params.id)); }
-  catch (err) { fail(res, err, /^No suite/.test(err.message) ? 404 : 400); }
+  catch (err) { fail(res, err); }
 });
 
 app.post('/api/suites/:id/pages', (req, res) => {
@@ -639,7 +715,7 @@ app.post('/api/suites/:id/pages/:pageId/scan', async (req, res) => {
   // The lock before the run lock: an organisation that cannot have the
   // browser is told it is busy, not that "a run is in progress" — which is
   // someone else's run, and none of its business.
-  try { take(space.org); } catch (err) { return fail(res, err); }
+  try { await take(space.org); } catch (err) { return fail(res, err); }
   if (running) return fail(res, new Error('A run is in progress'), 409);
 
   running = true;
@@ -695,7 +771,7 @@ app.post('/api/suites/:id/run', async (req, res) => {
   // plan before the lock: a run the plan refuses never takes the browser.
   try {
     req.ent.check('runs.per_day', space.history.today(), wanted.length);
-    take(space.org);
+    await take(space.org);
   } catch (err) { return fail(res, err); }
   if (running) return fail(res, new Error('A run is in progress'), 409);
 
@@ -754,7 +830,7 @@ app.post('/api/suites/quickstart', async (req, res) => {
     req.ent.check('runs.per_day', space.history.today());
   } catch (err) { return fail(res, err); }
   if (gate(res, u.origin, space)) return;
-  try { take(space.org); } catch (err) { return fail(res, err); }
+  try { await take(space.org); } catch (err) { return fail(res, err); }
   if (running) return fail(res, new Error('A run is in progress'), 409);
 
   let suite, pg, items;
@@ -969,7 +1045,8 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  tenancy     ->  ${AUTH_ON
               ? 'state is kept per organisation under .ghostclick/<org>/ and suites/<org>/; one organisation drives at a time'
               : `one workspace, "${LOCAL}" — .ghostclick/${LOCAL}/ and suites/${LOCAL}/`}` +
-            `${migrated.length ? `\n  migrated    ->  ${migrated.join('; ')}` : ''}` +
+            `${migrated.moved.length ? `\n  migrated    ->  ${migrated.moved.join('; ')}` : ''}` +
+            `${migrated.failed.length ? `\n  NOT moved   ->  ${migrated.failed.join('; ')} — serving them where they are` : ''}` +
             `${TURNSTILE ? '\n  turnstile   ->  the CSP admits challenges.cloudflare.com (GC_TURNSTILE_SITE_KEY is set)' : ''}` +
             `${AUTH_ON ? `\n  extension   ->  ${EXTENSION_ORIGINS.length
               ? `${EXTENSION_ORIGINS.join(', ')} may post a recording with a token (GC_EXTENSION_ORIGINS)`
@@ -1011,8 +1088,6 @@ const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || undefined,
   args: ['--disable-dev-shm-usage', '--force-color-profile=srgb'],
 });
-page = await browser.newPage({ viewport: VIEW });
-const cdp = await page.context().newCDPSession(page);
 
 /**
  * Broadcast is per organisation (docs/AUTH.md §9.6 [websocket-3]).
@@ -1055,58 +1130,7 @@ function armRelease() {
   releaseTimer.unref?.();
 }
 
-/**
- * Every request the driven page makes, inspected (reach.js). The allowlist
- * decides where the browser may NAVIGATE; this decides what a page there may
- * then fetch, which is the half an allowlist cannot see. Installed before
- * browserReady, so nothing is driven through a gap.
- */
-if (BLOCK_PRIVATE) {
-  await page.context().route('**/*', async (route) => {
-    const url = route.request().url();
-    const why = await blocked(url);
-    if (!why) return route.continue();
-    emit({ t: 'log', level: 'error', msg: `blocked ${url} — ${why}` });
-    return route.abort('blockedbyclient');
-  });
-}
-browserReady = true;
 
-cdp.on('Page.screencastFrame', async ({ data, sessionId }) => {
-  // ACK FIRST. Chrome sends no further frames until this lands — it is the
-  // backpressure valve, and forgetting it looks exactly like "streaming broke".
-  try { await cdp.send('Page.screencastFrameAck', { sessionId }); } catch {}
-
-  lastFrame = Buffer.from(data, 'base64');
-  for (const c of clients) {
-    // Only the driving organisation's viewers: a frame is a picture of
-    // somebody's page. Drop frames for a viewer that is already behind
-    // rather than queueing them in Node. Video is the one thing that is
-    // always safe to drop.
-    if (c.readyState === 1 && driver.sees(c.org) && c.bufferedAmount < 1 << 20) c.send(lastFrame, { binary: true });
-  }
-});
-
-await cdp.send('Page.startScreencast', {
-  format: 'jpeg',
-  quality: 62,
-  // Must match the viewport. Set these smaller and Chrome scales the frame,
-  // the canvas stretches it back, and every coordinate silently picks up a
-  // proportional offset that looks exactly like a broken cursor.
-  maxWidth: VIEW.width,
-  maxHeight: VIEW.height,
-  everyNthFrame: 1,
-});
-
-const cursor = new VirtualCursor(cdp, emit);
-
-/**
- * Every top-level navigation, with the hops it went through.
- *
- * A link that lands on the right URL can still have 301'd through a path that
- * no longer exists, detoured via a tracker, or arrived at a friendly 404. The
- * final URL says none of that, so the chain is kept and shown.
- */
 /**
  * The driven page's own console, forwarded.
  *
@@ -1141,23 +1165,6 @@ const fromPage = (level, text) => emit({
   at: Date.now(),
 });
 
-page.on('console', (msg) => fromPage(msg.type(), msg.text()));
-// An uncaught exception never reaches console.*, and it is the one you most
-// want: it is usually why the next step could not find anything.
-page.on('pageerror', (err) => fromPage('error', err?.stack || String(err)));
-
-const nav = new NavigationLog(page, {
-  onNavigation: (n) => {
-    emit({ t: 'nav', ...n });
-    if (n.redirects) {
-      emit({ t: 'log', level: n.status >= 400 ? 'error' : 'info',
-             msg: `${n.redirects} redirect${n.redirects === 1 ? '' : 's'} → ${n.status} ${n.url}` });
-    } else if (n.status >= 400) {
-      emit({ t: 'log', level: 'error', msg: `${n.status} at ${n.url}` });
-    }
-  },
-});
-nav.attach();
 
 /**
  * Where a recording should say it begins: the URL you ASKED for, not the one a
@@ -1187,59 +1194,185 @@ function entryUrl(page) {
   return n.redirects > 0 && n.url === here && asked ? asked : here;
 }
 
-// Teach mode. Canvas clicks reach the page as real DOM events, so the same
-// listener sees a human demonstrating and would see the executor replaying —
-// which is why recording is gated off during a run.
-recorder = new Recorder(page, {
-  nav,
-  onStep: (step, steps) => emit({
-    t: 'recorded',
-    step,
-    count: steps.length,
-    flow: toFlow({ suite: 'Recorded flow', steps }),
-  }),
-  onError: (msg) => emit({ t: 'log', level: 'error', msg }),
-});
-await recorder.attach();
 
-// An SPA route change is an assertion worth keeping, and it means the target
-// panel is stale.
-// Only for refreshing the target panel. URL changes reach the recorder
-// through the page's own ordered event channel, not from here — watching
-// navigation separately filed clicks after the transitions they caused.
-page.on('framenavigated', (f) => {
-  if (f !== page.mainFrame()) return;
-  /**
-   * The address first, and on its own.
-   *
-   * There is no browser chrome here — the canvas is a video — so the URL bar in
-   * the console is the ONLY way to know what you are looking at. It used to
-   * arrive as a field on the `targets` event, which is emitted after
-   * discovery has taken an aria snapshot of the whole page. That is hundreds of
-   * milliseconds on a real site, during which the console showed the previous
-   * address: you watch a redirect happen on the canvas and the bar still says
-   * where you came from.
-   *
-   * Reading page.url() costs nothing, so it goes out immediately and discovery
-   * follows when it is ready. This also covers the navigations that produce no
-   * document at all — a pushState or a hash change in an SPA — which have no
-   * response, so the NavigationLog never sees them.
-   */
-  emit({ t: 'url', url: page.url() });
-  publishTargets();
-});
 
-const home = homeUrl();
-if (home) await page.goto(home).catch((err) => console.error(`  could not open ${home}: ${err.message}`));
 
 /** What can the current page be told to do? Emitted whenever it changes. */
 async function publishTargets() {
   try {
-    emit({ t: 'targets', url: page.url(), items: await discover(page) });
+    emit({ t: 'targets', url: currentUrl(), items: await discover(page) });
   } catch (err) {
     emit({ t: 'log', level: 'error', msg: `discovery failed: ${err.message}` });
   }
 }
+
+/**
+ * Build a driven session: a fresh browser context, its page, and everything
+ * that listens to it.
+ *
+ * One function because it has two callers that must agree exactly. At boot it
+ * is the browser the laptop drives; on a handover between organisations it is
+ * what `resetSession` puts in place of the outgoing one's, and anything this
+ * forgets to re-attach is a feature that silently stops working for whoever
+ * drives second.
+ */
+async function newSession() {
+  page = await browser.newPage({
+    viewport: VIEW,
+    // The route handler below is the only thing between an allowed page and
+    // this container's network, and Playwright does not run it for a service
+    // worker's requests. So when the reach rule is on, a page may not have
+    // one: a secure context is all a worker needs, and one fetch from inside
+    // it would otherwise bypass reach.js entirely [browser-side-1].
+    serviceWorkers: BLOCK_PRIVATE ? 'block' : 'allow',
+  });
+  cdp = await page.context().newCDPSession(page);
+
+  /**
+   * Every request the driven page makes, inspected (reach.js). The allowlist
+   * decides where the browser may NAVIGATE; this decides what a page there may
+   * then fetch, which is the half an allowlist cannot see. Installed before
+   * browserReady, so nothing is driven through a gap.
+   */
+  if (BLOCK_PRIVATE) {
+    await page.context().route('**/*', async (route) => {
+      const url = route.request().url();
+      const why = await blocked(url);
+      if (!why) return route.continue();
+      emit({ t: 'log', level: 'error', msg: `blocked ${url} — ${why}` });
+      return route.abort('blockedbyclient');
+    });
+  }
+
+  cdp.on('Page.screencastFrame', async ({ data, sessionId }) => {
+    // ACK FIRST. Chrome sends no further frames until this lands — it is the
+    // backpressure valve, and forgetting it looks exactly like "streaming broke".
+    try { await cdp.send('Page.screencastFrameAck', { sessionId }); } catch {}
+
+    // Nothing open, nothing to show. A fresh context — at boot, and after a
+    // handover resets one — sits on about:blank, and Chrome emits a frame of
+    // it as soon as the screencast starts: five kilobytes of white that says
+    // a page is being driven when none is. Held as `lastFrame` it would also
+    // be what the next viewer is primed with.
+    if (!currentUrl()) return;
+
+    lastFrame = Buffer.from(data, 'base64');
+    for (const c of clients) {
+      // Only the driving organisation's viewers: a frame is a picture of
+      // somebody's page. Drop frames for a viewer that is already behind
+      // rather than queueing them in Node. Video is the one thing that is
+      // always safe to drop.
+      if (c.readyState === 1 && driver.sees(c.org) && c.bufferedAmount < 1 << 20) c.send(lastFrame, { binary: true });
+    }
+  });
+
+  await cdp.send('Page.startScreencast', {
+    format: 'jpeg',
+    quality: 62,
+    // Must match the viewport. Set these smaller and Chrome scales the frame,
+    // the canvas stretches it back, and every coordinate silently picks up a
+    // proportional offset that looks exactly like a broken cursor.
+    maxWidth: VIEW.width,
+    maxHeight: VIEW.height,
+    everyNthFrame: 1,
+  });
+
+  cursor = new VirtualCursor(cdp, emit);
+
+  /**
+   * Every top-level navigation, with the hops it went through.
+   *
+   * A link that lands on the right URL can still have 301'd through a path that
+   * no longer exists, detoured via a tracker, or arrived at a friendly 404. The
+   * final URL says none of that, so the chain is kept and shown.
+   */
+  page.on('console', (msg) => fromPage(msg.type(), msg.text()));
+  // An uncaught exception never reaches console.*, and it is the one you most
+  // want: it is usually why the next step could not find anything.
+  page.on('pageerror', (err) => fromPage('error', err?.stack || String(err)));
+
+  nav = new NavigationLog(page, {
+    onNavigation: (n) => {
+      emit({ t: 'nav', ...n });
+      if (n.redirects) {
+        emit({ t: 'log', level: n.status >= 400 ? 'error' : 'info',
+               msg: `${n.redirects} redirect${n.redirects === 1 ? '' : 's'} → ${n.status} ${n.url}` });
+      } else if (n.status >= 400) {
+        emit({ t: 'log', level: 'error', msg: `${n.status} at ${n.url}` });
+      }
+    },
+  });
+  nav.attach();
+
+  // Teach mode. Canvas clicks reach the page as real DOM events, so the same
+  // listener sees a human demonstrating and would see the executor replaying —
+  // which is why recording is gated off during a run.
+  recorder = new Recorder(page, {
+    nav,
+    onStep: (step, steps) => emit({
+      t: 'recorded',
+      step,
+      count: steps.length,
+      flow: toFlow({ suite: 'Recorded flow', steps }),
+    }),
+    onError: (msg) => emit({ t: 'log', level: 'error', msg }),
+  });
+  await recorder.attach();
+
+  // An SPA route change is an assertion worth keeping, and it means the target
+  // panel is stale.
+  // Only for refreshing the target panel. URL changes reach the recorder
+  // through the page's own ordered event channel, not from here — watching
+  // navigation separately filed clicks after the transitions they caused.
+  page.on('framenavigated', (f) => {
+    if (f !== page.mainFrame()) return;
+    /**
+     * The address first, and on its own.
+     *
+     * There is no browser chrome here — the canvas is a video — so the URL bar in
+     * the console is the ONLY way to know what you are looking at. It used to
+     * arrive as a field on the `targets` event, which is emitted after
+     * discovery has taken an aria snapshot of the whole page. That is hundreds of
+     * milliseconds on a real site, during which the console showed the previous
+     * address: you watch a redirect happen on the canvas and the bar still says
+     * where you came from.
+     *
+     * Reading page.url() costs nothing, so it goes out immediately and discovery
+     * follows when it is ready. This also covers the navigations that produce no
+     * document at all — a pushState or a hash change in an SPA — which have no
+     * response, so the NavigationLog never sees them.
+     */
+    emit({ t: 'url', url: currentUrl() });
+    publishTargets();
+  });
+}
+
+/**
+ * Throw the driven session away and build another.
+ *
+ * Called when the lock changes hands. Closing the CONTEXT rather than the page
+ * is the point: the page's cookies, localStorage, service workers and HTTP
+ * cache belong to the context, and an organisation that inherited those would
+ * be signed in as the last one wherever it went next. The held frame goes too,
+ * so a viewer of the new session is not primed with a picture of the old page,
+ * and any recording in flight is dropped rather than continued into somebody
+ * else's browser.
+ */
+async function resetSession() {
+  browserReady = false;
+  lastFrame = null;
+  if (recorder?.recording) { try { recorder.stop(null); } catch {} }
+  const old = page;
+  try { await old?.context().close(); } catch { /* already gone is the outcome we wanted */ }
+  await newSession();
+  browserReady = true;
+}
+
+await newSession();
+browserReady = true;
+
+const home = homeUrl();
+if (home) await page.goto(home).catch((err) => console.error(`  could not open ${home}: ${err.message}`));
 
 // ---------------------------------------------------------------- executor
 // `running` is declared at the top, so /api/state can be answered during boot.
@@ -1275,12 +1408,21 @@ async function run(plan, meta = {}) {
     emitTo(space.org, { t: 'log', level: 'error', msg: 'A run is already in progress — wait for it to finish' });
     return { ok: false, passed: 0, total: 0, error: 'A run is already in progress' };
   }
+  // A plan with no `goto` of its own is only allowed to run on a page this
+  // organisation already holds — checked BEFORE the lock, so a refused plan
+  // does not take the browser away from whoever has it.
+  const stray = unanchored(plan, space);
+  if (stray) {
+    emitTo(space.org, { t: 'log', level: 'error', msg: stray.error });
+    if (stray.origin) emitTo(space.org, { t: 'needs.origin', origin: stray.origin, url: stray.url });
+    return { ok: false, passed: 0, total: 0, error: stray.error };
+  }
   // The browser is the driving organisation's for the length of the run, and
   // a run is the plan's to count. Both refusals are answered to the
   // organisation that asked, in the shape its UI acts on.
   try {
-    take(space.org);
     ent.check('runs.per_day', space.history.today());
+    await take(space.org);
   } catch (err) {
     emitTo(space.org, { t: 'refused', of: 'run', ...refusal(err) });
     emitTo(space.org, { t: 'log', level: 'error', msg: err.message });
@@ -1444,7 +1586,6 @@ wss.on('connection', (ws) => {
     }
 
     if (m.t === 'command') {
-      try { take(org); } catch (err) { return refuse('command', err); }
       let plan;
       try {
         // Two front ends, one IR: the line DSL and the mermaid flow language
@@ -1459,9 +1600,14 @@ wss.on('connection', (ws) => {
         if (err.origin) emitTo(org, { t: 'needs.origin', origin: err.origin, url: err.url });
         return;
       }
+      // The plan before the lock, the same order the HTTP routes use: a script
+      // that cannot even be read never takes the browser from whoever has it.
+      try { await take(org); } catch (err) { return refuse('command', err); }
       // Draw the plan before running it, so a diagram exists even if step 0
-      // fails. The run replaces it with the outcome version.
-      emit({ t: 'diagram', kind: 'plan', mermaid: toMermaid(plan) });
+      // fails. The run replaces it with the outcome version. Addressed to the
+      // asking organisation by name rather than through `emit`, which follows
+      // the lock — and the lock is only just this organisation's.
+      emitTo(org, { t: 'diagram', kind: 'plan', mermaid: toMermaid(plan) });
       // Deliberately not awaited — the socket must stay responsive while a run
       // is in flight. But an un-awaited promise that rejects is an unhandled
       // rejection, and Node kills the process for those: one unexpected throw
@@ -1477,19 +1623,21 @@ wss.on('connection', (ws) => {
     // Point the browser anywhere the allowlist permits, then ask the page
     // what it can be told to do. This is what makes an unseen URL scriptable.
     if (m.t === 'open') {
-      try { take(org); } catch (err) { return refuse('open', err); }
-      if (running) return;
       let url;
       try {
         url = normalizeUrl(m.url).href;   // "acme.com" is a host, not a path
       } catch (err) {
-        return emit({ t: 'log', level: 'error', msg: err.message });
+        return emitTo(org, { t: 'log', level: 'error', msg: err.message });
       }
       if (!space.origins.has(new URL(url).origin)) {
         // Offer the one thing that unblocks it, rather than an error that
         // ends in "restart with an env var".
-        return emit({ t: 'needs.origin', origin: new URL(url).origin, url });
+        return emitTo(org, { t: 'needs.origin', origin: new URL(url).origin, url });
       }
+      // The allowlist before the lock, so an address this organisation may not
+      // open does not cost the current driver its browser.
+      try { await take(org); } catch (err) { return refuse('open', err); }
+      if (running) return;
       try {
         await OPS.goto(page, { url }, { cursor, emit, nav, onNavigate: publishTargets, origins: space.origins });
         emit({ t: 'log', level: 'info', msg: `opened ${url}` });
@@ -1510,8 +1658,8 @@ wss.on('connection', (ws) => {
         return;
       }
       try {
-        ent.check('origins.max', space.origins.list().length);
-        const r = space.origins.add(m.origin);
+        const r = space.origins.add(m.origin,
+          () => ent.check('origins.max', space.origins.list().length));
         emitTo(org, { t: 'origins', origins: space.origins.list() });
         emitTo(org, { t: 'log', level: 'info',
                msg: `${r.added ? 'allowed' : 'already allowed'} ${r.origin}` +
@@ -1619,11 +1767,11 @@ wss.on('connection', (ws) => {
   if (mine && lastFrame) ws.send(lastFrame, { binary: true });
   ws.send(JSON.stringify({
     t: 'ready',
-    url: mine ? page.url() : null,
+    url: mine ? currentUrl() : null,
     // The executor's real state. Without this a socket that reconnected during
     // a run kept a disabled Run button until someone reloaded the page.
     running: mine && running,
-    recording: mine && recorder.recording,
+    recording: mine && (recorder?.recording ?? false),
     origins: space.origins.list(),
     org,
     driving: driver.describe(org),

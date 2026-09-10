@@ -14,7 +14,7 @@ from .. import turnstile
 from ..events import AUTH_EVENTS, PWNED
 from ..models import AuthEvent
 from ..testing import hibp
-from .support import HEADLESS, PASSWORD, Api, make_user
+from .support import HEADLESS, PASSWORD, Api, give_authenticator, make_user, totp_code
 
 TOO_MANY = 'too_many_login_attempts'
 
@@ -194,6 +194,72 @@ class PwnedAtLoginTests(TestCase):
         api.login('qa@example.com')
         self.assertEqual(api.logout().status_code, 401)
         self.assertEqual(api.get('/auth/me').status_code, 401)
+
+    def test_an_enrolled_account_can_prove_the_factor_and_then_change(self):
+        """
+        The forced change must stay REACHABLE for an enrolled account.
+
+        StrongReauthentication refuses the change with a 401 naming
+        `mfa_reauthenticate` once the sign-in proof is older than the
+        window — and PasswordChangeRequired used to answer 403 to the two
+        endpoints that could supply that proof. Both refusals are correct on
+        their own and together they were a dead end: the [credentials-1]
+        change became impossible for exactly the accounts holding a second
+        factor, recoverable only by signing out and going through the
+        mailbox.
+        """
+        hibp.hits = 2
+        secret = give_authenticator(self.user)
+        api = Api()
+        r = api.try_login('qa@example.com')
+        self.assertEqual(r.status_code, 401)
+        self.assertEqual(api.post(f'{HEADLESS}/auth/2fa/authenticate', {'code': totp_code(secret)}).status_code, 200)
+        self.assertEqual(api.session[PWNED], self.user.pk)
+        # Age every proof past ACCOUNT_REAUTHENTICATION_TIMEOUT.
+        s = api.session
+        for m in s.get('account_authentication_methods', []):
+            m['at'] -= 1000
+        for e in s.get(AUTH_EVENTS, []):
+            e['at'] -= 1000
+        s.save()
+        hibp.hits = 0
+        stalled = api.change_password(PASSWORD, 'a-brand-new-long-password')
+        self.assertEqual(stalled.status_code, 401)
+        self.assertEqual([f['id'] for f in stalled.json()['data']['flows']], ['mfa_reauthenticate'])
+        # The proof it asks for is one a marked session may give.
+        cache.clear()
+        proved = api.post(f'{HEADLESS}/auth/2fa/reauthenticate', {'code': totp_code(secret)})
+        self.assertEqual(proved.status_code, 200, proved.content)
+        done = api.change_password(PASSWORD, 'a-brand-new-long-password')
+        self.assertEqual(done.status_code, 401, done.content)   # allauth signs the session out
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('a-brand-new-long-password'))
+
+    def test_the_mark_belongs_to_one_account_not_to_the_browser(self):
+        """
+        A shared browser must not carry one person's breach to the next.
+
+        The flag is written while the sign-in is still anonymous, and
+        django.contrib.auth.login cycles the session key but PRESERVES the
+        data — so a breached sign-in abandoned at the second-factor stage
+        used to leave a boolean behind, and the next account to sign in on
+        that machine was refused everything but a password change it did
+        not need.
+        """
+        hibp.hits = 4
+        give_authenticator(self.user)
+        api = Api()
+        self.assertEqual(api.try_login('qa@example.com').status_code, 401)   # stops at the challenge
+        self.assertEqual(api.session[PWNED], self.user.pk)
+        # Somebody else, same browser, a password that is not in any corpus.
+        hibp.hits = 0
+        other = make_user('bob@example.com')
+        self.assertEqual(api.login('bob@example.com').status_code, 200)
+        self.assertEqual(api.get('/auth/me').status_code, 200)
+        r = api.post('/auth/executor-token')
+        self.assertNotEqual(r.status_code, 403)
+        self.assertNotEqual(r.json().get('error'), 'password_change_required')
+        self.assertEqual(other.pk, api.get('/auth/me').json()['user']['id'])
 
     def test_an_outage_does_not_mark_the_session(self):
         hibp.outage = True

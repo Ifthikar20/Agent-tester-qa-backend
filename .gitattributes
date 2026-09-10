@@ -1,0 +1,21 @@
+# The committed build is bytes, not text.
+#
+# web/dist is in git — that is the whole reason `npm start` needs no bundler —
+# and vite names every chunk by a hash of its CONTENT. With line-ending
+# normalisation on, a rebuild on a checkout where core.autocrlf is true
+# produces a different hash for the same source than a rebuild on one where it
+# is not, so the directory grew a second copy of all 22 chunks and index.html
+# named only one set. Forty-four files where twenty-two are reachable, and
+# nothing to tell you which half is dead.
+#
+# -text turns normalisation off for everything under it: what vite wrote is
+# what git stores and what the next checkout gets, whatever anyone's
+# core.autocrlf says.
+web/dist/** -text
+
+# The shell scripts the deployment runs on a Linux host. A CRLF shebang line
+# is `/usr/bin/env bash\r`, which is not a program, and the error names a file
+# that plainly exists.
+*.sh text eol=lf
+scripts/gc text eol=lf
+docker/Caddyfile text eol=lf

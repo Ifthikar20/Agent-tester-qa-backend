@@ -42,11 +42,40 @@ say "sudoers"
 if id -nG "$USER" | grep -qw docker; then
   echo "    ! $USER is in the docker group; remove it: sudo gpasswd -d $USER docker"
 fi
-printf '%s ALL=(root) NOPASSWD:SETENV: /opt/ghostclick/scripts/gc\n%s ALL=(root) NOPASSWD: /usr/bin/cat /opt/ghostclick/.env.prod\n' "$USER" "$USER" \
+# The sudo TARGET is root-owned and lives outside the checkout. Pointing the
+# rule at /opt/ghostclick/scripts/gc — a file this user owns and git pulls
+# into — made `echo 'cat .env.prod' >> scripts/gc && sudo -n scripts/gc` a
+# one-line read of the signing key, defeating the control [ops-supply-1]
+# exists for. This shim does what the checkout's wrapper does on its last
+# line, and nothing else; the wrapper execs it under sudo.
+sudo tee /usr/local/sbin/gc >/dev/null <<'SHIM'
+#!/bin/sh
+# Written by scripts/bootstrap-ec2.sh. root:root 0755 on purpose: this is
+# what the sudoers rule names, so the deploy user must not be able to edit
+# it. The friendly wrapper is /opt/ghostclick/scripts/gc, which calls this.
+set -eu
+cd /opt/ghostclick
+exec docker compose -f docker/docker-compose.prod.yml --env-file .env.prod "$@"
+SHIM
+sudo chown root:root /usr/local/sbin/gc
+sudo chmod 755 /usr/local/sbin/gc
+printf '%s ALL=(root) NOPASSWD:SETENV: /usr/local/sbin/gc\n%s ALL=(root) NOPASSWD: /usr/bin/cat /opt/ghostclick/.env.prod\n' "$USER" "$USER" \
   | sudo tee /etc/sudoers.d/ghostclick >/dev/null
 sudo chmod 440 /etc/sudoers.d/ghostclick
 sudo visudo -cf /etc/sudoers.d/ghostclick >/dev/null
-echo "    /etc/sudoers.d/ghostclick: $USER may run scripts/gc as root, and read .env.prod through it"
+echo "    /etc/sudoers.d/ghostclick: $USER may run /usr/local/sbin/gc as root, and read .env.prod through it"
+# The stock Ubuntu cloud image ships /etc/sudoers.d/90-cloud-init-users with
+# `ubuntu ALL=(ALL) NOPASSWD:ALL`, which matches everything the two rules
+# above narrow — so until it is gone, nothing here restricts anything. Said
+# out loud rather than removed: taking a host's only sudo access away from
+# under an operator who has not read this is how a box becomes unreachable.
+if sudo -nl 2>/dev/null | grep -qE '\(ALL(:ALL)?\) NOPASSWD: ALL'; then
+  echo "    ! $USER still has a blanket NOPASSWD:ALL grant (usually"
+  echo "      /etc/sudoers.d/90-cloud-init-users). Until it is removed the two"
+  echo "      rules above restrict nothing at all. Remove it once you are sure"
+  echo "      you can reach this host another way:"
+  echo "        sudo rm /etc/sudoers.d/90-cloud-init-users"
+fi
 
 # Chromium is 300-700MB with a page open, and it grows with the page under
 # test. Without swap an OOM kill lands on whatever the kernel picks, which is

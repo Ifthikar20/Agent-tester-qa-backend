@@ -87,9 +87,19 @@ export function forOrg(org) {
     list: () => [...allowed],
     has: (origin) => allowed.has(origin) || allowed.has('*'),
 
-    add(input) {
+    /**
+     * @param onAdd run only when the origin is genuinely new, and before it
+     *   is added — which is where the plan's `origins.max` belongs. Checked
+     *   by the caller beforehand instead, an organisation sitting exactly at
+     *   its limit was told to upgrade for re-allowing something it already
+     *   had: the Allow button is drawn from a list that can be a moment
+     *   stale, so pressing it on an origin already on the list is ordinary,
+     *   and it changes nothing.
+     */
+    add(input, onAdd = () => {}) {
       const u = normalizeUrl(input);
       if (allowed.has(u.origin)) return { origin: u.origin, added: false, private: PRIVATE_HOST.test(u.hostname) };
+      onAdd(u.origin);
       allowed.add(u.origin);
       persist();
       return { origin: u.origin, added: true, private: PRIVATE_HOST.test(u.hostname) };

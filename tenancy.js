@@ -81,18 +81,34 @@ const FLAT_STATE = ['origins.json', 'runs.json', 'secrets.json'];
  *
  * Only ever a rename, and only when the destination does not exist: nothing
  * is deleted, and a file that has already been moved is left alone.
- * Returns what was moved, so the boot banner can say so.
+ *
+ * A move that CANNOT happen is reported, never thrown. This runs at module
+ * scope in server.js, so an unguarded write failure is an uncaught exception
+ * at boot: a read-only checkout — a read-only bind mount, a container with a
+ * read-only rootfs, a repository owned by another user — used to start fine
+ * and would now refuse to start at all, with a stack instead of a sentence.
+ * The stores already treat a failed write that way (origins.js, runs.js).
+ *
+ * @returns {{moved: string[], failed: string[]}} for the boot banner.
  */
 export function migrate(root = ROOT) {
   const moved = [];
+  const failed = [];
+  const move = (from, to, dir, label) => {
+    try {
+      mkdirSync(dir, { recursive: true });
+      renameSync(from, to);
+      moved.push(label);
+    } catch (err) {
+      failed.push(`${label} (${err.code ?? err.message})`);
+    }
+  };
   const state = join(root, '.ghostclick');
   for (const name of FLAT_STATE) {
     const from = join(state, name);
     const to = join(state, LOCAL, name);
     if (existsSync(from) && !existsSync(to)) {
-      mkdirSync(join(state, LOCAL), { recursive: true });
-      renameSync(from, to);
-      moved.push(`.ghostclick/${name} -> .ghostclick/${LOCAL}/${name}`);
+      move(from, to, join(state, LOCAL), `.ghostclick/${name} -> .ghostclick/${LOCAL}/${name}`);
     }
   }
   const dir = join(root, 'suites');
@@ -101,11 +117,9 @@ export function migrate(root = ROOT) {
   for (const f of flat) {
     const to = join(dir, LOCAL, f);
     if (existsSync(to)) continue;
-    mkdirSync(join(dir, LOCAL), { recursive: true });
-    renameSync(join(dir, f), to);
-    moved.push(`suites/${f} -> suites/${LOCAL}/${f}`);
+    move(join(dir, f), to, join(dir, LOCAL), `suites/${f} -> suites/${LOCAL}/${f}`);
   }
-  return moved;
+  return { moved, failed };
 }
 
 // ------------------------------------------------------------- the driver

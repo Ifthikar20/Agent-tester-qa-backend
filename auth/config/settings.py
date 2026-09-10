@@ -70,6 +70,7 @@ Environment (see .env.example):
 from pathlib import Path
 from urllib.parse import urlsplit
 import os
+import re
 
 import dj_database_url
 from django.core.exceptions import ImproperlyConfigured
@@ -104,10 +105,28 @@ if not SECRET_KEY:
 # and a deployment where they did not agree failed with a 403 that read like a
 # bug. Now they cannot disagree, because there is only one of them to set.
 PUBLIC_URL = os.environ.get('GC_PUBLIC_URL', '').strip().rstrip('/')
-PUBLIC_HOST = urlsplit(PUBLIC_URL).hostname if PUBLIC_URL else None
+_PUBLIC_PARTS = urlsplit(PUBLIC_URL) if PUBLIC_URL else None
+PUBLIC_HOST = _PUBLIC_PARTS.hostname if _PUBLIC_PARTS else None
 IS_HTTPS = PUBLIC_URL.startswith('https://')
-if PUBLIC_URL and (not PUBLIC_HOST or not PUBLIC_URL.startswith(('http://', 'https://'))):
-    raise ImproperlyConfigured(f'GC_PUBLIC_URL must look like https://host, not {PUBLIC_URL!r}')
+# Scheme and host, and NOTHING after them. A path was accepted before, and
+# accepting it produced a deployment broken in the quiet way this one-URL
+# profile exists to abolish: CSRF_TRUSTED_ORIGINS would hold an entry no
+# Origin header can ever equal, GC_APP_URL and every mail link would carry
+# the path twice, GC_WEBAUTHN_ORIGIN would be an origin fido2 refuses, and
+# the edge would serve the site at a prefix its own route matchers
+# (/auth/*, /_allauth/*, /admin/*) never match. The rstrip above still makes
+# a trailing slash legal, which is the one variation people actually type.
+if PUBLIC_URL and (
+    _PUBLIC_PARTS.scheme not in ('http', 'https')
+    or not PUBLIC_HOST
+    or _PUBLIC_PARTS.path
+    or _PUBLIC_PARTS.query
+    or _PUBLIC_PARTS.fragment
+):
+    raise ImproperlyConfigured(
+        f'GC_PUBLIC_URL must be a scheme and a host and nothing more — https://app.example.com, '
+        f'not {PUBLIC_URL!r}. Everything else is built from it.'
+    )
 
 if PUBLIC_URL:
     ALLOWED_HOSTS = [PUBLIC_HOST]
@@ -341,10 +360,17 @@ WEB_ORIGIN = os.environ.get('GC_WEB_ORIGIN', '').rstrip('/') or PUBLIC_URL
 # so the list is the operator's to write; and only that shape is accepted:
 # an http(s) origin typed here would trust a web page for CSRF, which is the
 # one thing this list must never do.
+#
+# The expression is mode.js:69's, character for character, because the two
+# processes are handed the SAME line by compose and a value one accepts and
+# the other refuses is a stack that comes up half. urlsplit was too generous
+# on its own: it admits `chrome-extension://*`, which Django routes to
+# allowed_origins_subdomains and would make CSRF trust a wildcard, and
+# `chrome-extension://user:pw@x`, which is not an id at all.
 GC_EXTENSION_ORIGINS = [o.rstrip('/') for o in env_list('GC_EXTENSION_ORIGINS')]
+_EXTENSION_ORIGIN = re.compile(r'(chrome|moz)-extension://[A-Za-z0-9-]+')
 for _origin in GC_EXTENSION_ORIGINS:
-    _parts = urlsplit(_origin)
-    if _parts.scheme not in ('chrome-extension', 'moz-extension') or not _parts.netloc or _parts.path or _parts.query:
+    if not _EXTENSION_ORIGIN.fullmatch(_origin):
         raise ImproperlyConfigured(
             f'GC_EXTENSION_ORIGINS holds {_origin!r}: an extension origin is chrome-extension://<id> '
             '(or moz-extension://<uuid>), nothing else, and never a web origin.'
@@ -359,8 +385,17 @@ CORS_EXPOSE_HEADERS = ['X-CSRFToken']
 CSRF_TRUSTED_ORIGINS = ([PUBLIC_URL] if PUBLIC_URL else ([WEB_ORIGIN] if WEB_ORIGIN else [])) + GC_EXTENSION_ORIGINS
 # Where the SPA is: every link in an email, and every redirect allauth or
 # the admin would make, lands on one of its routes. Empty on a laptop with no
-# GC_WEB_ORIGIN at all, which is a laptop with no UI to sign in from.
-GC_APP_URL = f'{WEB_ORIGIN}/app' if WEB_ORIGIN else '/app'
+# origin at all, which is a laptop with no UI to sign in from.
+#
+# PUBLIC_URL FIRST, the same precedence GC_WEBAUTHN_ORIGIN uses and the
+# opposite of WEB_ORIGIN's own default. GC_WEB_ORIGIN is documented as laptop
+# only, but it wins in that default — so a stray one left in .env.prod used
+# to silently become the host that [oauth-4] pins Google's callback_url to,
+# the host every allauth mail links to, and (through CORS_ALLOWED_ORIGINS
+# with credentials) a host that may read /auth/me with the session cookie.
+# Where a public URL is configured, that is the deployment's address.
+GC_APP_ORIGIN = PUBLIC_URL or WEB_ORIGIN
+GC_APP_URL = f'{GC_APP_ORIGIN}/app' if GC_APP_ORIGIN else '/app'
 
 # ---------------------------------------------------------------- transport
 #
@@ -446,6 +481,17 @@ ACCOUNT_RATE_LIMITS = {
 }
 GC_MINT_RATE = '12/10m'       # per session key, on POST /auth/executor-token
 GC_ACCEPT_RATE = '10/m/ip'    # invitation acceptance
+# Issuing one. members.max bounds how many invitations may be LIVE at once,
+# which is not a bound on how many are sent: revoke-and-reissue in a loop
+# mails arbitrary third parties through this service's mailer without limit,
+# and on a plan whose members.max is null even the per-moment cap is gone.
+# Keyed on the manager who asked, because that is who is spending it.
+GC_INVITE_RATE = '20/h/user'
+# Passkey sign-in, keyed on the caller's address. The endpoint is reachable
+# unauthenticated and allauth identifies the account from a client-supplied
+# handle, so the ACCOUNT's second-factor budget must not be what a stranger
+# spends there (accounts.headless.LoginWebAuthnInput).
+GC_PASSKEY_LOGIN_RATE = '10/m/ip'
 
 # ---------------------------------------------------------------- the second factor
 #
@@ -492,17 +538,30 @@ USERSESSIONS_TRACK_ACTIVITY = True
 # Required in production; on a laptop, derived from the (fixed, public) dev
 # secret so `manage.py runserver` with nothing set still works and tests
 # run. Any value that is set is checked to be a Fernet key at import.
+#
+# GC_NO_MINT says "this process serves no requests and holds no keys". It is
+# how the housekeeping scheduler — the control-plane image running
+# `manage.py housekeeping`, in its own container — comes up with GC_SIGNING_KEY
+# and GC_MFA_KEY blank: neither is anything it can need, and §12 says the
+# Ed25519 private key is in the control plane's environment ONLY, which
+# inheriting the whole anchor quietly made untrue. An explicit opt-out rather
+# than a relaxed rule, because a control plane that came up healthy and could
+# not mint would be the worse trade.
+GC_NO_MINT = env_bool('GC_NO_MINT')
+
 GC_MFA_KEY = os.environ.get('GC_MFA_KEY', '').strip()
 if not GC_MFA_KEY:
-    if not DEBUG:
+    if not DEBUG and not GC_NO_MINT:
         raise ImproperlyConfigured(
             'GC_MFA_KEY is required when DJANGO_DEBUG is off: TOTP secrets and recovery codes are '
-            'encrypted with it. `manage.py mfa_key` prints one.'
+            'encrypted with it. `manage.py mfa_key` prints one. '
+            '(A process that reads no second factor — the housekeeping scheduler — sets GC_NO_MINT=1.)'
         )
-    import base64
-    import hashlib
-    GC_MFA_KEY = base64.urlsafe_b64encode(hashlib.sha256(f'mfa:{SECRET_KEY}'.encode()).digest()).decode('ascii')
-for _key in GC_MFA_KEY.split(','):
+    if not GC_NO_MINT:
+        import base64
+        import hashlib
+        GC_MFA_KEY = base64.urlsafe_b64encode(hashlib.sha256(f'mfa:{SECRET_KEY}'.encode()).digest()).decode('ascii')
+for _key in filter(None, GC_MFA_KEY.split(',')):
     try:
         from cryptography.fernet import Fernet as _Fernet
         _Fernet(_key.strip())
@@ -573,7 +632,14 @@ HEADLESS_FRONTEND_URLS = {
     'account_signup': f'{GC_APP_URL}/signup',
     'account_confirm_email': f'{GC_APP_URL}/verify',
     'account_reset_password': f'{GC_APP_URL}/forgot-password',
-    'account_reset_password_from_key': f'{GC_APP_URL}/reset-password/{{key}}',
+    # A QUERY parameter, not a path segment, and that is a logging
+    # decision. The key is a one-hour, single-use account-takeover
+    # credential; the edge's access log keeps `request>uri` verbatim on a
+    # shared volume, and Caddy's log filter can delete a query parameter
+    # but cannot reach inside a path without a second log block that
+    # would write every request twice — the second time unfiltered
+    # ([ops-supply-4], docker/Caddyfile).
+    'account_reset_password_from_key': f'{GC_APP_URL}/reset-password?key={{key}}',
     'socialaccount_login_error': f'{GC_APP_URL}/login',
 }
 # Django's own admin login form is gone: /admin/ sends an anonymous visitor
@@ -676,15 +742,36 @@ if GC_SIGNING_KEY and 'PRIVATE KEY' not in GC_SIGNING_KEY:
         'GC_SIGNING_KEY does not look like a PEM private key. It is the output of '
         '`manage.py signing_key --new`, on one line, with \\n between the PEM lines.'
     )
-if not DEBUG and not GC_SIGNING_KEY:
+# Deliberately absent, for a process that does not serve requests. The
+# scheduler container runs `manage.py housekeeping` off the control image and
+# neither mints a token nor decrypts an authenticator, so inheriting the
+# control plane's environment whole put the Ed25519 private key in a second
+# container for nothing — and §12 says it is in the control plane's alone.
+# An opt-out rather than a relaxed rule: a control plane that came up healthy
+# and could not mint would be a worse trade than one extra line in compose.
+# GC_NO_MINT is read beside GC_MFA_KEY, which needs the same exemption.
+if not DEBUG and not GC_SIGNING_KEY and not GC_NO_MINT:
     raise ImproperlyConfigured(
         'GC_SIGNING_KEY is required when DJANGO_DEBUG is off: without it no executor token '
-        'can be minted. `manage.py signing_key --new` prints one, and the public half for the runner.'
+        'can be minted. `manage.py signing_key --new` prints one, and the public half for the runner. '
+        '(A process that never mints — the housekeeping scheduler — sets GC_NO_MINT=1 instead.)'
     )
-# Clamped to 60–600 rather than trusted: ten minutes is the ceiling on what a
+# Clamped to 120–600 rather than trusted: ten minutes is the ceiling on what a
 # leaked token is worth, and the runner refuses anything longer anyway, so a
 # larger value here would only produce tokens nothing accepts [token-4].
-GC_TOKEN_TTL = max(60, min(600, int(os.environ.get('GC_TOKEN_TTL', '600') or 600)))
+#
+# The FLOOR is 120 and not 60 because of the other end of the wire: the SPA
+# renews with a minute still on the clock, so at a TTL of 60 the cache is
+# never warm, every API call mints, and twelve calls later GC_MINT_RATE
+# answers 429 — a signed-in person told they are signed out, for a value the
+# settings module accepted. Two minutes leaves a margin the renewal fits in.
+# Unreadable is a refusal with a sentence, like every other value here, not a
+# ValueError traceback out of the import.
+_ttl = os.environ.get('GC_TOKEN_TTL', '').strip() or '600'
+try:
+    GC_TOKEN_TTL = max(120, min(600, int(_ttl)))
+except ValueError:
+    raise ImproperlyConfigured(f'GC_TOKEN_TTL must be a whole number of seconds, not {_ttl!r}')
 
 # ---------------------------------------------------------------- tests
 #
