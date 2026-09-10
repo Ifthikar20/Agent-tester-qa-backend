@@ -239,6 +239,59 @@ else ok('a keystroke is accepted', 'no visible change on this page, which proves
 if (first.ws.readyState === 1) ok('and the socket is still up', 'after everything above');
 else bad('and the socket is still up', 'something threw');
 
+// ---------------------------------------------------------------------------
+console.log('\n— 6 · the driven page’s console, forwarded ————————');
+
+/**
+ * A failing step usually has a reason the page already printed, and until this
+ * existed that reason lived inside a browser nobody could open devtools on.
+ * public/noisy.html behaves like an app mid-incident: every level, a line
+ * repeated the way a render loop repeats it, a credential printed the way a
+ * hurried fetch wrapper prints it, and then an uncaught throw.
+ *
+ * The app decides how to DISPLAY all that — folded away until asked for,
+ * repeats collapsed — and those assertions went to ghostclick-web with the
+ * rest of the rendering. What is here is what the runner puts on the wire,
+ * and one of those is a security property rather than a convenience.
+ */
+first.msgs.length = 0;
+first.send({ t: 'open', url: `${BASE}/noisy.html` });
+await first.until((m) => m.t === 'log' && /opened /.test(m.msg ?? ''), 20000);
+await wait(3000);
+
+const lines = first.msgs.filter((m) => m.t === 'console');
+if (lines.length) ok('the page’s console arrives over the socket', `${lines.length} lines`);
+else bad('the page’s console arrives over the socket', 'nothing forwarded — the reason stays inside the browser');
+
+const printed = lines.map((m) => m.text).join('\n');
+if (/GET \/api\/balances -> 500/.test(printed)) ok('an error the page logged is in it');
+else bad('an error the page logged is in it', printed.replace(/\s+/g, ' ').slice(0, 70));
+
+// An uncaught throw never reaches console.*, and it is the one you most want.
+if (/__kestrel|TypeError|undefined/.test(printed)) ok('and an uncaught throw is too', 'pageerror is captured');
+else bad('and an uncaught throw is too', 'only console.* was captured');
+
+/**
+ * The one that matters, and the reason this section did not go to the UI with
+ * the rest of it. A page logging the token it just sent is not unusual, and a
+ * vault value that never leaves the server must not leave it through here
+ * either — so it is replaced with its NAME on the way out, in the runner,
+ * before anything can render it. The demo credential is the fixture's own
+ * literal, so a leak would be visible verbatim.
+ */
+if (!printed.includes('hunter2-but-from-a-vault') && /\$QA_PASS/.test(printed)) {
+  ok('and a vault value is redacted, not printed', 'sent as $QA_PASS');
+} else {
+  bad('and a vault value is redacted, not printed',
+      printed.includes('hunter2-but-from-a-vault') ? 'THE SECRET IS ON SCREEN' : 'it was not named either');
+}
+
+// And a page that dumps a 2MB blob into console.log cannot do it down this
+// socket. The cap is the runner's; no console can un-send what it was given.
+const longest = Math.max(0, ...lines.map((m) => String(m.text).length));
+if (longest <= 2000) ok('and a very long line is cut', `longest ${longest} chars`);
+else bad('and a very long line is cut', `${longest} chars reached the socket`);
+
 first.ws.close();
 late.ws.close();
 await wait(200);
@@ -247,7 +300,8 @@ console.log(failures
   ? `\n  ${failures} FAILED\n`
   : '\n  OK — the greeting carries what a console decides its waiting state\n'
     + '       from, a viewer that arrives at a still page is primed with a\n'
-    + '       frame rather than left black, and the wheel and the keyboard\n'
-    + '       reach the page being driven. What the app DRAWS with all of\n'
-    + '       that is checked in ghostclick-web.\n');
+    + '       frame rather than left black, the wheel and the keyboard reach\n'
+    + '       the page being driven, and its own console comes back with the\n'
+    + '       vault redacted and long lines cut. What the app DRAWS with all\n'
+    + '       of that is checked in ghostclick-web.\n');
 process.exit(failures ? 1 : 0);

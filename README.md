@@ -27,10 +27,10 @@ npm run check:redirects           # redirect chains, statuses, the friendly 404
 npm run check:app                 # one command starts it all, each half handed its half of the keypair
 npm run check:patience            # late vs never coming, and settling
 npm run check:pace                # a fast run reaches the same verdict as a watched one
-npm run check:console             # the canvas paints, and the wheel reaches the page
+npm run check:console             # a late viewer is primed, the wheel reaches the page, the vault does not
 npm run check:teach               # demonstrate by hand, then replay what it wrote
 npm run check:fidelity            # does the replay reproduce it? would coordinates have?
-npm run check:shared              # the picker, the hand-off, every copy of the language
+npm run check:shared              # the picker, the hand-off, every copy of the language and its version
 npm run check:auth                # forgeries refused, Python signs it, Node checks it
 npm run check:boundary            # no bundler crept back, and the UI is still a directory
 npm run check:diagram             # generated mermaid vs. the real parser
@@ -714,8 +714,10 @@ auth: sending token $QA_PASS to /api/session
 `public/noisy.html` is a page shaped like an app mid-incident — every level, one
 line repeated five times the way a render loop repeats it, the bundled demo
 credential printed the way a hurried wrapper prints it, then a throw.
-`check:console` section 7 drives it. Removing the redaction turns that check red
-with `THE SECRET IS ON SCREEN`.
+`check:console` section 6 drives it. Removing the redaction turns that check red
+with `THE SECRET IS ON SCREEN` — the redaction happens in the runner, before
+anything can render it, so that assertion stayed here when the rest of the old
+console check went to ghostclick-web with the components it was reading.
 
 The ↑ Top / ↓ Bottom buttons are gone. The wheel is the way you scroll a page,
 and the buttons were a workaround from before it worked. The `scroll to top` and
@@ -808,13 +810,12 @@ not an error in red:
 > A recording made here starts from the URL you asked for, so it replays the
 > redirect — allow `https://www.acme.com` only if you want to point at it directly.
 
-**And a refusal now appears beside the button that caused it.** `check:console`
-section 6 covers both: it records through a real cross-origin redirect
-(`/go/offsite`), asserts the entry is the URL asked for, that the case is really
-in `/api/cases` and in the picker, and — by deleting the suite behind the UI's
-back — that a genuine refusal is rendered in the card rather than off-screen.
-Reverting the entry fix turns four of those red; reverting the message placement
-turns the fifth red on its own.
+**And a refusal now appears beside the button that caused it.** The half of
+that which is this repository's — recording through a real cross-origin
+redirect (`/go/offsite`) and getting back a case whose entry is the URL you
+asked for — is `check:redirects`. Where the refusal is *rendered* is the app's,
+and is checked in ghostclick-web, since a message off the bottom of a scrolling
+page is a fact about a page.
 
 ## example.com is not www.example.com
 
