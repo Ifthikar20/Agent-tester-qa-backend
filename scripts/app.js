@@ -135,12 +135,12 @@ export function envFor(opts, keys, base = {}, root = ROOT) {
         // The control plane is on another port here, so the UI's CSP has to
         // let it connect there; deployed, both sit behind one origin.
         GC_AUTH_ORIGIN: authUrl,
-        // A laptop with a login is still a laptop: the bundled apps on this
-        // very port are what there is to drive, so the demo fixtures stay
-        // served and the private-address block that production turns on
-        // with the gate is turned off here, by name. Neither is set without
-        // --auth, where both are already the laptop defaults.
-        GC_DEMO: '1',
+        // A laptop with a login is still a laptop: the apps you are building
+        // on localhost are what there is to drive, so the private-address
+        // block that production turns on with the gate is turned off here, by
+        // name. The bundled demo site is NOT served: it was the fallback the
+        // console kept landing on, and a fallback nobody chose reads as the
+        // product. GC_DEMO=1 in the shell still brings it back on purpose.
         GC_BLOCK_PRIVATE: '0',
         // GC_WEB_DIR is deliberately NOT invented here, or anywhere below. It
         // names a build this repository cannot make, so a value chosen here
@@ -488,11 +488,11 @@ async function main(argv) {
       ? `generated, kept in .ghostclick/signing-key.pem (private) and auth-public-keys.json (${Object.keys(keys.publicKeys).join(', ')})`
       : `kept — kid ${Object.keys(keys.publicKeys).join(', ')}`);
     // The runner enforces the plan (docs/AUTH.md §10), and a personal
-    // organisation starts on `free`, which has no vault — so the bundled
-    // demo's sign-in flow, which reads $QA_PASS, is refused with a 402
-    // until the organisation is moved to a plan that has one. Said here,
-    // because from the console it reads as a step that failed.
-    step('plans', 'every personal organisation starts on free (3 suites, 2 origins, no vault); move it to team in /admin/ to run the demo sign-in flow');
+    // organisation starts on `free`, which has no vault — so a flow that
+    // reads a secret ($QA_PASS and the like) is refused with a 402 until the
+    // organisation is moved to a plan that has one. Said here, because from
+    // the console it reads as a step that failed.
+    step('plans', 'every personal organisation starts on free (3 suites, 2 origins, no vault); move it to team in /admin/ for flows that read the vault');
     if (existsSync(OLD_SECRET_FILE)) {
       step('', '.ghostclick/auth-secret is the old shared HMAC secret; nothing reads it now, delete it');
     }

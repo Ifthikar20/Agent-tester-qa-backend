@@ -80,6 +80,17 @@ try {
   else bad('an unreadable entry is skipped, not thrown on', String(junk));
 } catch (e) { bad('an unreadable entry is skipped, not thrown on', e.message); }
 
+// 5. Never the runner's own origin. That is where the bundled demo site is
+//    served, and on a machine that has run this suite a demo run is the newest
+//    run there is — reopening it was the old constant in disguise.
+const own = chooseHome({
+  runs: [run('https://staging.acme.com/app'), run('http://localhost:3000/demo.html')],
+  isAllowed: yes,
+  exclude: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+});
+if (own === 'https://staging.acme.com/app') ok('never the runner\'s own demo site', own);
+else bad('never the runner\'s own demo site', String(own));
+
 // ---------------------------------------------------------------------------
 console.log('\n— the wiring ——————————————————————————————————————');
 

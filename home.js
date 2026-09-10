@@ -9,9 +9,13 @@
  *
  *   1. HOME_URL, if someone named one on the command line. An explicit choice
  *      beats an inferred one.
- *   2. The newest run in history whose origin is STILL ALLOWED. It is a URL
- *      that ran here before, so it normally passes — but an origin you have
- *      since removed should not be re-opened just because a file remembers it.
+ *   2. The newest run in history whose origin is STILL ALLOWED, and is not one
+ *      of `exclude`. It is a URL that ran here before, so it normally passes —
+ *      but an origin you have since removed should not be re-opened just
+ *      because a file remembers it. Nor should the runner's own origin, which
+ *      is where the bundled demo site is served: on any machine that ever ran
+ *      the checks, a demo run is the likeliest newest run, and falling back to
+ *      it on every start was the old constant wearing a disguise.
  *   3. Nothing. The console says "Nothing open yet", which is the truth, rather
  *      than a black rectangle under the word "waiting", which reads as a hang.
  *
@@ -25,9 +29,10 @@
  * @param {string?}  opts.envUrl     process.env.HOME_URL
  * @param {object[]} opts.runs       run history, OLDEST first (runs.js `list()`)
  * @param {(origin: string) => boolean} opts.isAllowed
+ * @param {string[]} opts.exclude    origins history may never pick: the runner's own
  * @returns {string|null}
  */
-export function chooseHome({ envUrl, runs = [], isAllowed = () => true } = {}) {
+export function chooseHome({ envUrl, runs = [], isAllowed = () => true, exclude = [] } = {}) {
   if (envUrl) return envUrl;
 
   // Newest first. `list()` hands back oldest first, and reading the array in
@@ -36,7 +41,8 @@ export function chooseHome({ envUrl, runs = [], isAllowed = () => true } = {}) {
     const url = runs[i]?.url;
     if (!url) continue;
     try {
-      if (isAllowed(new URL(url).origin)) return url;
+      const { origin } = new URL(url);
+      if (!exclude.includes(origin) && isAllowed(origin)) return url;
     } catch { /* not a URL any more; skip it rather than throw at boot */ }
   }
   return null;

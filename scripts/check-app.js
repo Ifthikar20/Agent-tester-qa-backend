@@ -100,13 +100,14 @@ if (moved.runner.GC_AUTH_ORIGIN === 'http://localhost:8100') ok('and the runner 
 else bad('and the runner lets the UI connect to it', String(moved.runner.GC_AUTH_ORIGIN));
 
 /**
- * A laptop with a login is still a laptop: the bundled apps on the runner's
- * own port are what there is to drive. So --auth says, by name, that the demo
- * fixtures are served and the private-address block is off — the two things
- * a deployed runner turns on with the gate, and which compose does not set.
+ * A laptop with a login is still a laptop: the apps on localhost are what
+ * there is to drive, so --auth turns the private-address block off by name —
+ * the one thing a deployed runner turns on with the gate that a laptop must
+ * not. It does not serve the bundled demo site any more: that was the fallback
+ * the console kept landing on, so GC_DEMO is left for a shell to set on purpose.
  */
-if (on.runner.GC_DEMO === '1' && on.runner.GC_BLOCK_PRIVATE === '0') ok('--auth keeps the demo apps drivable', 'GC_DEMO=1 GC_BLOCK_PRIVATE=0, said by name');
-else bad('--auth keeps the demo apps drivable', JSON.stringify({ GC_DEMO: on.runner.GC_DEMO, GC_BLOCK_PRIVATE: on.runner.GC_BLOCK_PRIVATE }));
+if (on.runner.GC_BLOCK_PRIVATE === '0' && on.runner.GC_DEMO === undefined) ok('--auth drives localhost, without the demo site', 'GC_BLOCK_PRIVATE=0 by name, and no GC_DEMO');
+else bad('--auth drives localhost, without the demo site', JSON.stringify({ GC_DEMO: on.runner.GC_DEMO, GC_BLOCK_PRIVATE: on.runner.GC_BLOCK_PRIVATE }));
 
 /**
  * Off is off. A key set in the environment with auth disabled would turn the
