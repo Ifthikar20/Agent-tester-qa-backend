@@ -310,6 +310,28 @@ function repaired(target, here) {
   return { real, cut, shouted, suggestion };
 }
 
+/**
+ * The controls on this page that open a list of options.
+ *
+ * An option is only in the page while its list is open, so an option that
+ * never became visible usually belongs to a list nobody opened. Naming the
+ * page's dropdowns turns a search into a choice between them.
+ */
+async function dropdowns(page, limit = 4) {
+  const found = [];
+  const all = await page.locator('[aria-haspopup="listbox"], [role="combobox"]').all().catch(() => []);
+  for (const one of all.slice(0, 12)) {
+    if (found.length >= limit) break;
+    // The first line of its aria snapshot is the control itself, quoted the
+    // way discover() reads it: `- button "California"`.
+    let line = (await one.ariaSnapshot().catch(() => '')).split('\n')[0].replace(/^\s*-\s+/, '');
+    if (line.startsWith("'")) line = line.slice(1, line.lastIndexOf("'")).replace(/''/g, "'");
+    const m = line.match(/^([a-z]+)\s+"((?:[^"\\]|\\.)*)"/);
+    if (m) found.push(`${m[1]}:${m[2].replace(/\\(.)/g, '$1')}`);
+  }
+  return found;
+}
+
 async function pointAt(page, target, ctx, opts = {}) {
   const node = el(page, target, ctx);
   try {
@@ -358,6 +380,10 @@ async function pointAt(page, target, ctx, opts = {}) {
     }
 
     const near = nearby(target, here);
+    // An option lives in a list, and a list nobody opened has no options at
+    // all — so "nothing like it is here" is true, and the wrong thing to say.
+    const option = !near.length && /(^|\/)option:/.test(target);
+    const lists = option ? await dropdowns(page) : [];
     throw new Error(
       `"${target}" never became visible — and it did not turn up in the ` +
       `${(((opts.timeout ?? TIMEOUT) + GRACE) / 1000).toFixed(1)}s this waited, so waiting longer will not help.` +
@@ -365,8 +391,14 @@ async function pointAt(page, target, ctx, opts = {}) {
         ? `\n  The page does have: ${near.join(', ')}.` +
           `\n  If yours lives in a menu, put a hover step before it:` +
           `\n    home -->|hover 'Use Cases' : link; click '…' : menuitem| home`
-        : `\n  Nothing with a similar name is on the page right now.` +
-          `\n  ${here.length} targets are — open "Targets on this page" to see them.`)
+        : option
+          ? `\n  An option is only on the page while its list is open, and nothing opened it.` +
+            (lists.length
+              ? `\n  The dropdowns here: ${lists.join(', ')} — click the one it belongs to in the step before.`
+              : `\n  Click the control that opens its list in the step before.`) +
+            `\n  Recordings made before this was fixed lost that click — re-record the step, or add the click by hand.`
+          : `\n  Nothing with a similar name is on the page right now.` +
+            `\n  ${here.length} targets are — open "Targets on this page" to see them.`)
     );
   }
   await node.scrollIntoViewIfNeeded();

@@ -19,3 +19,6 @@ suites/check-*/
 # before anyone puts it there.
 *.pem
 .env.prod
+
+# Local, non-secret dev overrides (GC_UI_REPO etc.). Never committed.
+.env.local

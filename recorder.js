@@ -151,6 +151,11 @@ const LISTENERS = `
       if (!node || node.nodeType !== 1) continue;
       var before = lastChanged.get(node);
       lastChanged.set(node, now);
+      // A control that was pressed, and the page answered the press rather
+      // than waiting for the click — see "a press that did the clicking".
+      if (press && !press.answered && now - press.at <= CHANGE_MS
+          && !(before !== undefined && before >= press.at - QUIET_MS)
+          && (surfaced || near(node, press.el))) press.answered = true;
       if (!pending || now - pending.at > CHANGE_MS) continue;
       if (before !== undefined && before >= pending.at - QUIET_MS) continue;   // was already changing
       if (surfaced || near(node, pending.el)) settle(true);
@@ -300,7 +305,76 @@ const LISTENERS = `
     }, 260);
   }, true);
 
+  // ---- a press that did the clicking ---------------------------------------
+  // Some controls act on the PRESS. A select or a menu built on Bits UI or
+  // Radix opens on pointerdown and takes pointer events away from the rest of
+  // the page, so the release lands on the open list or on nothing, and the
+  // click that follows is dispatched to <html>. Listening for clicks kept the
+  // option you picked and lost the click that opened the list — and replay
+  // waited for an option in a list nobody had opened.
+  //
+  // So a control is measured when it is pressed, while it still looks the way
+  // it did. If the page answers the press and the click then lands somewhere
+  // that is not the control, the press was the click. Released where it was
+  // pressed, too: a press that travelled is a drag, and a drag is not a click
+  // on anything.
+  var press = null;                   // { el, msg, at, x, y, answered }
+  var lastClicked = null;             // the control the latest click step was on
+  var SLOP = 8;
+
+  function stayed(p, ev) {
+    return Math.abs(ev.clientX - p.x) <= SLOP && Math.abs(ev.clientY - p.y) <= SLOP;
+  }
+
+  /**
+   * Was this control on the page before the pointer went looking for it? If
+   * not, the hover that revealed it is a step — unless what revealed it is the
+   * control that was just clicked. That click already did the revealing, and
+   * by now the control may be named by the value it was used to change.
+   * Only controls are sampled into the baseline, so only a control can ask.
+   */
+  function revealedBy(el) {
+    if (!el.matches(SCOPE) || baseline.has(el)) return;
+    var opener = openerOf(el);
+    if (opener && opener !== lastClicked) report('hover', opener, null, null);
+  }
+
+  function keepPress(p) {
+    revealedBy(p.el);
+    clickAt = Date.now();
+    lastClicked = p.el;
+    send(p.msg);
+  }
+
+  document.addEventListener('pointerdown', function (e) {
+    press = null;
+    if (e.button !== 0) return;
+    var el = e.target.closest && e.target.closest(CLICKABLE);
+    if (!el || (FIELD.test(el.tagName.toLowerCase()) && ['checkbox','radio','submit','button'].indexOf(el.type) === -1)) return;
+    var msg = describe('click', el, null, e);
+    if (msg) press = { el: el, msg: msg, at: Date.now(), x: e.clientX, y: e.clientY, answered: false };
+  }, true);
+
+  // The click is dispatched in the same task as the release, so by the time
+  // this runs it has either claimed the press or is never coming.
+  document.addEventListener('pointerup', function (e) {
+    var p = press;
+    if (p) setTimeout(function () {
+      if (press !== p) return;
+      press = null;
+      if (p.answered && stayed(p, e)) keepPress(p);
+    }, 0);
+  }, true);
+
+  document.addEventListener('pointercancel', function () { press = null; }, true);
+
   document.addEventListener('click', function (e) {
+    var p = press;
+    press = null;
+    // The press did the clicking, and this click went somewhere else — <html>,
+    // or whatever opened under the pointer. The press is the step.
+    if (p && p.answered && !p.el.contains(e.target) && stayed(p, e)) return keepPress(p);
+
     var el = e.target.closest && e.target.closest(CLICKABLE);
     // Not a control. It may still be the step — an accordion header, a tab —
     // and the page will say so: watchClick keeps it only if something near it
@@ -311,14 +385,10 @@ const LISTENERS = `
     // real intent. Checkboxes and radios are the exception — the click IS it.
     if (FIELD.test(tag) && ['checkbox','radio','submit','button'].indexOf(el.type) === -1) return;
 
-    // Was this even on the page before the pointer went looking for it? Only
-    // controls are sampled into the baseline, so only a control can ask.
-    if (el.matches(SCOPE) && !baseline.has(el)) {
-      var opener = openerOf(el);
-      if (opener) report('hover', opener, null, null);
-    }
+    revealedBy(el);
     var before = window.scrollY;
     clickAt = Date.now();
+    lastClicked = el;
     report('click', el, null, e);
 
     // "Back to top", a router that resets scroll, an anchor that jumps: a click

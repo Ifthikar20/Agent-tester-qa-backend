@@ -91,8 +91,25 @@ Anything behind a login fails on the first step unless you **record the login
 too** — a `type=password` field records as `$TODO`, and you map it to a vault
 key before running.
 
-Exporting cookies from your session would skip the login, but that is handing
-live credentials to another process, so it is not in this PoC.
+That works for a form login. It does not work for a login that refuses to run
+in an automated browser at all — "Continue with Google" foremost, and a passkey
+or an emailed code with it. For those, **Save my session for this site**.
+
+## Save my session for this site
+
+Sign in to the site in THIS browser, as a person, the way you always do. Then
+press **Save my session for this site**. The worker reads that site's cookies
+(`chrome.cookies`, the "cookies" permission) — only the tab's own origin, so a
+third party's cookies are never touched — shapes them as a Playwright
+`storageState`, and posts them to the runner at `POST /api/session` over the
+same token hand-off the recording uses. The runner keeps only the cookies for an
+origin it already allows, so allow the site there first; with a login it is also
+an owner's or admin's to set, from a recent sign-in.
+
+The ghostclick Console then shows **Opens signed in for `<site>`**, and a run
+starts already logged in. It is a live credential for that account — use a
+dedicated test account, and clear it from the Console when you are done. See the
+runner's `sessions.js`.
 
 ## Known gaps
 

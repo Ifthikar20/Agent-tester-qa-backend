@@ -107,6 +107,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
     if (m.t === 'get') return reply({ ok: true, state });
 
     if (m.t === 'send') return reply(await deliver(m.flow, m.host, m.authHost));
+    if (m.t === 'saveSession') return reply(await saveSession(m.host, m.authHost));
     reply({ ok: false });
   })();
   return true;   // keep the channel open for the async reply
@@ -154,6 +155,82 @@ async function deliver(flow, host, authHost) {
   const body = await res.json().catch(() => ({}));
   if (!res.ok) return { ok: false, note: `${res.status}: ${body.error ?? res.statusText}` };
   return { ok: true, note: 'Sent — it is in the ghostclick script box.' };
+}
+
+/**
+ * Hand ghostclick the CURRENT site's sign-in, so a run can start already
+ * logged in (sessions.js on the runner).
+ *
+ * The login itself — Google, a passkey, a code — happened HERE, in your own
+ * browser, where you are a person and it is allowed. All this sends is the
+ * cookies the SITE set for itself, read from the active tab's own origin, so a
+ * third party's cookies (Google's) are never touched. A web page could not do
+ * this — one site cannot read another's cookies — which is why it lives in the
+ * extension, with the "cookies" permission and the site's host permission.
+ *
+ * The runner keeps only the cookies for an origin it already allows and refuses
+ * the rest, so the site has to be allowed there first; with a login it is also
+ * an owner's or admin's to set, from a recent sign-in. The token is minted the
+ * same way the recording hand-off mints it.
+ */
+async function saveSession(host, authHost) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  let origin;
+  try { origin = new URL(tab.url).origin; } catch { return { ok: false, note: 'Open the site whose sign-in you want to save in this tab, then try again.' }; }
+  if (!/^https?:$/.test(new URL(tab.url).protocol)) return { ok: false, note: 'Only http and https sites have a session to save.' };
+
+  let raw;
+  try { raw = await chrome.cookies.getAll({ url: origin }); }
+  catch (e) { return { ok: false, note: `Could not read this site's cookies (${e.message}). Reload the extension so it can ask for the "cookies" permission.` }; }
+  if (!raw.length) return { ok: false, note: `No cookies on ${origin} yet — sign in to the site here first, then save.` };
+
+  const state = { cookies: raw.map(toPlaywrightCookie), origins: [] };
+
+  let token = null;
+  try { token = await executorToken(authHost || host); }
+  catch (e) { return { ok: false, note: e.message }; }
+
+  const headers = { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) };
+  let res;
+  try {
+    res = await fetch(`${host}/api/session`, { method: 'POST', headers, body: JSON.stringify({ state }) });
+  } catch (e) {
+    return { ok: false, note: `Could not reach ${host} (${e.message}). Check it is running.` };
+  }
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 401 && !token) return { ok: false, note: `${host} wants a signed-in session and no control plane answered at ${authHost || host}. Set "Where you sign in" below and sign in there first.` };
+  if (res.status === 401) return { ok: false, note: 'The runner refused the token. Sign in to ghostclick again and retry.' };
+  if (res.status === 403 && body.error === 'step_up_required') return { ok: false, note: 'Saving a sign-in needs a recent sign-in of your own — confirm it is you in the ghostclick app, then save again.' };
+  if (res.status === 403 && body.error === 'forbidden') return { ok: false, note: 'Only an owner or admin of the organisation can save a session.' };
+  if (res.status === 409) return { ok: false, note: 'Another organisation is driving the runner right now; try again when it is free.' };
+  if (res.status === 400 && /allowed origin/i.test(body.error ?? '')) return { ok: false, note: `Allow ${origin} in ghostclick (Origins & vault) first, then save.` };
+  if (!res.ok) return { ok: false, note: `${res.status}: ${body.error ?? res.statusText}` };
+  const s = body.session ?? {};
+  const n = s.cookies ?? state.cookies.length;
+  return { ok: true, note: `Saved — ghostclick opens ${(s.origins ?? [origin]).join(', ')} signed in (${n} cookie${n === 1 ? '' : 's'}). Use a test account, not your own.` };
+}
+
+/**
+ * A Chrome cookie as Playwright's storageState wants it. The differences that
+ * matter: sameSite is a word not an enum, and a cookie the browser will not
+ * keep past the session has no expiry — which Playwright writes as -1.
+ */
+const SAME_SITE = { no_restriction: 'None', lax: 'Lax', strict: 'Strict', unspecified: 'Lax' };
+function toPlaywrightCookie(c) {
+  let sameSite = SAME_SITE[c.sameSite] ?? 'Lax';
+  // Playwright (and Chromium) reject SameSite=None on a cookie that is not
+  // Secure; such a cookie would never have been set cross-site anyway.
+  if (sameSite === 'None' && !c.secure) sameSite = 'Lax';
+  return {
+    name: c.name,
+    value: c.value,
+    domain: c.domain,
+    path: c.path || '/',
+    expires: c.session || c.expirationDate == null ? -1 : Math.round(c.expirationDate),
+    httpOnly: !!c.httpOnly,
+    secure: !!c.secure,
+    sameSite,
+  };
 }
 
 /**

@@ -3,7 +3,7 @@
   "name": "ghostclick recorder",
   "version": "0.1.0",
   "description": "Pick an element, say what to do with it, get a runnable mermaid flow.",
-  "permissions": ["scripting", "storage", "tabs", "sidePanel"],
+  "permissions": ["scripting", "storage", "tabs", "sidePanel", "cookies"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
   "side_panel": { "default_path": "panel.html" },

@@ -110,6 +110,19 @@ $('send').onclick = async () => {
   }
 };
 
+// The session hand-off is the background worker's too (background.js): it reads
+// the site's cookies — which the panel cannot — and mints the token that
+// carries this extension's origin.
+$('saveSession').onclick = async () => {
+  $('sessionNote').textContent = 'Saving…';
+  const r = await send({ t: 'saveSession', host, authHost });
+  $('sessionNote').textContent = '';
+  const el = document.createElement('span');
+  if (!r?.ok) el.className = 'warn';
+  el.textContent = r?.note ?? 'The recorder did not answer.';
+  $('sessionNote').append(el);
+};
+
 chrome.runtime.onMessage.addListener((m) => {
   if (m.t === 'state') { state = m.state; render(); }
   if (m.t === 'picked') {

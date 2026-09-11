@@ -12,6 +12,8 @@ import { iconFor } from './icons.js';
 import { chooseHome } from './home.js';
 import { bearer, verify } from './auth.js';
 import { AUTH_ON, DEMO, PUBLIC_KEYS, KEY_ERROR, WEB_ORIGIN, EXTENSION_ORIGINS, EXTENSION_ERROR, TURNSTILE, csp } from './mode.js';
+import * as turnstile from './turnstile.js';
+import * as sessions from './sessions.js';
 import * as tickets from './tickets.js';
 import * as tenancy from './tenancy.js';
 import { SWITCH_ERROR, SwitchedOff, switchesFor } from './switches.js';
@@ -109,6 +111,12 @@ const BLOCK_PRIVATE = process.env.GC_BLOCK_PRIVATE != null
   : AUTH_ON;
 
 const HEADED = /^(1|true|yes|on)$/i.test(process.env.HEADED ?? '');
+
+// TODO(experimental — GC_CDP_URL): attach to an EXTERNAL Chrome rather than
+// launch our own. A mode flag, declared here beside HEADED because the boot
+// banner reads it before the browser is created. Empty is the default: launch
+// as always. See the full note at the browser creation, and docker/browser/.
+const CDP_URL = (process.env.GC_CDP_URL ?? '').trim();
 
 /**
  * Every store is keyed by organisation (tenancy.js, docs/AUTH.md §10). The
@@ -298,6 +306,28 @@ if (DEMO) {
     cacheHeaders(res, path);
     if (path.endsWith('.html')) res.setHeader('Content-Security-Policy', FIXTURE_CSP);
   } }));
+
+  // A cookie-gated fixture for a login that cannot be recorded — the shape a
+  // saved session (sessions.js) exists for. /session-demo/login sets an
+  // httpOnly cookie and bounces to /session-demo/, which shows "Signed in" only
+  // when the cookie is present, so a run that starts with a saved session lands
+  // on the protected page and one without it lands on the door. Only in demo
+  // mode, like every other fixture; check-sessions drives it.
+  const DEMO_COOKIE = 'gc_demo_sess';
+  const render = (signedIn) => '<!doctype html><meta charset="utf-8"><title>Account — demo</title>'
+    + (signedIn
+      ? '<h1 id="who">Signed in as qa@example.com</h1><p>This page needs the session cookie.</p>'
+      : '<h1 id="anon">Not signed in</h1><a id="login" href="/session-demo/login">Sign in</a>');
+  app.get('/session-demo/login', (_req, res) => {
+    // A long, fixed value so the redaction check has something to look for.
+    res.setHeader('Set-Cookie', `${DEMO_COOKIE}=demo-session-9f3a2b7c1d5e; Path=/; HttpOnly; SameSite=Lax`);
+    res.redirect('/session-demo/');
+  });
+  app.get('/session-demo/', (req, res) => {
+    const signedIn = new RegExp(`(?:^|;\\s*)${DEMO_COOKIE}=`).test(req.headers.cookie || '');
+    res.setHeader('Content-Security-Policy', FIXTURE_CSP);
+    res.type('html').send(render(signedIn));
+  });
 }
 // JSON bodies are parsed under /api only, and only past the limits and the
 // gate: the parser is registered beside the gate, not here.
@@ -783,6 +813,9 @@ app.get('/api/state', (req, res) => {
     recording: mine && (recorder?.recording ?? false),
     origins: req.space.origins.list(),
     secrets: req.space.vault.names(),   // names only — a value never leaves the server
+    // A saved sign-in, described but never disclosed: which origins, how many
+    // cookies, when it goes stale — no value (sessions.js).
+    session: req.space.session.summary(),
     headed: HEADED,
     // How patient the runner is, so it is visible rather than folklore.
     timeoutMs: Number(process.env.GC_TIMEOUT_MS) || 8000,
@@ -820,6 +853,42 @@ app.delete('/api/origins', (req, res) => {
     req.space.origins.remove(req.body?.origin);
     emitTo(req.space.org, { t: 'origins', origins: req.space.origins.list() });
     sendOk(res, { origins: req.space.origins.list() });
+  } catch (err) { fail(res, err); }
+});
+
+/**
+ * A saved sign-in (sessions.js): import one, or forget it.
+ *
+ * Gated exactly like an origin, because it is the same kind of decision made
+ * larger — a session is a live credential, so it is an owner's or admin's to
+ * set, and then only with a recent authentication. The body is a Playwright
+ * `storageState`, captured by a person in their own browser; the store keeps
+ * only the parts belonging to an origin this organisation already allows, and
+ * refuses when none do rather than saving nothing. The value is never read
+ * back — GET is the summary in /api/state, names and origins only.
+ *
+ * A new session applies to the NEXT page the runner opens, so if this
+ * organisation is the one driving, its context is rebuilt now (the same reset a
+ * handover does) rather than leaving the old, signed-out page in place.
+ */
+app.post('/api/session', async (req, res) => {
+  try {
+    tenancy.requireManager(req.user);
+    if (!steppedUp(req.user)) return res.status(403).json({ ok: false, error: 'step_up_required' });
+    const summary = req.space.session.set(req.body?.state, req.space.origins.list());
+    if (driver.sees(req.space.org)) await resetSession();
+    emitTo(req.space.org, { t: 'session', session: summary });
+    sendOk(res, { session: summary });
+  } catch (err) { fail(res, err); }
+});
+app.delete('/api/session', async (req, res) => {
+  try {
+    tenancy.requireManager(req.user);
+    req.space.session.clear();
+    if (driver.sees(req.space.org)) await resetSession();
+    const summary = req.space.session.summary();
+    emitTo(req.space.org, { t: 'session', session: summary });
+    sendOk(res, { session: summary });
   } catch (err) { fail(res, err); }
 });
 
@@ -1267,7 +1336,9 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  demo        ->  ${DEMO
               ? 'the bundled apps and /go/* fixtures are served'
               : 'not served — GC_DEMO=1 serves them behind the gate'}` +
-            `\n  browser     ->  ${HEADED ? 'headed — a real window you can watch' : 'headless — streamed to the canvas (HEADED=1 for a window)'}` +
+            `\n  browser     ->  ${CDP_URL
+              ? `attached — driving an external Chrome at ${CDP_URL} (GC_CDP_URL); a person signs it in, webdriver stays false`
+              : HEADED ? 'headed — a real window you can watch' : 'headless — streamed to the canvas (HEADED=1 for a window)'}` +
             `\n  allowed     ->  ${AUTH_ON ? 'per organisation' : local.origins.list().join(', ')}` +
             `\n  secrets     ->  ${AUTH_ON ? 'per organisation' : local.vault.names().join(', ') || '(none set)'}` +
             `\n  patience    ->  waits ${Number(process.env.GC_TIMEOUT_MS) || 8000}ms for a target, ` +
@@ -1291,13 +1362,39 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
  * Neither mode touches YOUR mouse or YOUR tabs. The pointer you see gliding is
  * drawn over a video of another browser.
  */
-const browser = await chromium.launch({
-  headless: !HEADED,
-  // Set CHROMIUM_PATH when the sandbox ships a Chromium that does not match
-  // the revision this Playwright build would download. Otherwise leave unset.
-  executablePath: process.env.CHROMIUM_PATH || undefined,
-  args: ['--disable-dev-shm-usage', '--force-color-profile=srgb'],
-});
+/**
+ * TODO(experimental — GC_CDP_URL): attach to an EXTERNAL Chrome instead of
+ * launching our own.
+ *
+ * The runner's own browser is automated, and some logins refuse an automated
+ * browser outright — "Continue with Google" foremost. A Chrome launched
+ * NORMALLY (no automation flag) and merely attached to over CDP reports
+ * `navigator.webdriver = false`, so a HUMAN can sign in to it where our
+ * launched browser is turned away; the runner then drives that same signed-in
+ * browser. `docker/browser/` runs exactly such a Chrome — headful, streamed to
+ * a person, a debug port exposed — and GC_CDP_URL points here at it.
+ *
+ * This is a flag, not a migration: unset, everything below is precisely today's
+ * behaviour. When set, it is a SINGLE shared browser with one profile, so it is
+ * the one-person / one-laptop shape and NOT the multi-tenant one — newSession
+ * and resetSession say where that shows. Kept off by default so a Docker setup
+ * that misbehaves is reverted by clearing one variable, never by editing code.
+ *
+ * CDP_URL itself is declared up beside HEADED, because the boot banner reads it
+ * before this line runs.
+ */
+const browser = CDP_URL
+  // TODO(GC_CDP_URL): the external, human-signed-in Chrome. connectOverCDP does
+  // not add the automation flag, so the attach is what keeps webdriver false.
+  ? await chromium.connectOverCDP(CDP_URL)
+  // The default, unchanged: launch and drive our own headless browser.
+  : await chromium.launch({
+      headless: !HEADED,
+      // Set CHROMIUM_PATH when the sandbox ships a Chromium that does not match
+      // the revision this Playwright build would download. Otherwise leave unset.
+      executablePath: process.env.CHROMIUM_PATH || undefined,
+      args: ['--disable-dev-shm-usage', '--force-color-profile=srgb'],
+    });
 
 /**
  * Broadcast is per organisation (docs/AUTH.md §9.6 [websocket-3]).
@@ -1359,12 +1456,16 @@ function armRelease() {
 const LINE_MAX = 2000;
 function redact(text) {
   let out = String(text ?? '');
-  const vault = tenancy.workspace(driver.org ?? LOCAL).vault;
-  for (const name of vault.names()) {
-    const v = vault.get(`secrets.${name}`);
+  const space = tenancy.workspace(driver.org ?? LOCAL);
+  for (const name of space.vault.names()) {
+    const v = space.vault.get(`secrets.${name}`);
     // Two characters would match everywhere; a real secret is not that short.
     if (typeof v === 'string' && v.length >= 4) out = out.split(v).join(`$${name}`);
   }
+  // A saved session's cookie is a credential too. An app that logs the session
+  // token it just read must not leak it down this socket any more than a vault
+  // value — see sessions.js.
+  for (const v of space.session.values()) out = out.split(v).join('$SESSION');
   return out;
 }
 const LEVELS = { warning: 'warn', error: 'error', assert: 'error', trace: 'debug', verbose: 'debug' };
@@ -1435,16 +1536,56 @@ async function publishTargets() {
  * drives second.
  */
 async function newSession() {
-  page = await browser.newPage({
-    viewport: VIEW,
-    // The route handler below is the only thing between an allowed page and
-    // this container's network, and Playwright does not run it for a service
-    // worker's requests. So when the reach rule is on, a page may not have
-    // one: a secure context is all a worker needs, and one fetch from inside
-    // it would otherwise bypass reach.js entirely [browser-side-1].
-    serviceWorkers: BLOCK_PRIVATE ? 'block' : 'allow',
-  });
-  cdp = await page.context().newCDPSession(page);
+  // A saved sign-in, if the DRIVING organisation has one for an origin it still
+  // allows (sessions.js). It has to be handed to the context as it is built —
+  // `browser.newPage()` cannot carry a storageState — which is the whole reason
+  // the context is created explicitly here rather than through that shortcut.
+  //
+  // Only the organisation actually driving, so nothing is loaded at boot, before
+  // anyone has taken the browser; and re-filtered to the live allowlist inside
+  // state(), so a cookie for an origin removed since it was saved is dropped
+  // rather than replayed onto a host nobody approved (docs/AUTH.md §10).
+  let context;
+  if (CDP_URL) {
+    // TODO(GC_CDP_URL): reuse the external browser's EXISTING context and page —
+    // the profile a person signed in to. A fresh newContext() on a
+    // connectOverCDP browser is incognito-like and carries none of that login,
+    // which would defeat the whole point. So there is one shared context here,
+    // not one per organisation: this mode is the single-user shape, and a
+    // saved storageState (sessions.js) is not injected because the session is
+    // already in the profile. The reach route and service-worker block below
+    // are also skipped — a person's real browser is not sandboxed the way our
+    // launched one is; keep GC_BLOCK_PRIVATE for the launched mode.
+    context = browser.contexts()[0] ?? await browser.newContext({ viewport: VIEW });
+    page = context.pages().find((p) => !p.isClosed()) ?? await context.newPage();
+    // Best-effort: match the screencast size so the drawn cursor lands true.
+    // An attached page may refuse a resize; the feed still works if it does.
+    await page.setViewportSize(VIEW).catch(() => {});
+    cdp = await context.newCDPSession(page);
+  } else {
+    const drivingOrg = driver.org;
+    const savedSession = drivingOrg
+      ? tenancy.workspace(drivingOrg).session.state(tenancy.workspace(drivingOrg).origins.list())
+      : null;
+
+    context = await browser.newContext({
+      viewport: VIEW,
+      // The route handler below is the only thing between an allowed page and
+      // this container's network, and Playwright does not run it for a service
+      // worker's requests. So when the reach rule is on, a page may not have
+      // one: a secure context is all a worker needs, and one fetch from inside
+      // it would otherwise bypass reach.js entirely [browser-side-1].
+      serviceWorkers: BLOCK_PRIVATE ? 'block' : 'allow',
+      ...(savedSession ? { storageState: savedSession } : {}),
+    });
+    page = await context.newPage();
+    cdp = await page.context().newCDPSession(page);
+    if (savedSession) {
+      emit({ t: 'log', level: 'info',
+             msg: `opened with a saved sign-in — ${sessions.describe(savedSession)}. `
+               + 'The login step is skipped; clear it with `npm run session -- --clear`.' });
+    }
+  }
 
   /**
    * Every request the driven page makes, inspected (reach.js). The allowlist
@@ -1452,7 +1593,10 @@ async function newSession() {
    * then fetch, which is the half an allowlist cannot see. Installed before
    * browserReady, so nothing is driven through a gap.
    */
-  if (BLOCK_PRIVATE) {
+  // TODO(GC_CDP_URL): not in attach mode — the external browser is a person's
+  // real Chrome, not our sandbox, and routing every request through here would
+  // interfere with their own browsing on a context we do not own.
+  if (BLOCK_PRIVATE && !CDP_URL) {
     await page.context().route('**/*', async (route) => {
       const url = route.request().url();
       const why = await blocked(url);
@@ -1526,6 +1670,12 @@ async function newSession() {
   });
   nav.attach();
 
+  // Cloudflare Turnstile stops automated browsers, this one included, so a
+  // form behind a production key fails steps later with nothing saying why.
+  // Say so as the widget loads, and whether its key is one of Cloudflare's
+  // test keys, which is what makes such a form testable (turnstile.js).
+  turnstile.watch(page, (w) => emit({ t: 'log', ...turnstile.notice(w) }));
+
   // Teach mode. Canvas clicks reach the page as real DOM events, so the same
   // listener sees a human demonstrating and would see the executor replaying —
   // which is why recording is gated off during a run.
@@ -1590,6 +1740,16 @@ async function newSession() {
  * else's browser.
  */
 async function resetSession() {
+  // TODO(GC_CDP_URL): attach mode is one shared browser and one shared page,
+  // wired ONCE at boot. A driver hand-off has nothing to rebuild here — and
+  // re-running newSession on the same page would re-register the recorder's
+  // page binding, which Playwright refuses ("__gcRecord already registered"),
+  // breaking the first drive. It would also drop the person's signed-in profile
+  // if it closed the context. So this is a no-op: the shared page stays wired,
+  // and `emit` already follows whoever is driving. Multi-user hand-off of one
+  // shared browser is out of scope for this mode.
+  if (CDP_URL) return;
+
   browserReady = false;
   lastFrame = null;
   if (recorder?.recording) { try { recorder.stop(null); } catch {} }
@@ -1687,8 +1847,11 @@ async function run(plan, meta = {}) {
         results.push({ i, ok: true, ms: Date.now() - t0 });
         emit({ t: 'step.pass', i, ms: Date.now() - t0 });
       } catch (err) {
-        results.push({ i, ok: false, ms: Date.now() - t0, error: err.message });
-        emit({ t: 'step.fail', i, ms: Date.now() - t0, error: err.message });
+        // A step that fails on a page Turnstile guards has usually failed
+        // because of it, and nothing in its own message could say so.
+        const error = turnstile.explain(err.message, page);
+        results.push({ i, ok: false, ms: Date.now() - t0, error });
+        emit({ t: 'step.fail', i, ms: Date.now() - t0, error });
         // A step the plan refused is a plan refusal, not a broken page.
         if (err instanceof tenancy.EntitlementError) emit({ t: 'refused', of: 'run', ...refusal(err) });
         break;
@@ -2058,6 +2221,9 @@ wss.on('connection', (ws) => {
     running: mine && running,
     recording: mine && (recorder?.recording ?? false),
     origins: space.origins.list(),
+    // A saved sign-in, so the console can show "opens signed in for treasury.sh"
+    // the moment it connects — names and origins only, never a value (sessions.js).
+    session: space.session.summary(),
     org,
     driving: driver.describe(org),
     // What the operator has switched off (switches.js), so the console can

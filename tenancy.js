@@ -33,6 +33,7 @@ import { join } from 'node:path';
 import { LOCAL, assertOrg, isOrg } from './org.js';
 import * as origins from './origins.js';
 import * as vault from './secrets.js';
+import * as sessions from './sessions.js';
 import * as history from './runs.js';
 import * as suites from './suites.js';
 
@@ -57,6 +58,7 @@ export function workspace(org) {
       org,
       origins: origins.forOrg(org),
       vault: vault.forOrg(org),
+      session: sessions.forOrg(org),
       history: history.forOrg(org),
       suites: suites.forOrg(org),
     };

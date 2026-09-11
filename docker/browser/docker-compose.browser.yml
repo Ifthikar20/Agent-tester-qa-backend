@@ -1,0 +1,78 @@
+# A real, human-signed-in Chrome for the runner to ATTACH to (GC_CDP_URL).
+# EXPERIMENTAL, and opt-in — nothing in the normal stack runs this.
+#
+#   docker compose -f docker/browser/docker-compose.browser.yml up -d
+#   # then, on the host:
+#   GC_CDP_URL=http://localhost:9222 npm run app -- --auth
+#
+# Why this exists (see the TODO(GC_CDP_URL) notes in server.js): the runner's
+# own browser is automated, and some logins refuse an automated browser —
+# "Continue with Google" foremost. This container runs Chromium the NORMAL way
+# (no automation flag), streamed to a person over a web desktop, so a HUMAN can
+# sign in to it where our launched browser is turned away. Because it is merely
+# attached to over CDP — not launched by Playwright — `navigator.webdriver`
+# stays false. The runner then drives that same signed-in browser.
+#
+# Two ports, two audiences:
+#   3001  the web desktop (KasmVNC). A PERSON opens this and signs in by hand.
+#   9222  the DevTools/CDP endpoint. The RUNNER attaches here (GC_CDP_URL).
+#
+# This is the single-browser, single-person shape. It is NOT the multi-tenant
+# stack in docker-compose.prod.yml, and must not be exposed to the internet:
+# anyone who can reach 9222 can drive the browser and read its signed-in
+# session. Both ports below bind to localhost only for that reason.
+
+name: ghostclick-browser
+
+services:
+  chrome:
+    # A full Chromium on a KasmVNC desktop — a real browser a person drives,
+    # not a headless automation image. Pin a digest before using it for
+    # anything past local experimentation (the prod stack pins every image).
+    image: lscr.io/linuxserver/chromium:latest
+    restart: unless-stopped
+    security_opt: [seccomp:unconfined]     # Chromium's sandbox needs it under KasmVNC
+    shm_size: 1gb                          # a starved /dev/shm makes Chromium crash in confusing ways
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: ${TZ:-UTC}
+      # The flags that make this browser attachable AND human. No
+      # --enable-automation (that is what would set navigator.webdriver true),
+      # a persistent profile so a sign-in survives a restart, and
+      # --remote-allow-origins=* because Chrome 111+ rejects a CDP websocket
+      # whose Origin is not localhost otherwise.
+      #
+      # NOT --remote-debugging-address=0.0.0.0: modern Chromium IGNORES it and
+      # binds the debug port to the container's own 127.0.0.1 regardless, which
+      # the published port cannot reach. The `cdp-proxy` sidecar below bridges
+      # that, so this stays 9222-on-localhost and the sidecar exposes it.
+      CHROME_CLI: >-
+        --remote-debugging-port=9222
+        --remote-allow-origins=*
+        --force-color-profile=srgb
+    ports:
+      # localhost only. 3001 -> the web desktop for a person; 9222 -> the CDP
+      # port the runner attaches to, served by the sidecar on namespace :9223
+      # (Chrome itself is on 127.0.0.1:9222 INSIDE, unreachable from outside).
+      - "127.0.0.1:3001:3000"
+      - "127.0.0.1:9222:9223"
+    volumes:
+      # The signed-in profile. Losing this volume means signing in again.
+      - chrome-profile:/config
+
+  # The bridge. Chromium binds its debug port to the container's localhost and
+  # cannot be told otherwise (see above), so nothing off-container can reach it.
+  # This shares Chrome's network namespace (network_mode: service:chrome) — so
+  # its 127.0.0.1 IS Chrome's — and forwards 0.0.0.0:9223 to 127.0.0.1:9222.
+  # The published 9222 above lands here; here forwards to Chrome. Ports are
+  # declared on `chrome` because that service owns the shared namespace.
+  cdp-proxy:
+    image: alpine/socat:1.8.0.0
+    restart: unless-stopped
+    network_mode: "service:chrome"
+    depends_on: [chrome]
+    command: ["-d", "TCP-LISTEN:9223,fork,reuseaddr,bind=0.0.0.0", "TCP:127.0.0.1:9222"]
+
+volumes:
+  chrome-profile:

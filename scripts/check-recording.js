@@ -1,5 +1,5 @@
 /**
- * The three things that broke on a real marketing site.
+ * The things that broke on real sites.
  *
  *   npm start &
  *   node scripts/check-recording.js
@@ -19,6 +19,12 @@
  *  3. `expect url contains` failed with "Timeout 8000ms exceeded", which says
  *     nothing. The real cause was step 1: the click that should have navigated
  *     was never recorded, so the URL never changed.
+ *
+ *  4. A paycheck calculator's select opened on the PRESS and took pointer
+ *     events away from the page, so the click went to <html>. The recording
+ *     kept the option and lost the click that opened the list, and replay
+ *     waited for an option in a list nobody had opened. That one is against
+ *     public/select.html.
  */
 import { chromium } from 'playwright';
 import { Recorder } from '../recorder.js';
@@ -170,10 +176,67 @@ try {
   ok('a hash route satisfies it', page.url());
 } catch (e) { bad('a hash route satisfies it', e.message.split('\n')[0]); }
 
+// ---------------------------------------------------------------------------
+console.log('\n— 6 · a select that opens on the press ——————————————');
+
+// Demonstrated the way the console does it — glide there, then press and
+// release wherever the pointer is — because a select that opens on the press
+// only goes missing when the press and the release land on different things.
+const SELECT = `${BASE}/select.html`;
+async function demonstrate(locator) {
+  await locator.scrollIntoViewIfNeeded();
+  const b = await locator.boundingBox();
+  await cursor.glideTo(b.x + b.width / 2, b.y + b.height / 2, 240);
+  await cursor.click();
+  await sleep(400);
+}
+
+await page.goto(SELECT, { waitUntil: 'domcontentloaded' });
+errors.length = 0;
+recorder.start(SELECT, []);
+await sleep(700);                          // let the recorder see the page at rest
+// exact: a bare name is a substring to Playwright, and "Monthly" is inside "Semi-monthly".
+await demonstrate(page.getByRole('button', { name: 'Bi-weekly', exact: true }));    // opens on click
+await demonstrate(page.getByRole('option', { name: 'Monthly', exact: true }));
+await demonstrate(page.getByRole('button', { name: 'California', exact: true }));   // opens on the press
+await demonstrate(page.getByRole('option', { name: 'Texas', exact: true }));
+steps = recorder.stop(page.url());
+
+const chose = steps.filter((s) => s.op === 'click').map((s) => s.target);
+const meant = ['button:Bi-weekly', 'option:Monthly', 'button:California', 'option:Texas'];
+if (chose.join() === meant.join()) ok('the click that opened each list is a step', chose.join(' → '));
+else bad('the click that opened each list is a step', `${chose.join(' → ') || 'nothing'}${errors.length ? ` — ${errors.join('; ')}` : ''}`);
+
+// The opener is the last control the pointer was over before the option, so
+// the hover inference would name it as well — by a value it no longer has.
+const inferred = [...steps.filter((s) => s.op === 'hover').map((s) => s.target), ...errors.filter((m) => m.includes('hover'))];
+if (!inferred.length) ok('and no hover is inferred on top of the click');
+else bad('and no hover is inferred on top of the click', inferred.join('; '));
+
+const replay = validate({ suite: 'x', steps });
+ran = 0; failed = null;
+for (const step of replay.steps) {
+  try { await OPS[step.op](page, step, ctx); ran++; }
+  catch (e) { failed = `step ${ran} (${step.op} ${step.target ?? step.url}): ${e.message.split('\n')[0]}`; break; }
+}
+const summary = await page.locator('#summary').textContent();
+if (!failed && summary === 'Paid Monthly in Texas') ok('and the recording replays', summary);
+else bad('and the recording replays', failed ?? summary);
+
+// A recording made before this lost the opening click. Its replay should say
+// so, rather than that nothing like "Texas" is anywhere on the page.
+await page.goto(SELECT, { waitUntil: 'domcontentloaded' });
+let said = '';
+try { await OPS.click(page, { op: 'click', target: 'option:Texas', timeout: 1000 }, ctx); }
+catch (e) { said = e.message; }
+if (said.includes('list is open') && said.includes('button:California')) ok('an option nobody opened says why', 'and names the dropdowns');
+else bad('an option nobody opened says why', said.split('\n').slice(1, 3).join(' | ') || 'it passed');
+
 await browser.close();
 console.log(failures
   ? `\n  ${failures} FAILED\n`
   : '\n  OK — a repeated link is named by its region, scrolling is a step,\n' +
-    '       a click that jumps to the top is an assertion, and a URL that\n' +
-    '       never arrives says so.\n');
+    '       a click that jumps to the top is an assertion, a URL that never\n' +
+    '       arrives says so, and a select that opens on the press keeps the\n' +
+    '       click that opened it.\n');
 process.exit(failures ? 1 : 0);

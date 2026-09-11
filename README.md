@@ -325,6 +325,93 @@ of tool — it would fight you for the machine, break the moment you moved the
 mouse, and could not run anywhere without a screen. Everything here works
 through the browser rather than around it.
 
+### Cloudflare Turnstile
+
+It will not get past a Turnstile challenge either. Turnstile exists to tell a
+person from an automated browser, and the browser a run drives is an automated
+one — so a sign-up behind a production key fails with "Verification failed",
+and the step that notices is usually an assertion a few steps later.
+
+So the runner says so. When a Turnstile widget loads on the page being driven,
+the log names its key, and a step that fails on that page carries the reason
+(turnstile.js):
+
+```
+  Cloudflare Turnstile is on this page with a production key, which stops automated browsers — if this step needed to get past it, that is why.
+```
+
+What makes such a form testable is Cloudflare's own test keys, set in the
+environment the suite points at — a staging or preview deployment, never
+production:
+
+| Site key (in the page) | Secret (on the backend) | Turnstile |
+|---|---|---|
+| `1x00000000000000000000AA` | `1x0000000000000000000000000000000AA` | always passes |
+| `2x00000000000000000000AB` | `2x0000000000000000000000000000000AA` | always fails |
+
+The widget still loads and the backend still verifies the token, so both halves
+of the form are tested for real. Change both together: a production secret
+rejects the dummy token a test key hands out. Production keys come from the
+Cloudflare dashboard's Turnstile page, one widget per environment.
+`npm run check:turnstile` drives a real widget on both test keys.
+
+### A saved sign-in, for a login that can't be recorded
+
+Some logins cannot be recorded and replayed at all. "Continue with Google"
+refuses to run in an automated browser — Google blocks sign-in from a browser
+"controlled through software automation rather than a human" — and a passkey or
+an emailed code is no better. The flow worth testing is everything *past* the
+login, and re-doing the login on every run is the one part that cannot happen
+here.
+
+So a person signs in **once, in their own browser**, and the recorder extension
+hands the runner the session that login produced — the cookies the app set for
+itself, never anything Google holds. The runner opens its browser already
+carrying them, and a run starts on the signed-in page. This is Playwright's own
+`storageState`, and reusing a saved sign-in is what its docs recommend for
+authenticated tests (sessions.js). No terminal:
+
+1. **Allow the app's origin** in ghostclick (Origins & vault), once — the same
+   decision every origin needs.
+2. **Sign in to the app in your own browser**, exactly as you always do — Google
+   included, because here you are a person and it is allowed.
+3. Open the **ghostclick recorder extension** and press **Save my session for
+   this site**. It reads that site's cookies — which a web page cannot — and
+   posts them to the runner over the same token hand-off the recorder uses.
+4. The **Console** now shows **Opens signed in for `<site>`**, with when it
+   expires and a **Clear** button. The site opens already signed in.
+
+Use a test account, never your own — a session is a live login.
+
+By hand, without the extension, `npm run session -- import <storageState.json>`
+loads a session file (`--org <slug>` with a login; `status` and `clear` too);
+produce the file with `npx playwright open --save-storage=…` for a login that
+runs in a Playwright browser — but "Continue with Google" is blocked even there,
+which is exactly why the everyday-browser extension path exists.
+
+A saved sign-in is a live credential, and it is treated like the vault:
+
+- **One per organisation**, under `.ghostclick/<org>/session.json`, gitignored —
+  the one file in there worth guarding like a password.
+- **Only ever loaded for an origin you still allow.** A cookie is a key to a
+  host; the allowlist is checked when the session is saved *and* again every time
+  it is loaded, so an origin removed in between is dropped, not replayed.
+- **Never disclosed.** The value goes to no viewer, and the session cookie is
+  redacted out of the driven page's console the way a vault value is.
+
+With auth on it is also an owner's or admin's to set, from a recent sign-in, and
+the extension can post one to `POST /api/session`. `npm run check:sessions`
+proves the whole path against a cookie-gated fixture: a session captured from a
+signed-in browser opens a fresh one already signed in, the allowlist gates it
+both ways, and the cookie is redacted.
+
+Two related paths this does **not** build, for the record: a **passkey** login
+can be driven directly through Chrome's virtual authenticator (a CDP
+`WebAuthn` domain the runner already has a session for), and a staging
+environment can point "Continue with Google" at a **mock OIDC server**
+(navikt/mock-oauth2-server) so the button itself is exercised. Both are
+legitimate; neither is here yet.
+
 ## Test suites — how a project gets in
 
 ### The fast way: one URL
