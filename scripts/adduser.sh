@@ -23,7 +23,11 @@
 # account without anyone sitting there at all.
 set -euo pipefail
 
-PEM=${PEM:-./ghostclick-deploy.pem}
+# The repo root as an ABSOLUTE path (from this script's own location), so the
+# key resolves no matter what directory this is invoked from — e.g. a wrapper at
+# the workspace root, where the CWD is not the backend repo.
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PEM=${PEM:-"$_here/ghostclick-deploy.pem"}
 EC2_USER=${EC2_USER:-ubuntu}
 REMOTE_DIR=${REMOTE_DIR:-/opt/ghostclick}
 

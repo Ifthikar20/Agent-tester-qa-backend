@@ -15,9 +15,18 @@ import re
 SLUG = re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
 
 # Names that are routes, directories or words a slug would be confused with.
+#
+# 'local' is the runner's OWN reserved workspace (org.js LOCAL): the pre-tenancy
+# / laptop data under suites/local/ and .ghostclick/local/ that tenancy.js
+# asserts no token can reach. A personal slug minted as 'local' — from a
+# `local@…` sign-up — would collide with it and hand that registrant the
+# original operator's suites, origins, run history and vault. So it must never
+# be a slug a token can carry; keeping it here makes is_slug('local') false and
+# routes personal_slug to 'local-org' instead.
 RESERVED = frozenset({
     'admin', 'api', 'app', 'auth', 'accounts', 'static', 'ws', 'healthz', 'go',
     'demo', 'org', 'orgs', 'me', 'new', 'null', 'none', 'undefined', 'ghostclick',
+    'local',
 })
 
 

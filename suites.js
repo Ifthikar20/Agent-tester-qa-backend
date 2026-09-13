@@ -30,11 +30,16 @@
  */
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { normalizeUrl } from './origins.js';
 import { suitesDir } from './org.js';
 
 const now = () => new Date().toISOString();
-const rid = (p) => `${p}_${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-3)}`;
+// A random id for a page or case. crypto rather than Math.random, so it is
+// unguessable as well as unique: these ids are only ever reached THROUGH an
+// already org-scoped suite (so guessing one buys nothing), but an id that rides
+// in an API path should not be predictable regardless — defence in depth.
+const rid = (p) => `${p}_${randomBytes(6).toString('hex')}`;
 
 /**
  * "There is no such suite" as a type rather than a sentence.
@@ -48,12 +53,21 @@ export class NoSuchSuite extends Error {
   constructor(id) { super(`No suite "${id}"`); this.name = 'NoSuchSuite'; }
 }
 
-/** A filename you can recognise in a diff, and that cannot escape the folder. */
-function slugify(name) {
-  const s = String(name).toLowerCase().normalize('NFKD')
-    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
-  return s || 'suite';
-}
+/**
+ * A suite id nobody can guess.
+ *
+ * It used to be the name's slug — readable in a diff, but readable to anyone:
+ * the id rides in the URL (/app/suites/<id>), so a predictable one lets a
+ * person change the URL to enumerate suites (an IDOR). The per-org directory
+ * already confines a lookup to one organisation, but an unguessable id closes
+ * the gap for good and keeps any future scoping slip from being exploitable.
+ *
+ * Hex keeps it inside isId's [a-z0-9-] filename rule (so it cannot escape the
+ * folder and needs no regex change); randomBytes — not rid's Math.random, which
+ * is fine for the page and case ids that never leave a suite — is what makes it
+ * unguessable. 72 bits: collisions are not a thing that happens.
+ */
+const suiteId = () => `su-${randomBytes(9).toString('hex')}`;
 
 // --------------------------------------------------------------- validation
 
@@ -148,8 +162,8 @@ export function forOrg(org) {
   }
 
   /**
-   * A suite id is a slug, and anything else is "no suite" rather than a
-   * rewritten one.
+   * A suite id is our own random token (or a legacy slug), and anything else is
+   * "no suite" rather than a rewritten one.
    *
    * This used to STRIP the characters it did not like and read whatever the
    * remainder named, which made `a/../../local/treasury-demo` a legal way to
@@ -171,9 +185,9 @@ export function forOrg(org) {
     const n = text(name, 'Suite name', 80);
     const u = normalizeUrl(baseUrl);           // throws on anything but http(s)
 
-    let id = slugify(n);
     const taken = new Set(files().map((f) => f.replace(/\.json$/, '')));
-    if (taken.has(id)) { let i = 2; while (taken.has(`${id}-${i}`)) i++; id = `${id}-${i}`; }
+    let id = suiteId();
+    while (taken.has(id)) id = suiteId();       // 72 bits — this practically never loops
 
     return write({
       id, name: n,

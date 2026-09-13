@@ -1,0 +1,86 @@
+# Attach mode for a DEPLOYED box, applied as an override on top of
+# docker-compose.prod.yml — so a human can sign in past a login the runner's
+# own browser is refused (Google, Turnstile), and the deployed runner drives
+# that signed-in browser.
+#
+#   sudo docker compose -f docker/docker-compose.prod.yml \
+#        -f docker/docker-compose.attach.yml --env-file .env.prod up -d
+#
+# Secure by construction:
+#   - the browser exposes NOTHING. No VNC, no desktop, no published port. The
+#     ONLY way to see or drive it is the ghostclick Console (the gated app),
+#     whose canvas streams it over CDP and whose origin gate confines it to the
+#     sites you onboarded — no roaming, no DevTools, no address bar.
+#   - the CDP port is never published to the host or the internet; the runner
+#     reaches it over the internal `edge` network by service name.
+#   - opt-in and reversible: without this file the box is the hardened,
+#     headless, multi-tenant stack. It is single-user WHILE attached — fine on
+#     a box already locked to one IP, not for real multi-tenant use.
+#
+# Why this works for a login the runner's own browser is refused: the browser
+# is HEADFUL and launched normally (no --enable-automation), so it has a normal
+# Chrome user-agent and navigator.webdriver is false. Google then proceeds past
+# its "this browser may not be secure" check even though the Console drives it
+# over CDP — verified. The person types the login ON THE CANVAS; nothing rides
+# on a separate desktop. See server.js (GC_CDP_URL) and docker/browser/.
+
+services:
+  # A real, human-driveable Chromium on a web desktop, on the `edge` network so
+  # it can reach the sites you sign in to. Its debug port is bound to the
+  # container's own localhost (Chromium forces that); the sidecar below exposes
+  # it to the runner over the network.
+  chrome:
+    image: lscr.io/linuxserver/chromium:latest
+    restart: unless-stopped
+    security_opt: [seccomp:unconfined]      # Chromium's sandbox under KasmVNC
+    shm_size: 1gb
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: ${TZ:-UTC}
+      # No --enable-automation (that is what sets navigator.webdriver true);
+      # --remote-allow-origins=* because Chromium 111+ rejects a CDP websocket
+      # from a non-localhost origin otherwise.
+      CHROME_CLI: >-
+        --remote-debugging-port=9222
+        --remote-allow-origins=*
+        --force-color-profile=srgb
+    volumes:
+      - chrome-profile:/config             # the signed-in profile survives restarts
+    networks: [edge]
+    # No `ports:` on purpose — the browser publishes NOTHING. The runner reaches
+    # its CDP over the internal network (below); a person only ever sees it
+    # through the ghostclick Console canvas. Nothing to expose, nothing to lock.
+    # CDP ready = the runner may attach. Depends on it below.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9222/json/version >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+      start_period: 20s
+
+  # Chromium binds the debug port to its own 127.0.0.1 AND refuses any HTTP
+  # request whose Host header is not localhost/an IP. A plain TCP forward
+  # (socat) leaves that Host header intact, so a runner attaching as
+  # `chrome:9223` gets a 500 from Chrome. This nginx shares Chrome's network
+  # namespace, listens on 9223, and rewrites Host to 127.0.0.1:9222 (which
+  # Chrome accepts) while proxying the CDP WebSocket. Never published to the
+  # host; the runner reaches it as chrome:9223 over `edge`.
+  cdp-proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    network_mode: "service:chrome"
+    depends_on: [chrome]
+    volumes:
+      - ./browser/cdp-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+  # Attach the runner to that browser instead of launching its own headless one.
+  runner:
+    environment:
+      GC_CDP_URL: http://chrome:9223
+    depends_on:
+      chrome:
+        condition: service_healthy
+
+volumes:
+  chrome-profile:

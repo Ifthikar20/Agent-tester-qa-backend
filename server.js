@@ -11,8 +11,9 @@ import { normalizeUrl } from './origins.js';
 import { iconFor } from './icons.js';
 import { chooseHome } from './home.js';
 import { bearer, verify } from './auth.js';
-import { AUTH_ON, DEMO, PUBLIC_KEYS, KEY_ERROR, WEB_ORIGIN, EXTENSION_ORIGINS, EXTENSION_ERROR, TURNSTILE, csp } from './mode.js';
+import { AUTH_ON, DEMO, PUBLIC_KEYS, KEY_ERROR, WEB_ORIGIN, EXTENSION_ORIGINS, EXTENSION_ERROR, TURNSTILE, TURNSTILE_HOST, csp } from './mode.js';
 import * as turnstile from './turnstile.js';
+import { DEVICES, DEFAULT_DEVICE, deviceOf, deviceList } from './devices.js';
 import * as sessions from './sessions.js';
 import * as tickets from './tickets.js';
 import * as tenancy from './tenancy.js';
@@ -172,6 +173,13 @@ let running = false;
 let cdp = null;
 let cursor = null;
 let nav = null;
+// The CURRENT device's CSS viewport (devices.js). The screencast, the cursor
+// and the console canvas all read these dimensions, so changing the device is
+// the one place they change together. Starts at the desktop default (= VIEW),
+// so with nothing selected the console behaves exactly as before.
+let view = { ...VIEW };
+let currentDevice = DEFAULT_DEVICE;
+let originalUA = null;   // the browser's own user-agent, captured per session, to restore on 'desktop'
 // Set once the browser is actually up. The port opens ~100 lines before
 // chromium.launch, so "the server answers" and "the app works" are two
 // different facts. /healthz reports this one, and a deploy waits on it.
@@ -327,6 +335,64 @@ if (DEMO) {
     const signedIn = new RegExp(`(?:^|;\\s*)${DEMO_COOKIE}=`).test(req.headers.cookie || '');
     res.setHeader('Content-Security-Policy', FIXTURE_CSP);
     res.type('html').send(render(signedIn));
+  });
+
+  // A sign-up behind Cloudflare Turnstile — the shape treasury.sh has, made
+  // runnable. On Cloudflare's TEST keys the widget still renders from
+  // challenges.cloudflare.com and the token is still verified against Cloudflare
+  // for real; only the verdict is fixed and IP-independent, so /turnstile-demo/
+  // reaches "Account created" every time — even from a datacenter box, which is
+  // exactly what a production key does NOT (turnstile.js explains why on a real
+  // one). This is the reference for what a treasury.sh STAGING env should look
+  // like: point its sitekey+secret at the test pair and its Turnstile stops
+  // being a wall. Defaults are the always-pass pair; set GC_TURNSTILE_SITE_KEY
+  // (e.g. 2x00000000000000000000AB) and GC_TURNSTILE_SECRET
+  // (2x0000000000000000000000000000000AA) to watch the same page reject.
+  const tsKey = (process.env.GC_TURNSTILE_SITE_KEY || '').trim() || '1x00000000000000000000AA';
+  const tsSecret = (process.env.GC_TURNSTILE_SECRET || '').trim() || turnstile.TEST_SECRETS.passes;
+  // The one fixture that loads a third-party widget: Cloudflare's script and
+  // iframe, admitted from the same host the production widget uses (mode.js).
+  const TURNSTILE_FIXTURE_CSP = csp({ turnstile: true });
+  const tsStyle = '<style>body{font:16px/1.5 system-ui,sans-serif;max-width:22rem;margin:3rem auto;'
+    + 'padding:0 1rem}h1{font-size:1.4rem}input,button{font:inherit;width:100%;padding:.6rem;'
+    + 'margin:.4rem 0;box-sizing:border-box}button{cursor:pointer}</style>';
+  app.get('/turnstile-demo/', (_req, res) => {
+    res.setHeader('Content-Security-Policy', TURNSTILE_FIXTURE_CSP);
+    res.type('html').send(
+      '<!doctype html><meta charset="utf-8"><title>Create your account — Turnstile demo</title>'
+      + '<meta name="viewport" content="width=device-width, initial-scale=1">' + tsStyle
+      + '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>'
+      + '<h1>Create your account</h1>'
+      + '<form id="signup" method="POST" action="/turnstile-demo/verify">'
+      + '<input id="email" name="email" type="email" value="qa@example.com" aria-label="Email">'
+      + `<div class="cf-turnstile" data-sitekey="${tsKey}"></div>`
+      + '<button id="get-started" type="submit">Get started</button></form>');
+  });
+  const tsResult = (ok, detail) =>
+    '<!doctype html><meta charset="utf-8"><title>'
+    + (ok ? 'Account created' : 'Verification failed') + ' — Turnstile demo</title>' + tsStyle
+    + (ok
+      ? '<h1 id="created">Account created</h1>'
+        + '<p>Turnstile verified the token — this is the step a production key stops.</p>'
+      : `<h1 id="failed">Verification failed</h1><p id="why">${detail}</p>`)
+    + '<p><a href="/turnstile-demo/">Back</a></p>';
+  // Verify the token the way the site's own backend would: POST it to
+  // Cloudflare with the secret. Not under /api, so it needs no runner token —
+  // it is the driven site's endpoint, not ghostclick's control channel.
+  app.post('/turnstile-demo/verify', express.urlencoded({ extended: false, limit: '16kb' }), async (req, res) => {
+    res.setHeader('Content-Security-Policy', FIXTURE_CSP);
+    const token = String(req.body?.['cf-turnstile-response'] || '');
+    if (!token) return res.status(400).type('html').send(
+      tsResult(false, 'The form carried no Turnstile token — the widget issued none yet.'));
+    const verify = await fetch(`${TURNSTILE_HOST}/turnstile/v0/siteverify`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ secret: tsSecret, response: token }),
+    }).then((r) => r.json()).catch((e) => ({ success: false, 'error-codes': [String(e?.message || e)] }));
+    res.type('html').send(verify.success
+      ? tsResult(true)
+      : tsResult(false, 'Cloudflare rejected the token: '
+          + ((verify['error-codes'] || []).join(', ') || 'unknown')));
   });
 }
 // JSON bodies are parsed under /api only, and only past the limits and the
@@ -1396,6 +1462,20 @@ const browser = CDP_URL
       args: ['--disable-dev-shm-usage', '--force-color-profile=srgb'],
     });
 
+// SCALE SEAM (pool.js). This `browser`, and the `page`/`context`/`driver`
+// singletons below, are why one organisation drives at a time. The headless
+// path above can hold many isolated contexts in this one browser; pool.js is a
+// BrowserPool that leases one per org (own cookies, own page), with a capacity
+// and idle eviction, so N drive at once. Adopting it means: on newSession() do
+// `pool.acquire(org)` instead of reusing contexts()[0]; give each lease its own
+// Page.startScreencast routed to that org's sockets (the per-driver broadcast
+// below already knows the org); drop the single-driver `runner_busy` lock in
+// favour of PoolFull when the box is at capacity. GC_POOL_MAX sizes it; the
+// attach path (a browser IS one identity) stays capacity 1 and scales by
+// replicas instead (docker/docker-compose.pool.yml). scripts/check-pool.js
+// proves the pool on a real browser. Left as a seam, not switched on here,
+// because the screencast rewrite is a change to make deliberately, not blind.
+
 /**
  * Broadcast is per organisation (docs/AUTH.md §9.6 [websocket-3]).
  *
@@ -1628,14 +1708,22 @@ async function newSession() {
     }
   });
 
+  // A fresh page is the default device again; capture its real user-agent now,
+  // so switching back to 'desktop' can restore it rather than leaving a phone's
+  // UA on a desktop viewport (applyDevice / devices.js).
+  view = { ...VIEW };
+  currentDevice = DEFAULT_DEVICE;
+  originalUA = await page.evaluate(() => navigator.userAgent).catch(() => null);
+
   await cdp.send('Page.startScreencast', {
     format: 'jpeg',
     quality: 62,
     // Must match the viewport. Set these smaller and Chrome scales the frame,
     // the canvas stretches it back, and every coordinate silently picks up a
-    // proportional offset that looks exactly like a broken cursor.
-    maxWidth: VIEW.width,
-    maxHeight: VIEW.height,
+    // proportional offset that looks exactly like a broken cursor. `view` is
+    // the current device's size (devices.js), so this follows a device change.
+    maxWidth: view.width,
+    maxHeight: view.height,
     everyNthFrame: 1,
   });
 
@@ -1907,12 +1995,49 @@ function refusal(err) {
 const MAX_SOCKETS_PER_SUB = 3;
 
 /**
+ * Drive the page as a different device (devices.js) — LIVE, over CDP, so the
+ * open page and the login survive.
+ *
+ * Sets the metrics (size + pixel ratio + mobile, which turns clicks into taps),
+ * the user-agent (so a site serves its phone page), and touch — then restarts
+ * the screencast at the new size and tells the driving org's viewers, whose
+ * canvas reshapes to match. `view` is the single source of truth the cursor and
+ * the canvas both read, so changing it here is the whole of a device change.
+ */
+async function applyDevice(id) {
+  if (!cdp) return;
+  const dev = deviceOf(id);
+  currentDevice = DEVICES[id] ? id : DEFAULT_DEVICE;
+  view = { width: dev.width, height: dev.height };
+  const ua = dev.ua ?? originalUA;
+  try {
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: dev.width, height: dev.height, deviceScaleFactor: dev.dpr ?? 1, mobile: !!dev.mobile,
+    });
+    if (ua) await cdp.send('Emulation.setUserAgentOverride', { userAgent: ua });
+    await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: !!dev.mobile, maxTouchPoints: dev.mobile ? 5 : 1 }).catch(() => {});
+    // The screencast must be restarted, not just resized — maxWidth/maxHeight are
+    // set at start. Same reason it matches the viewport at boot: a mismatch drifts
+    // every cursor coordinate.
+    await cdp.send('Page.stopScreencast').catch(() => {});
+    await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 62, maxWidth: dev.width, maxHeight: dev.height, everyNthFrame: 1 });
+  } catch (err) {
+    emit({ t: 'log', level: 'warn', msg: `could not switch device: ${err.message}` });
+    return;
+  }
+  emit({ t: 'device', id: currentDevice, label: dev.label, width: dev.width, height: dev.height, mobile: !!dev.mobile });
+  emit({ t: 'log', level: 'info', msg: `driving as ${dev.label} — ${dev.width}×${dev.height}${dev.mobile ? ' · touch' : ''}` });
+}
+
+/**
  * The switch each message needs (switches.js): the socket's half of the table
- * the HTTP routes have. A pointer moving over the page counts as driving it.
+ * the HTTP routes have. A pointer moving over the page counts as driving it, and
+ * so does reshaping it to a device.
  */
 const SWITCHED = {
   command: 'runner.runs',
   open: 'runner.driving',
+  device: 'runner.driving',
   'origin.add': 'runner.origins',
   'origin.remove': 'runner.origins',
   'record.start': 'runner.recording',
@@ -2049,6 +2174,15 @@ wss.on('connection', (ws) => {
         emitTo(org, { t: 'log', level: 'error', msg: `run failed: ${err.message}` });
         emitTo(org, { t: 'run.end', ok: false });
       });
+      return;
+    }
+
+    // Reshape the page to a device (devices.js) — live. The lock first, exactly
+    // as `open`: only the organisation that may have the browser gets to change
+    // the device on it. For the org already driving, `take` is a no-op.
+    if (m.t === 'device') {
+      try { await take(org); } catch (err) { return refuse('device', err); }
+      await applyDevice(String(m.id ?? ''));
       return;
     }
 
@@ -2229,6 +2363,11 @@ wss.on('connection', (ws) => {
     // What the operator has switched off (switches.js), so the console can
     // grey out Record and Run before anyone presses them.
     switches: switches.runner(),
+    // The device the page is being driven as, and the list to pick from
+    // (devices.js) — the console draws its dropdown from the server's own
+    // registry, so the two cannot drift.
+    device: { id: currentDevice, width: view.width, height: view.height, mobile: !!DEVICES[currentDevice]?.mobile },
+    devices: deviceList(),
   }));
   if (mine) publishTargets();
 });

@@ -1,0 +1,63 @@
+# Horizontal scale for the HEADLESS runner, applied as an override on prod:
+#
+#   docker compose -f docker/docker-compose.prod.yml \
+#        -f docker/docker-compose.pool.yml --env-file .env.prod up -d
+#
+# There are two independent multipliers for how many organisations can drive at
+# once, and total concurrency is their product:
+#
+#   replicas (N)  — this file. Each runner replica launches its OWN chromium
+#                   (headless: no GC_CDP_URL), so N replicas already give N
+#                   concurrent sessions with today's single-browser code, one
+#                   per replica. Caddy load-balances across them by service DNS.
+#
+#   contexts (M)  — pool.js (GC_POOL_MAX). Once the runner leases per-org
+#                   contexts from the pool instead of holding one shared page
+#                   (the seam marked in server.js near the `browser` singleton
+#                   and newSession), each replica carries M isolated sessions.
+#                   scripts/check-pool.js proves that primitive on a real
+#                   browser today; GC_POOL_MAX is read by the runner once the
+#                   seam is wired.
+#
+# So: N replicas × M contexts. This override turns on N; pool.js is M.
+#
+# NOTE — this is the headless axis. The human-login (attach) stack is a
+# different shape (a browser IS one signed-in identity, so it is one replica per
+# person, not a pool); do not combine this with docker-compose.attach.yml.
+
+services:
+  runner:
+    # Headless on purpose: prod sets no GC_CDP_URL, so each replica launches its
+    # own browser rather than all of them fighting over one attached Chrome.
+    environment:
+      # Contexts per replica once pool.js is adopted (see server.js seam). Ignored
+      # by the current single-browser code, so setting it now is harmless.
+      GC_POOL_MAX: ${GC_POOL_MAX:-4}
+    # Compose v2 honours this; or pass `--scale runner=N` on the CLI instead.
+    # No container_name / no published host port in prod's runner, which is what
+    # lets it scale — replicas are ghostclick-runner-1..N behind Caddy on `edge`.
+    deploy:
+      replicas: ${GC_RUNNER_REPLICAS:-2}
+      # A crashed replica should come back; the others keep serving meanwhile.
+      restart_policy:
+        condition: unless-stopped
+
+# Two things the edge and the state need for replicas to be correct — left as
+# notes rather than silent magic, because both are deployment decisions:
+#
+#   1. Sticky routing. A driving session holds a live browser on ONE replica, so
+#      Caddy must send that session back to the same one. In the Caddyfile:
+#
+#          reverse_proxy runner:3000 {
+#              lb_policy cookie gc_replica
+#          }
+#
+#      Round-robin without this would scatter a session's requests across
+#      replicas that do not share its live page.
+#
+#   2. Shared org state. Suites, origins and run history are files under
+#      .ghostclick/<org>/ (the `ghostclick-state` volume). Replicas already
+#      mount the same named volume, so they READ the same state; with sticky
+#      routing each org's WRITES go through one replica, so the files have a
+#      single writer per org. Beyond a handful of replicas, move that state to
+#      Postgres/Redis (already in the stack) so writers cannot race at all.

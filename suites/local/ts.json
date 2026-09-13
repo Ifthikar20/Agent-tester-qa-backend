@@ -1,0 +1,21 @@
+{
+  "id": "ts",
+  "name": "ts",
+  "description": "",
+  "baseUrl": "https://treasury.sh/",
+  "pages": [
+    {
+      "id": "pg_gn7m6b3ov",
+      "name": "main",
+      "path": "/",
+      "url": "https://treasury.sh/",
+      "expect": [],
+      "targets": [],
+      "linked": [],
+      "scannedAt": null
+    }
+  ],
+  "cases": [],
+  "createdAt": "2026-09-12T05:39:41.561Z",
+  "updatedAt": "2026-09-12T05:39:48.208Z"
+}

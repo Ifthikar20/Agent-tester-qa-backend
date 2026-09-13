@@ -1,0 +1,32 @@
+{
+  "id": "ps",
+  "name": "ps",
+  "description": "",
+  "baseUrl": "https://18.209.248.84/auth",
+  "pages": [
+    {
+      "id": "pg_eb9t2i3qu",
+      "name": "main",
+      "path": "/",
+      "url": "https://18.209.248.84/",
+      "expect": [],
+      "targets": [],
+      "linked": [],
+      "scannedAt": null
+    }
+  ],
+  "cases": [
+    {
+      "id": "cs_y3myultk3",
+      "name": "Recorded flow",
+      "pageId": null,
+      "source": "recorded",
+      "flow": "%% suite \"Recorded flow\"\ntestcase TD\n  n0((\"http://18.209.248.84/\"))\n  n1[\"/#why\"]\n  n2[\"/auth\"]\n\n  n0 -->|scroll to 'Source: Ebbinghaus · Murre & Dros, 2015' : link; click 'Why PlayStudy' : link| n1\n  n1 -->|click 'Log in' : link| n2\n  n2 --> n2\n    check at top\n    click 'Login' : button\n    click 'Login' : button\n    click 'Login' : button\n\n%% entry [\"link:Playstudy Beta\",\"button:Features\",\"link:How it works\",\"link:Why PlayStudy\",\"link:Manifesto\",\"link:Log in\",\"link:Get started\",\"link:Start free\",\"link:See how it works\",\"link:Source: Ebbinghaus · Murre & Dros, 2015\",\"link:Source: Roediger & Karpicke, 2006\",\"link:Source: Sailer & Homner, 2020\",\"link:Get started free\",\"link:Privacy\",\"link:Terms\",\"link:Contact\"]\n%% at 1 299,298 215x15 in 1180x760\n%% at 2 616,50 116x50 in 1180x760\n%% at 4 792,56 61x50 in 1180x760\n%% at 7 188,611 336x39 in 1180x760\n%% at 8 392,529 336x39 in 1180x760\n%% at 9 392,529 336x39 in 1180x760\n%% via 2 200 http://18.209.248.84/",
+      "steps": 10,
+      "createdAt": "2026-09-12T05:41:06.723Z",
+      "updatedAt": "2026-09-12T05:41:06.723Z"
+    }
+  ],
+  "createdAt": "2026-09-12T05:37:19.880Z",
+  "updatedAt": "2026-09-12T05:41:06.723Z"
+}

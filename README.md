@@ -355,6 +355,20 @@ rejects the dummy token a test key hands out. Production keys come from the
 Cloudflare dashboard's Turnstile page, one widget per environment.
 `npm run check:turnstile` drives a real widget on both test keys.
 
+To see the whole flow end to end, demo mode serves a sign-up behind Turnstile at
+`/turnstile-demo/` — the shape a real one has, made runnable. Drive it and the
+widget renders from `challenges.cloudflare.com`, its token is POSTed to
+`/turnstile-demo/verify`, and the server checks it against Cloudflare's
+`siteverify` exactly as a site's own backend would — then lands on "Account
+created". It runs on the always-pass pair by default, so it reaches that page
+every time, from anywhere, no proxy — which is the point of test keys: the
+verdict no longer depends on the browser or the IP. Set `GC_TURNSTILE_SITE_KEY`
+and `GC_TURNSTILE_SECRET` to the fail pair above and the same page shows the
+"Verification failed" a production key gives you. This is the reference for what
+a treasury.sh **staging** environment should be: its own sitekey and secret
+pointed at the test pair, and its Turnstile stops being a wall for the suite —
+while production keeps its real keys and its real protection.
+
 ### A saved sign-in, for a login that can't be recorded
 
 Some logins cannot be recorded and replayed at all. "Continue with Google"
