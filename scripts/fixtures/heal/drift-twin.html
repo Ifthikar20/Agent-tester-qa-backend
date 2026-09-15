@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Harbour — a new Docs link came first</title>
+<!--
+  Position drift that IS the bug a name hides: the recording says the first
+  Docs link (nth1/link:Docs), pressed at 320,200. A redesign put a "Docs" link
+  to the changelog earlier in the page, 200px to the right, so nth1 now names
+  that one — the name matched, one element came back, and it is the wrong one.
+  The Docs link the person pressed is still under the recorded point, second in
+  DOM order. A third Docs link (the archive), 230px below the point, is nearer
+  than nothing but further than the wrong one: never a better answer.
+
+  Each link records where it went, so a check can say which was pressed.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d}
+  a{position:absolute;display:block;width:34px;height:22px;line-height:22px;color:#2f5bea}
+</style>
+<main>
+  <h1 style="position:absolute;left:300px;top:80px;margin:0">Harbour</h1>
+  <a id="changelog" href="#/changelog" style="left:503px;top:189px">Docs</a>
+  <a id="docs" href="#/docs" style="left:303px;top:189px">Docs</a>
+  <a id="archive" href="#/archive" style="left:303px;top:419px">Docs</a>
+</main>
+<script>
+  for (const a of document.querySelectorAll('a')) a.addEventListener('click', () => { window.flag = a.id; });
+</script>

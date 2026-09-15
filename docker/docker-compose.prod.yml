@@ -115,6 +115,21 @@ services:
       GC_PACE_MS: ${GC_PACE_MS:-250}
       GC_TIMEOUT_MS: ${GC_TIMEOUT_MS:-8000}
       GC_SETTLE_MS: ${GC_SETTLE_MS:-250}
+      # Automatic fixes (README: "Automatic fixes (GC_HEAL)"): safe lets a run
+      # past a cookie banner, a late element, an unopened list or a label that
+      # became a placeholder — never a rename; ai adds guarded Claude fixes for
+      # organisations that opt in. Unset runs exactly as before; a word the
+      # runner does not know stops it at boot.
+      GC_HEAL: ${GC_HEAL:-}
+      GC_HEAL_AI_MAX_CALLS: ${GC_HEAL_AI_MAX_CALLS:-}
+      GC_HEAL_AI_MAX_CALLS_PER_DAY: ${GC_HEAL_AI_MAX_CALLS_PER_DAY:-}
+      # The key for GC_HEAL=ai. The runner calls api.anthropic.com over HTTPS
+      # from `edge`, which is not `internal` — it is the same route out the
+      # browser uses to reach the sites under test — so nothing here blocks
+      # that egress; a host firewall or proxy must allow it. The runner takes
+      # it out of its own environment at boot, so the browser never inherits
+      # it, and never prints it.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # How long an organisation keeps the one browser after its run has
       # ended and its viewers have gone quiet (docs/AUTH.md §10); a minute
       # unless said otherwise.

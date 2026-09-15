@@ -31,6 +31,9 @@ export const SWITCHES = {
   'runner.onboarding':   'creating suites, pages and page scans',
   'runner.origins':      'allowing or removing origins',
   'runner.driving':      'opening pages and driving them from the console',
+  // Off forces every run to GC_HEAL=off, whatever the deployment and the
+  // organisation chose (heal.js, fixes.js), and refuses accepting a fix.
+  'runner.heal':         'fixing broken steps automatically',
   'control.signup':      'self-service sign-up',
   'control.invitations': 'issuing and accepting invitations',
   'control.google':      'signing in with Google',

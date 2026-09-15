@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Harbour — an app shell</title>
+<!--
+  An app shell: `#app { position: fixed; inset: 0 }`, as many single-page apps
+  draw themselves. Every element on the page has a fixed ancestor, and none of
+  them is in a header. The only Docs link is 724px from its recorded point —
+  far and unexplained, exactly like drift-far.html, and it must be treated so.
+-->
+<style>*{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d} a{color:#2f5bea}</style>
+<div id="app" style="position:fixed;inset:0;overflow:auto">
+  <main>
+    <h1 style="position:absolute;left:300px;top:80px;margin:0">Harbour</h1>
+    <a id="docs" href="#docs" style="position:absolute;left:900px;top:600px">Docs</a>
+  </main>
+</div>

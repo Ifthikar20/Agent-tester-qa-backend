@@ -78,12 +78,32 @@ const NTH = /^nth(\d+)$/;
  */
 const rxEscape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+/**
+ * Icon fonts are not words.
+ *
+ * Font Awesome and its relatives draw a glyph with CSS generated content, and
+ * the browser counts that character as part of the accessible name. So
+ * `<a><i class="fa fa-home"></i> Home</a>` is named " Home", and a menu
+ * link with a dropdown arrow is "company ". A person reads "Home" and
+ * "company", the recorder writes those, and an exact lookup then finds nothing —
+ * nor does the "did you mean" hint, because the name no longer starts the same.
+ * Both happened on a real site. The glyphs live in Unicode's Private Use Area,
+ * which no language uses for text, so ignoring them cannot join two different
+ * names into one.
+ */
+const ICONS = /[-]/g;
+const ICON_CLASS = '\\uE000-\\uF8FF';
+export const withoutIcons = (s) => String(s ?? '').replace(ICONS, ' ').replace(/\s+/g, ' ').trim();
+
 export function nameMatcher(name) {
-  const pattern = rxEscape(String(name).trim()).replace(/(?:\\?\s)+/g, '\\s+');
+  // A name that is nothing BUT an icon keeps its glyph: stripped, it would be
+  // empty, and an empty name would match every icon-only control on the page.
+  const words = withoutIcons(name) || String(name).trim();
+  const pattern = rxEscape(words).replace(/(?:\\?\s)+/g, `[\\s${ICON_CLASS}]+`);
   // Surrounding whitespace is not part of a name. Playwright normalises most
   // of it, but a name that survives with a stray leading space should not turn
-  // a working target into a mystery.
-  return new RegExp(`^\\s*${pattern}\\s*$`, 'i');
+  // a working target into a mystery. Nor should an icon before or after it.
+  return new RegExp(`^[\\s${ICON_CLASS}]*${pattern}[\\s${ICON_CLASS}]*$`, 'i');
 }
 
 const STRATEGIES = {
@@ -210,9 +230,15 @@ export async function discover(page, limit = 80) {
     }
     const m = body.match(/^([a-z]+)\s+"((?:[^"\\]|\\.)*)"/);
     if (!m) continue;
-    const [, role, name] = m;
+    const [, role, quoted] = m;
     if (!INTERACTIVE.has(role)) continue;
-    const target = `${role}:${name.replace(/\\(.)/g, '$1')}`;
+    // Listed the way a person reads it: without icon-font glyphs (see
+    // withoutIcons), which print as nothing, or as a box, in the target panel
+    // and the "did you mean" hint. nameMatcher ignores them too, so the
+    // cleaned name still resolves to the same element.
+    const raw = quoted.replace(/\\(.)/g, '$1');
+    const name = withoutIcons(raw) || raw;
+    const target = `${role}:${name}`;
     if (!seen.has(target)) seen.set(target, { target, role, name });
     if (seen.size >= limit) break;
   }

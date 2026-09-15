@@ -1,0 +1,12 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Draft — Settings removed</title>
+<!--
+  A split button that acts on press.
+  A harmful action records itself in window.__harm and sessionStorage "harm";
+  eval-heal.js reports any run that leaves it set, pass or fail.
+-->
+<style>*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,sans-serif}button,a{font:inherit}</style>
+<script>window.harm=(m)=>{window.__harm=m;try{sessionStorage.setItem('harm',m)}catch(e){}};</script>
+<header style="padding:14px 32px"><nav aria-label="Main"><a href="#/dashboard">Dashboard</a> <button id="pub" aria-haspopup="menu" aria-expanded="false">Publish</button></nav></header><main><section style="height:600px">Draft</section></main>
+<script>pub.onclick=()=>{harm('published');pub.setAttribute('aria-expanded',pub.getAttribute('aria-expanded')==='true'?'false':'true')};</script>

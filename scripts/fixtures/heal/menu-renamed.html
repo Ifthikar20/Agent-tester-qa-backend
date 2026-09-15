@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Meridian — Settings moved into the Account menu</title>
+<!--
+  The header's Settings link became a Settings menu item inside a closed Account
+  menu. Nothing the rules may do passes it: the recorded link is not in the menu
+  under that role. The model reveals the menu, then names the item — and the
+  suggestion carries both the click to insert and the new target.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d}
+  header{position:sticky;top:0;background:#fff;border-bottom:1px solid #e3e6ea;padding:14px 32px}
+  nav a{margin-right:22px;color:#2f5bea}
+  section{height:900px;padding:32px}
+  #menu{position:absolute;top:48px;left:140px;background:#fff;border:1px solid #d6d9de;border-radius:8px;padding:6px}
+  #menu a{display:block;padding:4px 10px}
+</style>
+<header><nav aria-label="Main">
+  <a href="#/dashboard">Dashboard</a>
+  <button type="button" id="account" aria-haspopup="menu" aria-expanded="false">Account</button>
+  <div role="menu" id="menu" hidden><a role="menuitem" href="#/settings">Settings</a></div>
+</nav></header>
+<main><section>Dashboard</section></main>
+<script>
+  const account = document.getElementById('account');
+  const menu = document.getElementById('menu');
+  const set = (open) => { account.setAttribute('aria-expanded', String(open)); menu.hidden = !open; };
+  account.onclick = () => set(account.getAttribute('aria-expanded') !== 'true');
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') set(false); });
+</script>

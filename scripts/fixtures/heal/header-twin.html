@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Harbour — header Docs broken, footer Docs fine</title>
+<!--
+  A broken app: the header's Docs link became "Documentation" and points at the
+  changelog, while the footer keeps a working "Docs". Dropping the recorded
+  navigation scope would press the footer twin and pass; safe fixes never do.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d}
+  header{position:sticky;top:0;background:#fff;border-bottom:1px solid #e3e6ea;padding:14px 32px}
+  nav a{margin-right:22px;color:#2f5bea}
+  section{height:900px;padding:32px}
+  footer{padding:32px;background:#f4f6f8}
+</style>
+<header><nav aria-label="Main"><a href="#">Harbour</a><a href="#pricing">Pricing</a><a href="#changelog">Documentation</a></nav></header>
+<main><section id="top">Harbour</section><section id="changelog">Changelog</section><section id="docs">Docs</section></main>
+<footer><a href="#docs">Docs</a></footer>

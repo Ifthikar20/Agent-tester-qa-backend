@@ -64,9 +64,9 @@ class ParseTests(SimpleTestCase):
 
 
 class CatalogueTests(SimpleTestCase):
-    def test_the_nine_keys(self):
+    def test_the_ten_keys(self):
         self.assertEqual(set(switches.KEYS), {
-            'runner.recording', 'runner.runs', 'runner.onboarding', 'runner.origins', 'runner.driving',
+            'runner.recording', 'runner.runs', 'runner.onboarding', 'runner.origins', 'runner.driving', 'runner.heal',
             'control.signup', 'control.invitations', 'control.google', 'control.passkeys',
         })
 

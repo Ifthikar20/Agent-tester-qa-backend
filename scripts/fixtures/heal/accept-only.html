@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sign in — a banner that only takes yes</title>
+<!--
+  A cookie layer whose only ways out agree to something. It reads as consent,
+  but no button on it is safe to press, so the step must stop — never accept.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d}
+  h1{position:absolute;left:310px;top:110px;margin:0;font-size:22px}
+  label{position:absolute;left:310px;font-size:13px;color:#5b6880}
+  input{display:block;width:560px;height:40px;margin-top:4px;padding:0 12px;border:1px solid #d6d9de;border-radius:8px;font:inherit}
+  .em{top:176px} .pw{top:256px}
+  #go{position:absolute;left:310px;top:352px;padding:9px 18px;font:inherit;border:0;border-radius:8px;background:#2f5bea;color:#fff}
+  .consent{position:fixed;inset:0;z-index:50;background:rgba(15,20,30,.45);display:flex;align-items:flex-end;justify-content:center}
+  .card{background:#fff;max-width:620px;margin:0 20px 32px;padding:20px 24px;border-radius:12px}
+</style>
+<h1>Sign in</h1>
+<label class="em">Email <input id="em" type="email" autocomplete="off"></label>
+<label class="pw">Password <input id="pw" type="password" autocomplete="off"></label>
+<button type="button" id="go">Sign in</button>
+<div class="consent" id="consent">
+  <div class="card" role="dialog" aria-labelledby="ct">
+    <h2 id="ct">Cookies</h2>
+    <p>This site uses cookies.</p>
+    <button type="button" id="accept">Accept all</button>
+    <button type="button" id="ok">OK</button>
+  </div>
+</div>
+<script>
+  const answer = () => { window.choice = 'accept'; document.getElementById('consent').remove(); };
+  document.getElementById('accept').onclick = answer;
+  document.getElementById('ok').onclick = answer;
+  document.getElementById('go').onclick = () => {
+    if (document.getElementById('em').value && document.getElementById('pw').value) location.hash = '#/dashboard';
+  };
+</script>

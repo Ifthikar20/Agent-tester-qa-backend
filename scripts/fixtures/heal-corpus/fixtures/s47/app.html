@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Harbour — Pricing in a pinned header</title>
+<!--
+  Position drift that is only the layout. The recording pressed Pricing while
+  the page was scrolled, at 322,527; the link lives in a position:fixed header,
+  so it is drawn at the top of the viewport now. It is the only Pricing link.
+  A rule says "the layout shifted" and the run passes without asking a model.
+  Nothing on this page is harmful.
+-->
+<style>*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,sans-serif}button,a{font:inherit}
+  header{position:fixed;top:0;left:0;right:0;height:56px;background:#fff;border-bottom:1px solid #e3e6ea;z-index:10}
+  header a{position:absolute;top:16px;color:#2f5bea}
+  section{height:1600px;padding:96px 32px}</style>
+<script>window.harm=(m)=>{window.__harm=m;try{sessionStorage.setItem('harm',m)}catch(e){}};</script>
+<header><nav aria-label="Main"><a href="#/" style="left:32px">Harbour</a><a href="#/pricing" style="left:300px">Pricing</a></nav></header>
+<main><section>Plans for every harbour.</section><section>Pricing</section></main>

@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { stateDir } from './org.js';
 
 const CAP = 500;                       // enough for a fortnight of honest use
+const FIXES_KEPT = 20;                 // a run's fixes, as the history keeps them
 const DAY_MS = 86_400_000;
 const startOfDay = (t) => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
 
@@ -45,6 +46,7 @@ export function forOrg(org) {
     /** @param {{suite:string, suiteId?:string, caseId?:string, caseName?:string, url:string, ms:number, results:Array}} run */
     record({ suite, suiteId, caseId, caseName, url, ms, results }) {
       const failed = results.filter((r) => !r.ok);
+      const fixes = results.flatMap((r) => r.fixes ?? []);
       const entry = {
         at: Date.now(),
         suite: suite || 'Untitled',
@@ -60,6 +62,11 @@ export function forOrg(org) {
         passed: results.length - failed.length,
         failed: failed.length,
         ok: failed.length === 0,
+        // What the run fixed on its way (heal.js): a pass that needed three
+        // fixes is not the same news as a clean one. The count is exact; the
+        // list is the first twenty, with a model's reason cut short.
+        fixed: fixes.length,
+        fixes: fixes.slice(0, FIXES_KEPT).map((f) => ({ ...f, reason: f.reason == null ? null : String(f.reason).slice(0, 200) })),
         // Just the first failure. A run stops at the first one anyway.
         error: failed[0]?.error?.split('\n')[0]?.slice(0, 240) ?? null,
         step: failed[0] ? failed[0].i : null,
@@ -195,7 +202,9 @@ export function forOrg(org) {
           medianMs: durations.length ? durations[Math.floor(durations.length / 2)] : null,
           suites: bySuite.size,
         },
-        latest: runs.slice(-12).reverse(),
+        // A run recorded before fixes existed made none; copies, so the
+        // default is never written back into the history.
+        latest: runs.slice(-12).reverse().map((r) => ({ fixed: 0, fixes: [], ...r })),
       };
     },
   };

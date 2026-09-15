@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Checkout — a Continue in the error</title>
+<!--
+  A confirm is not a guard. The page's Continue is gone; the only Continue is
+  inside a "Payment failed" alertdialog that is NOT fixed (so no pinned-header
+  rule applies), far from where Continue was recorded. A model that answers
+  "yes, that is the element you recorded" must not turn today's warning into
+  "AI confirmed", nor offer the dialog's button as the step's recorded place.
+-->
+<style>*{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d} button{font:inherit}</style>
+<main><h1>Checkout</h1></main>
+<div role="alertdialog" aria-labelledby="pf" style="position:absolute;left:760px;top:480px;background:#fff;padding:20px;width:300px;border:1px solid #c00">
+  <h2 id="pf">Payment failed</h2><p>Your card was declined.</p><button id="dc">Continue</button>
+</div>
+<script>dc.onclick = () => { window.flag = 'continued past Payment failed'; location.hash = '#/next'; };</script>

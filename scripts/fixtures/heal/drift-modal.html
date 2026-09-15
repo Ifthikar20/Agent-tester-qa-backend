@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Checkout — Payment failed</title>
+<!--
+  A modal is fixed, and it is not a pinned header. The page's own Continue is
+  gone; the only Continue left is inside a "Payment failed" alertdialog on a
+  fixed full-screen backdrop, 634px from where Continue was recorded.
+
+  Today the run presses it and passes, with the drift warning — the only sign
+  the checkout broke. Read as "(a pinned header)", the warning went quiet and
+  the suggestion offered to record the dialog's button as the step's place.
+-->
+<style>*{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d} button{font:inherit}</style>
+<main><h1>Checkout</h1><p>Order summary</p></main>
+<div style="position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:50">
+  <div role="alertdialog" aria-modal="true" aria-labelledby="pf" style="position:absolute;left:760px;top:480px;background:#fff;padding:20px;width:300px">
+    <h2 id="pf">Payment failed</h2><p>Your card was declined.</p><button id="dc">Continue</button>
+  </div>
+</div>
+<script>dc.onclick = () => { window.flag = 'continued past Payment failed'; location.hash = '#/next'; };</script>

@@ -27,6 +27,9 @@ import { discover, links } from './targets.js';
 import { targetRefresher, watchDom } from './domwatch.js';
 import { parse } from './parse.js';
 import { parseFlow, flatten, toFlow } from './flow.js';
+import { readHealEnv } from './heal.js';
+import { createResolver, findApiKey } from './resolver.js';
+import { NoSuchFix, SAVED_KINDS, STATUSES as FIX_STATUSES, StaleFix, occurrenceOf, changesCase } from './fixes.js';
 import { LANGUAGE_VERSION } from './vocabulary.js';
 import { toMermaid } from './diagram.js';
 import { Recorder } from './recorder.js';
@@ -93,14 +96,37 @@ if (EXTENSION_ERROR) {
   console.error(`\n  ${EXTENSION_ERROR}\n`);
   process.exit(1);
 }
-if (SWITCH_ERROR || LIMIT_ERROR || LOG_ERROR) {
+/**
+ * Automatic fixes (heal.js): GC_HEAL and its call budget, read strictly — a
+ * mode nobody recognises is refused below with the rest, never read as off.
+ */
+const HEAL_ENV = readHealEnv(process.env);
+if (SWITCH_ERROR || LIMIT_ERROR || LOG_ERROR || HEAL_ENV.error) {
   // A switch, a limit or a log setting that cannot be read is refused here,
   // naming the variable, and never guessed at: a typo in GC_SWITCHES_OFF
   // would leave on exactly what it was written to turn off, and a rate that
   // reads as nothing would be no limit at all (docs/HARDENING.md).
-  console.error(`\n  ${[SWITCH_ERROR, LIMIT_ERROR, LOG_ERROR].filter(Boolean).join('\n  ')}\n`);
+  console.error(`\n  ${[SWITCH_ERROR, LIMIT_ERROR, LOG_ERROR, HEAL_ENV.error].filter(Boolean).join('\n  ')}\n`);
   process.exit(1);
 }
+/**
+ * The model behind GC_HEAL=ai (resolver.js): one resolver for the process,
+ * made whether or not this deployment runs ai, because whether a key is here
+ * is something the banner and /api/state report either way.
+ *
+ * The key is found once (the environment, else ANTHROPIC_API_KEY alone out of
+ * .env.local) and held only inside the resolver. It is then taken out of the
+ * environment: Playwright starts the browser with this process's environment,
+ * and the browser is the part of the runner that renders pages other people
+ * choose. Nothing prints it — the banner says "key found" and where.
+ */
+const AI = (() => {
+  const { key, source } = findApiKey({ env: process.env, root: fileURLToPath(new URL('./', import.meta.url)) });
+  delete process.env.ANTHROPIC_API_KEY;
+  // Held only where it can be used: a deployment that does not run ai reports
+  // whether a key is there and keeps nothing of it in memory.
+  return { have: Boolean(key), from: source, resolver: key && HEAL_ENV.mode === 'ai' ? createResolver({ apiKey: key }) : null };
+})();
 /**
  * Whether the driven page may reach private addresses (reach.js). On
  * whenever auth is on, because that is the deployed shape; GC_BLOCK_PRIVATE
@@ -513,7 +539,7 @@ app.use('/api', (req, res, next) => {
   // and reads back the id and any Retry-After. Cross-origin, a browser hides
   // every header that is not named here, in both directions.
   res.set('Access-Control-Allow-Headers', 'content-type, authorization, x-request-id, traceparent');
-  res.set('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.set('Access-Control-Expose-Headers', 'X-Request-Id, Retry-After');
   // A preflight carries no Authorization header by definition, so it must be
   // answered before the gate. Requiring auth here would make every
@@ -640,6 +666,8 @@ app.post('/api/suites/quickstart', switched('runner.onboarding', 'runner.runs'))
 app.post(['/api/suites', '/api/suites/:id/pages', '/api/suites/:id/pages/:pageId/scan'], switched('runner.onboarding'));
 app.post('/api/origins', switched('runner.origins'));
 app.delete('/api/origins', switched('runner.origins'));
+app.post(['/api/fixes/:id/accept', '/api/fixes/:id/reject'], switched('runner.heal'));
+app.put('/api/settings/heal', switched('runner.heal'));
 
 /**
  * Step-up: is this token fresh enough for the one action that demands it?
@@ -869,6 +897,43 @@ const usage = (req) => ({
   retentionDays: req.ent.limit('history.retention_days'),
 });
 
+/**
+ * Automatic fixes, as they stand for one organisation (heal.js, fixes.js).
+ *
+ * `mode` is the deployment's: GC_HEAL, forced off by the runner.heal switch.
+ * Whether a model may help is three more things, and `reason` names the first
+ * that is missing — the deployment does not run ai, the switch is off, there
+ * is no key, or this organisation has not opted in — so a page can say which
+ * one to fix rather than just "unavailable". `available` is everything but the
+ * organisation's own choice, which is `enabled`.
+ */
+function healStateFor(space, claims, switches) {
+  const on = switches.on('runner.heal');
+  const mode = on ? HEAL_ENV.mode : 'off';
+  const enabled = space.healSetting.get().ai === true;
+  const reason = HEAL_ENV.mode !== 'ai' ? 'deployment'
+    : !on ? 'switch'
+      : !AI.have ? 'key'
+        : !enabled ? 'organisation' : null;
+  return { mode, ai: { enabled, available: mode === 'ai' && AI.have, reason }, canManage: tenancy.manages(claims) };
+}
+
+/** The mode one run actually gets: ai only when nothing above is missing, and safe in its place. */
+const runModeOf = (state) => (state.mode === 'ai' && state.ai.reason !== null ? 'safe' : state.mode);
+
+/**
+ * What a fix report must never carry: the values redact() strips from the
+ * page's console — the organisation's vault and its saved session — read the
+ * same way, so the model and a viewer are protected from the same things.
+ */
+function secretValuesOf(space) {
+  const values = [...space.session.values()];
+  for (const name of space.vault.names()) {
+    try { values.push(space.vault.get(`secrets.${name}`)); } catch { /* gone since it was listed */ }
+  }
+  return values.filter((v) => typeof v === 'string' && v.length >= 4);
+}
+
 app.get('/api/state', (req, res) => {
   // The page belongs to whoever is driving. Another organisation is told the
   // runner is busy and nothing about the address on it.
@@ -896,6 +961,8 @@ app.get('/api/state', (req, res) => {
     // What the operator has turned off for everyone (switches.js), so a page
     // can say so before a button is pressed rather than after.
     switches: req.switches.runner(),
+    // Automatic fixes: the mode, whether a model may help and why not.
+    heal: healStateFor(req.space, req.user, req.switches),
   });
 });
 
@@ -1068,6 +1135,61 @@ app.delete('/api/suites/:id/cases/:caseId', (req, res) => {
   try { sendOk(res, req.space.suites.removeCase(req.params.id, req.params.caseId)); } catch (err) { fail(res, err); }
 });
 
+// ------------------------------------------------------------- fixes (API)
+/**
+ * Suggested fixes (fixes.js), and the organisation's AI setting.
+ *
+ * Reading them is any member's. Accepting or rejecting one takes exactly what
+ * PATCH on the case takes — the member who may edit the flow by hand may take
+ * the edit a run proposed — and an accepted fix is written through
+ * suites.updateCase, which validates the new flow against this organisation's
+ * allowlist like any other edit. A case that has moved on since the run is a
+ * 409 `stale`, and the suggestion says so from then on.
+ *
+ * The AI setting is a decision about this organisation's pages leaving the
+ * machine, so it is an owner's or admin's, through the same helper that
+ * guards origins and the saved session. Both writes are behind the runner.heal
+ * switch (the table above).
+ */
+const announcePending = (space, before) => {
+  const pending = space.fixes.pending();
+  if (pending !== before) emitTo(space.org, { t: 'fixes', pending });
+};
+
+app.get('/api/fixes', (req, res) => {
+  const status = String(req.query.status ?? 'pending');
+  if (status !== 'all' && !FIX_STATUSES.includes(status)) {
+    return fail(res, new Error(`status is one of ${[...FIX_STATUSES, 'all'].join(', ')}`));
+  }
+  res.json({ fixes: req.space.fixes.list(status) });
+});
+app.post('/api/fixes/:id/accept', (req, res) => {
+  const space = req.space;
+  const before = space.fixes.pending();
+  try {
+    sendOk(res, space.fixes.accept(req.params.id, { suites: space.suites, check: checkFlowFor(space) }));
+  } catch (err) {
+    if (err instanceof StaleFix) res.status(409).json({ ok: false, error: 'stale', why: err.why });
+    else fail(res, err, err instanceof NoSuchFix ? 404 : 400);
+  } finally {
+    announcePending(space, before);
+  }
+});
+app.post('/api/fixes/:id/reject', (req, res) => {
+  const before = req.space.fixes.pending();
+  try { sendOk(res, { fix: req.space.fixes.reject(req.params.id) }); }
+  catch (err) { fail(res, err, err instanceof NoSuchFix ? 404 : 400); }
+  finally { announcePending(req.space, before); }
+});
+app.get('/api/settings/heal', (req, res) => res.json(healStateFor(req.space, req.user, req.switches)));
+app.put('/api/settings/heal', (req, res) => {
+  try {
+    tenancy.requireManager(req.user);
+    req.space.healSetting.set({ ai: req.body?.ai });
+    res.json(healStateFor(req.space, req.user, req.switches));
+  } catch (err) { fail(res, err); }
+});
+
 /**
  * Run a suite: every case, or one named by `?case=`.
  *
@@ -1117,7 +1239,7 @@ app.post('/api/suites/:id/run', async (req, res) => {
     // Express 4 does not catch a rejection from an async handler, so an
     // unexpected throw here would take the process with it rather than failing
     // one case. A suite run survives a bad case.
-    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name, pace, space, ent: req.ent })
+    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name, pace, space, ent: req.ent, switches: req.switches })
       .catch((err) => ({ ok: false, passed: 0, total: 0, error: err.message }));
     outcomes.push({ case: c.id, name: c.name, ...r });
   }
@@ -1185,7 +1307,7 @@ app.post('/api/suites/quickstart', async (req, res) => {
   const checkFlow = checkFlowFor(space);
   const flow = pageCheckFlow(space.suites.get(suite.id), space.suites.get(suite.id).pages[0]);
   const c = space.suites.addCase(suite.id, { name: `${pg.name} loads`, pageId: pg.id, flow }, checkFlow);
-  const outcome = await run(checkFlow(flow), { suiteId: suite.id, caseId: c.id, caseName: c.name, space, ent: req.ent });
+  const outcome = await run(checkFlow(flow), { suiteId: suite.id, caseId: c.id, caseName: c.name, space, ent: req.ent, switches: req.switches });
 
   sendOk(res, {
     suite: space.suites.get(suite.id),
@@ -1412,6 +1534,14 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `(GC_TIMEOUT_MS, GC_SETTLE_MS)` +
             `\n  pace        ->  ${PACE ? `${PACE}ms of performance per step, so a run can be watched` : '0 — no performance, as fast as the page allows'}` +
             ` (GC_PACE_MS)` +
+            `\n  fixes       ->  ${HEAL_ENV.mode === 'off'
+              ? 'off — a run fails on any difference from its recording (GC_HEAL=safe or ai)'
+              : HEAL_ENV.mode === 'safe'
+                ? 'safe — rule fixes only, no model (GC_HEAL)'
+                : `ai — rule fixes, then Claude for an organisation that opts in, at most ${HEAL_ENV.aiCalls} calls a run and ${HEAL_ENV.aiPerDay} a day per organisation (GC_HEAL)`}` +
+            `\n  ai fixes    ->  ${AI.have
+              ? `key found (${AI.from})${HEAL_ENV.mode === 'ai' ? '' : ' — unused unless GC_HEAL=ai'}`
+              : `no key${HEAL_ENV.mode === 'ai' ? ' — ANTHROPIC_API_KEY is unset, so ai runs as safe' : ''}`}` +
             `\n  version     ->  ${identity.commit ?? 'unknown'}` +
             `${buildTime() ? `, ui built ${buildTime().replace('T', ' ').slice(0, 16)}` : ', no ui to date'}\n`);
 
@@ -1899,6 +2029,9 @@ async function run(plan, meta = {}) {
   // The browser is the driving organisation's for the length of the run, and
   // a run is the plan's to count. Both refusals are answered to the
   // organisation that asked, in the shape its UI acts on.
+  // Fixes are worked out before the lock is taken: nothing in it needs the
+  // browser, and a throw from here must not leave the executor locked.
+  const heal = healFor(plan, meta, space);
   try {
     ent.check('runs.per_day', space.history.today());
     await take(space.org);
@@ -1917,6 +2050,7 @@ async function run(plan, meta = {}) {
   const ctx = {
     cursor, emit, nav, onNavigate: publishTargets, pace: paceOf(meta.pace, PACE),
     origins: space.origins, vault: vaultFor(space, ent),
+    heal,
   };
   emit({ t: 'run.start', total: plan.steps.length, suite: plan.suite, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName });
 
@@ -1929,11 +2063,15 @@ async function run(plan, meta = {}) {
   try {
     for (const [i, step] of plan.steps.entries()) {
       emit({ t: 'step.start', i, step });
+      ctx.heal.step = i;
+      ctx.heal.taken = [];
       const t0 = Date.now();
       try {
         await OPS[step.op](page, step, ctx);
-        results.push({ i, ok: true, ms: Date.now() - t0 });
-        emit({ t: 'step.pass', i, ms: Date.now() - t0 });
+        // The fixes this step needed, if any; each went out as step.heal first.
+        const fixed = ctx.heal.taken.length ? { fixes: ctx.heal.taken } : {};
+        results.push({ i, ok: true, ms: Date.now() - t0, ...fixed });
+        emit({ t: 'step.pass', i, ms: Date.now() - t0, ...fixed });
       } catch (err) {
         // A step that fails on a page Turnstile guards has usually failed
         // because of it, and nothing in its own message could say so.
@@ -1968,7 +2106,7 @@ async function run(plan, meta = {}) {
       emit({ t: 'log', level: 'error', msg: `could not draw the report: ${err.message}` });
     }
     await publishTargets();
-    return { ok, passed, total: results.length, error: entry.error };
+    return { ok, passed, total: results.length, error: entry.error, fixed: entry.fixed };
   } finally {
     // Clear the lock BEFORE announcing the end. run.end means "you may start
     // another run"; emitting it while still locked makes a caller that runs
@@ -1977,8 +2115,100 @@ async function run(plan, meta = {}) {
     recorder.recording = wasRecording;
     driver.touch(space.org);
     armRelease();
-    emit({ t: 'run.end', ok: results.every((r) => r.ok) && results.length > 0, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName });
+    emit({ t: 'run.end', ok: results.every((r) => r.ok) && results.length > 0, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName,
+      fixed: results.reduce((n, r) => n + (r.fixes?.length ?? 0), 0) });
   }
+}
+
+/**
+ * `ctx.heal` for one run (heal.js reads it; nothing else decides).
+ *
+ * The mode is this organisation's effective one (healStateFor): GC_HEAL, off
+ * when the runner.heal switch is, and ai only with a key and the
+ * organisation's opt-in. The budget is per run. The secrets are the ones the
+ * console redacts. `steps` is the plan, so a report can show the steps around
+ * the one that failed.
+ *
+ * ops.js calls onFix only once a step has PASSED, in the order the fixes were
+ * made. Each is said as step.heal before the run loop says step.pass, and kept
+ * for that step's result. When the run is a saved case's and the fix is about
+ * the recording (fixes.js SAVED_KINDS), it is also kept as a suggestion — and
+ * the fix says so, with the suggestion's id — and the pending count goes out
+ * if it moved.
+ */
+function healFor(plan, meta, space) {
+  // Fail closed: a caller that forgot to pass the token's switches would
+  // otherwise get the environment's alone, and with them a model the operator
+  // switched off for this organisation. Every caller today passes them.
+  const mode = meta.switches ? runModeOf(healStateFor(space, null, meta.switches)) : 'off';
+  const saves = Boolean(meta.suiteId && meta.caseId);
+  const heal = {
+    mode,
+    resolver: AI.resolver,
+    budget: aiBudgetFor(space.org),
+    secretValues: mode === 'off' ? [] : secretValuesOf(space),
+    step: 0,
+    steps: plan.steps,
+    taken: [],               // the step in progress's fixes; the loop empties it
+    onFix(fix) {
+      let shown = fix;
+      let before = null;
+      // A fix that changes nothing a case could hold (a rule's opened_menu
+      // whose opener has no name to write) is reported with the run, never
+      // kept: its Accept could only ever answer "changes nothing".
+      if (saves && SAVED_KINDS.has(fix.kind) && changesCase(fix)) {
+        try {
+          before = space.fixes.pending();
+          const kept = space.fixes.suggest(fix, {
+            suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName,
+            occurrence: occurrenceOf(plan.steps, fix.step),
+          });
+          shown = { ...fix, saved: true, id: kept.id };
+        } catch (err) {
+          before = null;
+          emit({ t: 'log', level: 'error', msg: `could not keep the fix as a suggestion: ${err.message}` });
+        }
+      }
+      heal.taken.push(shown);
+      emit({ t: 'step.heal', i: shown.step, fix: shown });
+      if (before !== null && space.fixes.pending() !== before) emit({ t: 'fixes', pending: space.fixes.pending() });
+    },
+    /**
+     * A model call in progress, for the person watching: reading, deciding,
+     * checking, done (ops.js think). To the driving organisation like
+     * step.heal, with the step the loop is on. `text` is one of heal.js
+     * THINKING's fixed phrases, so nothing of the page rides on it.
+     */
+    onThinking(phase, text) {
+      emit({ t: 'step.thinking', i: heal.step, phase, text });
+    },
+  };
+  return heal;
+}
+
+/**
+ * Model calls spent today, per organisation: `{ day, calls }`. In memory, so a
+ * restart forgets it — a ceiling against a runaway, not billing.
+ */
+const aiSpent = new Map();
+const today = () => new Date().toISOString().slice(0, 10);
+const spentToday = (org) => (aiSpent.get(org)?.day === today() ? aiSpent.get(org).calls : 0);
+
+/**
+ * One run's model budget: GC_HEAL_AI_MAX_CALLS for the run, and never more than
+ * the organisation has left of GC_HEAL_AI_MAX_CALLS_PER_DAY. ops.js reads
+ * `aiCalls` and takes one off it per question; both limits move together.
+ */
+function aiBudgetFor(org) {
+  let run = HEAL_ENV.aiCalls;
+  return {
+    get aiCalls() { return Math.max(0, Math.min(run, HEAL_ENV.aiPerDay - spentToday(org))); },
+    set aiCalls(value) {
+      const used = Math.max(0, this.aiCalls - Number(value));
+      run -= used;
+      aiSpent.set(org, { day: today(), calls: spentToday(org) + used });
+    },
+  };
 }
 
 /** A refusal, in the shape the UI reads off the socket — the same words as the HTTP status would carry. */
@@ -2170,9 +2400,9 @@ wss.on('connection', (ws) => {
       // rejection, and Node kills the process for those: one unexpected throw
       // inside a step and the whole runner disappeared, which from the browser
       // looks exactly like "Run script does nothing".
-      run(plan, { pace: paceOf(m.pace, PACE), space, ent }).catch((err) => {
+      run(plan, { pace: paceOf(m.pace, PACE), space, ent, switches }).catch((err) => {
         emitTo(org, { t: 'log', level: 'error', msg: `run failed: ${err.message}` });
-        emitTo(org, { t: 'run.end', ok: false });
+        emitTo(org, { t: 'run.end', ok: false, fixed: 0 });
       });
       return;
     }
@@ -2363,6 +2593,8 @@ wss.on('connection', (ws) => {
     // What the operator has switched off (switches.js), so the console can
     // grey out Record and Run before anyone presses them.
     switches: switches.runner(),
+    // Automatic fixes, the same answer /api/state gives (healStateFor).
+    heal: healStateFor(space, claims, switches),
     // The device the page is being driven as, and the list to pick from
     // (devices.js) — the console draws its dropdown from the server's own
     // registry, so the two cannot drift.

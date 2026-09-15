@@ -1,0 +1,15 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Editor — Save moved down a little</title>
+<!--
+  Position drift that is only the layout: a notice above the form pushed Save
+  40px down. Same button, same handler, nothing pinned. Within LAYOUT_REACH the
+  rules call it a layout shift; from MOVED_MIN on they offer to update the
+  recorded position.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d}
+  #save{position:absolute;left:300px;top:340px;width:80px;height:30px;font:inherit;border:0;border-radius:6px;background:#2f5bea;color:#fff}
+</style>
+<main><h1 style="position:absolute;left:300px;top:200px;margin:0">Draft</h1><button type="button" id="save">Save</button></main>
+<script>document.getElementById('save').onclick = () => { location.hash = '#/saved'; };</script>

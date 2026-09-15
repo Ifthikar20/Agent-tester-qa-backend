@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Shop — the search word is in the button's name</title>
+<!--
+  The case types "widget" into Search, and the button it recorded as
+  "Add Widget Pro" now reads "Add Widget Pro to basket". The typed word is an
+  ordinary word, not a secret: the model has to be shown "Widget", and the fix
+  has to be written with it — not as "Add $SECRET Pro to basket".
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d}
+  label{position:absolute;left:310px;top:40px}
+  h1{position:absolute;left:310px;top:80px;margin:0;font-size:22px}
+  .row{position:absolute;left:310px;top:150px;width:560px;height:44px;display:flex;align-items:center;justify-content:space-between}
+  button{padding:8px 16px;font:inherit;border:0;border-radius:8px;background:#2f5bea;color:#fff}
+  #basket{position:absolute;left:310px;top:230px;margin:0}
+</style>
+<label>Search <input id="q"></label>
+<h1>1 result</h1>
+<div class="row"><span>Widget Pro</span><button type="button" id="add">Add Widget Pro to basket</button></div>
+<p id="basket">Your basket is empty</p>
+<script>
+  document.getElementById('add').onclick = () => { document.getElementById('basket').textContent = 'Widget Pro × 1'; };
+</script>

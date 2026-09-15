@@ -1214,6 +1214,201 @@ turning the numbers up.
 
 ---
 
+## Automatic fixes (GC_HEAL)
+
+Some differences between a page and its recording matter to nobody, and a run
+used to fail on them anyway — often with the same words a broken app produces.
+A cookie banner that was not there when you recorded catches the typing and the
+click, both steps are marked passed, and the case fails two steps later with
+"did not navigate", exactly like a dead button.
+
+The deployment chooses a mode, and a word it does not know stops the runner at
+boot (like a typo in `GC_SWITCHES_OFF`):
+
+```bash
+GC_HEAL=off    # the default: the same steps and the same messages as before
+GC_HEAL=safe   # the rules below, no model (1, true and on mean safe too)
+GC_HEAL=ai     # the rules, then Claude for what they could not fix
+               # (GC_HEAL_AI_MAX_CALLS, default 6 calls per run, and
+               #  GC_HEAL_AI_MAX_CALLS_PER_DAY, default 100 per organisation)
+```
+
+Each run then gets its own effective mode (ops.js reads it from `ctx.heal` and
+nothing else):
+
+- the operator's **`runner.heal` switch** (docs/HARDENING.md) turns it off for
+  everyone, whatever `GC_HEAL` says, and refuses accepting suggestions or
+  changing the setting below while it is off;
+- **`ai` is per organisation.** It stays `safe` until an owner or admin opts in
+  (`PUT /api/settings/heal {"ai": true}`, stored in `.ghostclick/<org>/heal.json`,
+  off by default), and it stays `safe` when the runner has no key.
+  `GET /api/settings/heal`, `/api/state` and the socket greeting say which, as
+  `heal: { mode, ai: { enabled, available, reason }, canManage }` — `reason` is
+  the first thing missing: `deployment`, `switch`, `key` or `organisation`.
+
+The key is `ANTHROPIC_API_KEY`, from the environment or, on a laptop, from
+`.env.local` beside the backend — of which that one line is read and nothing
+else. The banner says `key found` or `no key`; the key itself is never printed,
+never in `/api/state` or an error, and is removed from the runner's environment
+at boot so the browser does not inherit it. The runner then calls
+`api.anthropic.com` over HTTPS, so a deployment needs that egress
+(docker/docker-compose.prod.yml says why `edge` already allows it).
+
+With `safe` or `ai`, a step fixes four things by rule and says so in the run
+log, as a line starting `fixed:`:
+
+- **A late element.** It did not appear within `GC_TIMEOUT_MS` but did during
+  the grace period after — the step uses it instead of failing.
+- **A layer over the target.** Before a click or a fill, the target is
+  hit-tested. If something covers it that reads as a cookie/consent notice, a
+  newsletter, or a "what's new"/welcome/tour/promo layer, its **reject** button
+  is pressed (or, failing that, its close/"no thanks" one) — once — and the
+  target is tested again, and once more just before the press in case the
+  layer comes back. A cookie or consent layer is only ever answered with a
+  reject: on many consent managers the × records a yes. Button names are
+  matched whole — `Reject all`, `Close`, `No thanks` — so "Reject all changes"
+  or "Close account" is never a way out. The layer's words are read through
+  shadow roots and CSS-generated text, and anything with `role="alert"`, an
+  assertive live region, or an alertdialog not named for cookies is never
+  dismissed. Anything else covering the target fails the step, naming what is
+  in the way.
+- **An option in a closed list.** An `option`/`menuitem` target that never
+  appeared: up to four closed dropdowns are opened, nearest the recorded click
+  first, until one shows it where it was recorded (within 250px); each one that
+  does not is closed again. A control named for an action — Publish, Delete,
+  Save — is never pressed to look, and with no recorded click point only a page
+  with exactly one closed dropdown is tried.
+- **The same field under another kind.** `label:Email` is gone but exactly one
+  `placeholder:Email` (or `textbox:Email`) is there, near where you clicked — or
+  inside the recorded landmark when there is no click point. A vault value goes
+  only into a password field.
+
+With `ai`, a click, fill or hover the rules could not fix is described to
+`claude-opus-5` (resolver.js) — the step, its neighbours but never a later
+check, the page's accessibility snapshot with every typed value and secret
+removed — and the model picks one move: wait longer, dismiss a blocker, open a
+closed menu, use a renamed element, or say the function is gone. The model
+never acts. Code checks the move first, judging the element by its own live
+role and name — never by the snapshot text, which the page writes: the element
+must be in the snapshot it was shown, inside the recorded landmark, within 250px
+of the recorded point (or, with no point, the same kind of control), a role the
+step can act on, not inside a dialog or alert the recorded one was not in, and
+writable in the target grammar. A rename may not add a word that acts — Delete,
+Pay, Confirm, Sign up, Publish and the like — that the recorded name did not
+have, and a step that types a vault value is never renamed. A blocker must be a
+layer that really covers the target, and its button a reject or close on that
+layer with no alert, field or error. Anything else, or confidence under 0.6, and
+the step fails with its original message.
+
+What the rules will **never** do:
+
+- rename a target, or match a "similar" name — `Sign in` never becomes `Sign up`;
+- drop or change a landmark or `nth` scope — the header's link never becomes
+  the footer's;
+- press anything that accepts, agrees, allows, confirms, continues, pays, saves,
+  signs or deletes — as a way out of a layer or as a dropdown to look inside;
+- dismiss a layer that has a form field on it, or reads as an error, a warning,
+  a confirmation or unsaved changes;
+- change a failure's message: when a fix is tried and does not work, the step
+  fails with exactly the words it would have without `GC_HEAL`, so defect
+  numbers stay the same.
+
+One difference is deliberate: in `safe` and `ai`, a target covered by a layer
+no rule may dismiss (an Accept-only banner, "Payment failed", unsaved changes)
+fails at that step, saying what covers it. With fixes off the click still lands
+on the layer and the case fails a step or two later, as before.
+
+**What is sent to Anthropic**, and only in `ai`, only for an organisation that
+opted in, only for a click, fill or hover the rules could not fix, at most
+`GC_HEAL_AI_MAX_CALLS` times a run and `GC_HEAL_AI_MAX_CALLS_PER_DAY` times a
+day per organisation: the recorded step as a line of the flow language, the two
+steps before it and the next two actions (never a later check), the error, the
+page's path and title, and its accessibility snapshot — the structure of the
+page AND its visible text, capped at 12,000 characters — with every typed field
+value removed; every vault value, saved-session cookie and literal the flow
+types replaced by `$SECRET` wherever the page echoes it, in any case and in its
+URL-, form-, HTML-, JSON- and base64-encoded forms; the values of every URL
+query and fragment parameter blanked (`?token=…`), in the path, the steps and
+every link; a literal in a step line shown only as its length; and vault
+references left as `$NAME`. The page's content is marked as untrusted for the
+model. The request is pinned by `npm run check:heal-request`. It goes to
+Anthropic's API under the deployment's one key, shared by every organisation
+on it, and is handled under the API's data-retention terms — read them before
+an organisation opts in.
+
+**Cost and time.** One fixed step is usually one call, two when the model opens
+a menu and then names the item. A call is a cached ~600-token system prompt plus
+a report of roughly 1,500–5,000 tokens, and a short structured answer at low
+effort: on the order of $0.01–0.05 and 2–10 seconds, estimates until
+`node scripts/eval-heal.js --arms ai` (below) has measured them — it writes the
+tokens, the estimated dollars and the latency of every call. A call gives up
+after 20 seconds and is never retried (a retry is billed twice), so the worst a
+run can wait on the model is 20 seconds times `GC_HEAL_AI_MAX_CALLS`, while it
+holds the browser. A step the model cannot help with costs the same and still
+fails. The daily ceiling is kept in memory and resets when the runner restarts:
+it stops a runaway, it is not a bill.
+
+**Suggestions.** Most fixes are about one run — a banner, a slow page — and are
+only reported: `step.heal` on the socket before that step's `step.pass`, the
+fixes on `step.pass`, `fixed` on `run.end`, and `fixed`/`fixes` (twenty at most)
+on each row of `GET /api/runs`. Three kinds say the recording itself is out of
+date — `same_field`, `used_element` (the model's rename) and `opened_menu` —
+and when the run was a saved case's they are kept as suggestions
+(`.ghostclick/<org>/fixes.json`; the fix carries `saved: true` and its `id`, and
+a `fixes` event carries the new pending count). The same fix on the next run is
+the same suggestion seen again, not a new one. Nothing changes a case until a
+member who may edit it presses Accept:
+
+```
+GET  /api/fixes?status=pending|accepted|rejected|stale|all
+POST /api/fixes/:id/accept   -> the fix, and the case's new flow
+POST /api/fixes/:id/reject
+```
+
+Accept checks that the step at that index is still the recorded line the fix
+was made for, and still the same one of several identical lines (a wizard's
+third `click 'Next'` is not its second) — otherwise the suggestion is `stale`
+and the answer is a 409 —
+swaps the target and/or inserts the opening click before it, writes the case
+back with the flow language (keeping `%% entry`, and moving each `%% at` and
+`%% via` with the step it describes), re-parses it to prove nothing else
+changed, and saves it through the same validation as editing the case by hand.
+A rejected suggestion stays rejected when a later run sees it again. An
+accepted insertion moves every later step of the case down by one, so anything
+keyed on a step's index — the case's other suggestions are moved with it, but a
+defect number that includes the failed step's index is not — sees a new index.
+A fix whose opener has no name to write down is reported with the run and not
+kept, since accepting it could change nothing.
+
+Off is the default. `npm run check:heal` runs each fixed case with fixes on and
+off, a set of broken apps that must fail in every mode — including when a fake
+model suggests the tempting wrong move, and every attack a review found on the
+rules and the guards — compares every failure word for word with ops.js before
+fixes existed (a checkout named by `GC_HEAL_BASELINE`, else the messages pinned
+in scripts/fixtures/heal/off-baseline.json), and walks a suggestion through its life
+against the recorded cases in `suites/local`. `npm run check:heal-request` pins
+the request the SDK sends, with no network and no key. `node scripts/check-fixes.js`
+starts a gated runner of its own and checks the routes, roles, switch, state
+and an accept that re-runs green.
+
+`node scripts/eval-heal.js` is not part of `check:all`: it replays a corpus of
+46 recorded-case scenarios (scripts/fixtures/heal-corpus — renames, overlays,
+decoys, a prompt injection, a broken header masked by its footer twin, and from
+s31 on the attacks a review found: an × that consents, errors worded as
+announcements or hidden in CSS and shadow roots, a Continue inside "Payment
+failed", Archive renamed to Delete, a password moved into a search box, a forged
+ref, a split button, a GET form that puts the password in the address) in the
+off, safe and ai arms, the last with the real model. Those pages record any
+harmful press, and the summary counts a run that made one as `harmful` even
+when it failed:
+
+```bash
+node scripts/eval-heal.js --arms off,safe                 # no network, no key
+node scripts/eval-heal.js --arms ai --env-file ../.env.local --budget-usd 2
+```
+
+---
+
 ## A name with a colon in it was invisible
 
 The aria snapshot Playwright returns is YAML, and YAML single-quotes an entry
