@@ -893,6 +893,15 @@ text must not change
 width and height must not change
 ```
 
+While you pick, the panel names what the crosshair is over — the outline is
+drawn inside a JPEG frame, the words are beside it — and a click inside an
+embedded frame, which the picker cannot see, says so rather than nothing. A
+pick shows what was chosen: a clip of it, its words, its measurements, and
+the script already written — `Must exist and always be visible; width and
+height must not change; text must not change` (a table keeps its rows instead
+of its size) — with the checks that sentence compiles to shown under it as you
+edit it (`POST /api/monitors/preview`: the mock compiler, nothing kept).
+
 The rule is compiled ONCE into checks (`monitor-rules.js`): the mock compiler
 instantly, from the phrasing above, and Claude — when `ANTHROPIC_API_KEY` is
 set — asynchronously, replacing the mock's checks when its answer lands. From
@@ -935,6 +944,15 @@ back, after the browser changed hands. A monitor whose page is not the one on
 the browser is "not on this page", never "missing". Picking is refused while a
 run or a recording holds the page, because the picker swallows clicks;
 monitoring itself keeps watching during a run, which is rather the point.
+
+Every time the page is opened again — a run's `goto`, Open, a reload, **Check
+now** on the card — the new document arms its monitors and each is measured
+against its rule at once. The card counts those visits and says when the last
+was, and the log says `/pricing opened: checking Hero copy`. An element that
+is not there when the document arms is late before it is missing: a freshly
+armed monitor gives it six seconds (`ARM_GRACE_MS`) to arrive before a missing
+incident opens, where a change on a page that has been open a while is
+confirmed in half a second, as before.
 
 Two things worth knowing about the security model. A monitor's selector is data
 handed to `querySelector` inside a script the RUNNER installs; the flow

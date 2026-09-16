@@ -19,7 +19,9 @@
  *   6  rows, visibility, accepting  exactly N rows; always visible; manual resolve → acknowledged
  *   7  pause, resume, delete        quiet while paused; gone means gone, shot and all
  *   8  reloads and other pages      re-armed after a reload; not on this page, not missing
- *   9  picking from the canvas      hover + click on the video chooses, and never clicks through
+ *   8b every visit runs the check   the visit is counted; late is not missing; gone is
+ *   9  picking from the canvas      hover + click on the video chooses, and never clicks through;
+ *                                   the panel is told what is hovered, what was picked, and a miss
  *  10  secrets never reach a snapshot
  *  11  cleanup
  */
@@ -118,6 +120,7 @@ async function sweep() {
 }
 const incidentFor = (v, id, from, ms = 10000) => v.until((m) => m.t === 'incident.opened' && m.incident.monitorId === id, ms, from);
 const stateOf = async (id) => (await api('GET', '/api/monitors')).json?.monitors.find((m) => m.id === id) ?? null;
+const metricsOf = (m) => (m?.metrics ? `${m.metrics.width}×${m.metrics.height}, ${m.metrics.textLength} chars` : 'no metrics');
 
 // ---------------------------------------------------------------- a runner
 let child = null;
@@ -356,6 +359,40 @@ section('8 · reloads and other pages');
 }
 
 // ---------------------------------------------------------------------------
+section('8b · every visit runs the check');
+{
+  const before = (await stateOf(rows.id))?.stats?.visits ?? 0;
+  let from = v.at();
+  await open(v, FIXTURE);
+  const changed = await v.until((m) => m.t === 'monitor.changed' && m.monitor.id === rows.id && (m.monitor.stats?.visits ?? 0) > before, 10000, from);
+  if (changed) ok('opening the page again counts a visit', `${before} → ${changed.monitor.stats.visits}`); else bad('opening the page again counts a visit', `still ${(await stateOf(rows.id))?.stats?.visits}`);
+  if (changed && changed.monitor.lastVisitAt >= STARTED) ok('and says when', new Date(changed.monitor.lastVisitAt).toISOString().slice(11, 19)); else bad('and says when');
+  if (await v.until((m) => m.t === 'log' && /opened: checking/.test(m.msg), 5000, from)) ok('and the log says the check ran'); else bad('and the log says the check ran');
+
+  // The estimate arrives 1.2s after load. Armed at DOMContentLoaded, the
+  // monitor sees nothing there — and must wait, not report it missing.
+  await wait(2000);
+  const late = (await create('check-late', '[data-testid="late-copy"]', 'text must not change')).json?.monitor;
+  if (late?.state === 'ok') ok('a monitor on the late paragraph', late.id); else { bad('a monitor on the late paragraph', JSON.stringify(late)); }
+  from = v.at();
+  await open(v, FIXTURE);
+  await wait(4000);
+  if (await v.none((m) => m.t === 'incident.opened' && m.incident.monitorId === late?.id, 1, from)) ok('a reload does not call it missing', 'late is not gone'); else bad('a reload does not call it missing', 'a missing incident opened for a paragraph that was on its way');
+  const settled = await stateOf(late?.id);
+  if (settled?.state === 'ok' && settled.metrics?.exists) ok('and it is ok once it has arrived', metricsOf(settled)); else bad('and it is ok once it has arrived', JSON.stringify({ state: settled?.state, metrics: settled?.metrics }));
+
+  // Gone for real, on a page that has been open a while, is still an incident within seconds.
+  await wait(2500);
+  from = v.at();
+  await run(v, 'click button:Remove estimate');
+  const gone = (await incidentFor(v, late.id, from))?.incident;
+  if (gone?.type === 'missing') ok('removed for real is a missing incident', gone.id); else bad('removed for real is a missing incident', JSON.stringify(gone?.type));
+  from = v.at();
+  await run(v, 'click button:Reset all');
+  if (await v.until((m) => m.t === 'incident.resolved' && m.incident.id === gone?.id, 10000, from)) ok('and back is resolved'); else bad('and back is resolved');
+}
+
+// ---------------------------------------------------------------------------
 section('9 · picking from the canvas');
 {
   const text = (await create('check-text', HERO, 'text must not change')).json?.monitor;
@@ -365,8 +402,10 @@ section('9 · picking from the canvas');
   const page = await probe.newPage({ viewport: { width: 1180, height: 760 } });
   await page.goto(FIXTURE);
   const box = await page.locator(HERO).boundingBox();
+  const embed = await page.locator('#embed').boundingBox();
   await page.close();
   const at = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+  const inFrame = { x: Math.round(embed.x + embed.width / 2), y: Math.round(embed.y + embed.height / 2) };
 
   let from = v.at();
   v.send({ t: 'monitor.pick.start' });
@@ -375,13 +414,34 @@ section('9 · picking from the canvas');
   if (g.json?.picking === true) ok('/api/monitoring says so'); else bad('/api/monitoring says so', String(g.json?.picking));
   v.send({ t: 'human.move', ...at });
   await wait(400);
+  // What the pointer is over is said in words, not only outlined in the video.
+  const hov = await v.until((m) => m.t === 'monitor.hover', 3000, from);
+  if (hov?.tag === 'p' && /^p\.hero-copy/.test(hov.describe) && /Every order/.test(hov.text) && hov.w > 100 && hov.fontSize === '16px') ok('hovering names the element to the panel', `${hov.describe} ${hov.w}×${hov.h} · ${hov.fontSize}`);
+  else bad('hovering names the element to the panel', JSON.stringify(hov));
   v.send({ t: 'human.click' });
   const sel = await v.until((m) => m.t === 'monitor.selected', 5000, from);
   if (sel?.selector === HERO && sel.snapshot?.metrics?.fontSizePx === 16 && /Every order/.test(sel.snapshot?.text ?? '')) ok('the click chose the paragraph', sel.selector); else bad('the click chose the paragraph', JSON.stringify(sel && { selector: sel.selector }));
   if (sel?.label && sel.fingerprint?.tag === 'p') ok('with a label and a fingerprint', sel.label); else bad('with a label and a fingerprint');
+  if (sel && sel.readError === null) ok('and nothing it could not read'); else bad('and nothing it could not read', JSON.stringify(sel?.readError));
   if (await v.until((m) => m.t === 'monitor.pick' && m.on === false, 5000, from)) ok('and picking ended'); else bad('and picking ended');
+  const shot = await v.until((m) => m.t === 'monitor.shot' && m.selector === HERO, 8000, from);
+  if (shot && /^data:image\/png;base64,/.test(shot.shot) && isPng(Buffer.from(shot.shot.slice('data:image/png;base64,'.length), 'base64'))) ok('a clip of the picked element follows', `${shot.shot.length} chars`); else bad('a clip of the picked element follows', shot ? shot.shot.slice(0, 30) : 'no monitor.shot');
   await wait(2500);
   if (await v.none((m) => m.t === 'incident.opened' && m.incident.monitorId === text?.id, 1, from)) ok('the pick-click never reached the page'); else bad('the pick-click never reached the page', 'the text changed');
+
+  // A click inside an embedded frame reaches nothing the picker can see: the
+  // person is told so, and picking stays on for the next click.
+  from = v.at();
+  v.send({ t: 'monitor.pick.start' });
+  await v.until((m) => m.t === 'monitor.pick' && m.on === true, 5000, from);
+  v.send({ t: 'human.move', ...inFrame });
+  await wait(300);
+  v.send({ t: 'human.click' });
+  const miss = await v.until((m) => m.t === 'monitor.pick.miss', 4000, from);
+  if (miss && /embedded frame/.test(miss.msg)) ok('a click inside an iframe is a miss, said out loud', miss.msg.slice(0, 40) + '…'); else bad('a click inside an iframe is a miss, said out loud', JSON.stringify(miss));
+  if (await v.none((m) => m.t === 'monitor.selected', 1, from) && (await api('GET', '/api/monitoring')).json?.picking === true) ok('and picking is still on'); else bad('and picking is still on');
+  v.send({ t: 'monitor.pick.stop' });
+  await v.until((m) => m.t === 'monitor.pick' && m.on === false, 5000, from);
 
   from = v.at();
   v.send({ t: 'human.move', ...at });

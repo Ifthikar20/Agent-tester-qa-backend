@@ -33,6 +33,11 @@
   th { background: #f5f5f8; font-size: 12px; color: #6f6f7c; }
   tr:last-child td { border-bottom: 0; }
   #debug { margin-top: 28px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #6f6f7c; }
+  #late-copy { margin: 0; font-size: 15px; color: #3a3a46; }
+  /* An embedded frame, fixed so it is always on screen: a click inside it
+     never reaches the page's own document, which is what the picker's "that
+     chose nothing" notice is for. */
+  #embed { position: fixed; left: 16px; bottom: 16px; width: 260px; height: 64px; border: 1px solid #eaeaef; border-radius: 12px; background: #fff; }
   /* The panel: fixed, out of the hero's way, and every control a real
      button with a plain name, so the executor can press it by name. */
   .faults { position: fixed; right: 16px; bottom: 16px; padding: 12px 14px; border: 1px solid #eaeaef; border-radius: 14px; background: #fff; box-shadow: 0 8px 24px rgb(16 16 20 / .12); }
@@ -88,8 +93,16 @@
     <p>Can I watch a carrier's page instead of ours? Yes — any page the runner may open.</p>
   </section>
 
+  <!-- Filled in a moment after load, the way a framework renders: a monitor
+       on what arrives here must not call it missing on every visit. -->
+  <section id="late">
+    <h3>Shipping estimate</h3>
+  </section>
+
   <p id="debug">Debug token: hunter2-but-from-a-vault</p>
 </main>
+
+<iframe id="embed" title="An embedded widget" srcdoc="<body style='margin:0;display:grid;place-items:center;height:100vh;font:13px system-ui,sans-serif;color:#6f6f7c'>Chat with us — an embedded widget</body>"></iframe>
 
 <aside class="faults" aria-label="Simulate bugs">
   <p>Simulate bugs</p>
@@ -99,6 +112,7 @@
     <button type="button" data-fault="hide">Hide submit</button>
     <button type="button" data-fault="add-row">Add table row</button>
     <button type="button" data-fault="remove-row">Remove table row</button>
+    <button type="button" data-fault="remove-late">Remove estimate</button>
     <button type="button" class="reset" data-fault="reset">Reset all</button>
   </div>
 </aside>
@@ -110,6 +124,14 @@
   setInterval(function () { count += 1 + (count % 3); document.getElementById('ticker-count').textContent = String(count); }, 500);
   var secs = 0;
   setInterval(function () { secs++; document.getElementById('player-clock').textContent = String(Math.floor(secs / 60)).padStart(2, '0') + ':' + String(secs % 60).padStart(2, '0'); }, 1000);
+
+  // The estimate arrives 1.2s after load — late, not missing.
+  var lateSection = document.getElementById('late');
+  var late = document.createElement('p');
+  late.id = 'late-copy';
+  late.setAttribute('data-testid', 'late-copy');
+  late.textContent = 'Orders placed before 2pm ship the same day.';
+  setTimeout(function () { if (!active['remove-late']) lateSection.appendChild(late); }, 1200);
 
   // Every fault is reversible, and "Reset all" is the one that puts the page
   // back — recovery is half of what a monitor is for.
@@ -136,6 +158,10 @@
     'remove-row': function (on) {
       if (on && tbody.rows.length > 1) tbody.rows[tbody.rows.length - 1].remove();
       if (!on) { while (tbody.firstChild) tbody.removeChild(tbody.firstChild); rows.forEach(function (r) { tbody.appendChild(r.cloneNode(true)); }); }
+    },
+    'remove-late': function (on) {
+      if (on) late.remove();
+      else if (!late.isConnected) lateSection.appendChild(late);
     },
   };
   function apply(name, on) { if (faults[name]) { faults[name](on); press(name, on); } }
