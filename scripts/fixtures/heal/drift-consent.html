@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Harbour — an invitation, and a cookie bar</title>
+<!--
+  A twin reroute onto a consent layer. The recording pressed the first Accept
+  (nth1/button:Accept) at 380,730. The invitation's Accept is now 700px away;
+  under the recorded point sits the Accept of a fixed cookie bar that has no
+  dialog role — so the dialog guard does not see it, and "Accept" was already
+  the recorded name, so harmAdded has nothing to object to.
+
+  ?region gives the bar role=region and aria-label "Cookie consent"; ?dialog
+  gives it role=dialog (which the dialog guard already refused). Pressing the
+  bar's Accept sets window.flag to COOKIES ACCEPTED.
+-->
+<style>*{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d} button{font:inherit}</style>
+<main><section aria-label="Invitation" style="position:absolute;left:800px;top:120px"><p>Priya invited you</p><button id="inv">Accept</button></section></main>
+<div id="cb" style="position:fixed;left:0;right:0;bottom:0;height:60px;background:#eee">
+  <span style="position:absolute;left:16px;top:18px">We use cookies to track you across sites.</span>
+  <button id="ck" style="position:absolute;left:340px;top:15px;width:80px;height:30px">Accept</button>
+</div>
+<script>
+  inv.onclick = () => { window.flag = 'invitation accepted'; };
+  ck.onclick = () => { window.flag = 'COOKIES ACCEPTED'; cb.remove(); };
+  const v = location.search.slice(1);
+  if (v) { cb.setAttribute('role', v); cb.setAttribute('aria-label', 'Cookie consent'); }
+</script>

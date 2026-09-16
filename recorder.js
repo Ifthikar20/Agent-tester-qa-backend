@@ -432,6 +432,9 @@ const LISTENERS = `
 const INJECT = `${PROPOSE_SRC}\n${LISTENERS}`;
 
 export class Recorder {
+  /** step -> what was seen beside it that its line cannot say (the frame it happened in). */
+  #evidence = new WeakMap();
+
   /**
    * @param nav a NavigationLog, when there is one. A click that navigates gets
    *   the chain it went through recorded alongside it — the hops and their
@@ -456,14 +459,17 @@ export class Recorder {
       // (accounts.google.com/gsi/button) reported its own URL, and the
       // recording checked that the PAGE had gone there: a step that could never
       // pass. So a frame's route changes and scrolls are not the page's, and
-      // anything else it reports is filed at the page's address.
+      // anything else it reports is filed at the page's address, with the frame
+      // kept beside the step as evidence (understand.js says what it means).
       const frame = src?.frame && src.frame !== this.page.mainFrame() ? src.frame : null;
+      let inFrame;
       if (frame) {
         if (!payload || ['url', 'scroll', 'jumped-to-top'].includes(payload.kind)) return;
         payload = { ...payload, href: this.page.url() };
+        inFrame = { inFrame: true, frame: originOf(frame.url()) };
       }
       this.queue = this.queue
-        .then(() => this.#ingest(payload))
+        .then(() => this.#ingest(payload, inFrame))
         .catch((e) => this.onError(e.message));
     });
     await this.page.addInitScript({ content: INJECT });
@@ -500,6 +506,21 @@ export class Recorder {
     if (url) this.#noteUrl(url);
     this.recording = false;
     return this.steps;
+  }
+
+  /** What was seen beside a step that its line cannot say — `{ inFrame, frame }` — or null for most steps. */
+  evidenceOf(step) {
+    return this.#evidence.get(step) ?? null;
+  }
+
+  /**
+   * Take one step out: a person's decision, from a flagged step's fix
+   * (understand.js, server.js record.fix). Never the first — a recording
+   * starts where it was opened. Returns the step taken out, or null.
+   */
+  remove(index) {
+    if (!Number.isInteger(index) || index < 1 || index >= this.steps.length) return null;
+    return this.steps.splice(index, 1)[0];
   }
 
   #push(step) {
@@ -733,7 +754,7 @@ export class Recorder {
     return fold(now) !== fold(parsed.name);
   }
 
-  async #ingest(p) {
+  async #ingest(p, inFrame = undefined) {
     if (!this.recording) return;
 
     if (p.kind === 'url') return this.#noteUrl(p.href);
@@ -761,19 +782,22 @@ export class Recorder {
     }
 
     const at = p.at;
-    if (p.kind === 'scroll') return this.#push({ op: 'scroll', target, at });
-    if (p.kind === 'hover') return this.#push({ op: 'hover', target, at });
+    // The frame is kept beside the step BEFORE anyone is told of the step:
+    // the notes read it the moment the step arrives.
+    const seen = (step) => { if (inFrame) this.#evidence.set(step, inFrame); return step; };
+    if (p.kind === 'scroll') return this.#push(seen({ op: 'scroll', target, at }));
+    if (p.kind === 'hover') return this.#push(seen({ op: 'hover', target, at }));
     if (p.kind === 'click') {
-      this.#push({ op: 'click', target, at });
+      this.#push(seen({ op: 'click', target, at }));
       // A click that navigated: keep what it went through. This is evidence,
       // not instruction — the assertions it suggests are a person's decision,
       // and #noteUrl has already filed the URL change that goes with it.
       return this.#noteNavigation();
     }
     if (p.kind === 'fill') {
-      return this.#push(p.secret
+      return this.#push(seen(p.secret
         ? { op: 'fill', target, valueRef: 'secrets.TODO', at }
-        : { op: 'fill', target, value: p.value ?? '', at });
+        : { op: 'fill', target, value: p.value ?? '', at }));
     }
   }
 }
@@ -793,6 +817,11 @@ function rank(n) {
   if (n === -1) return 1;      // `text:` — the page cannot count it
   if (n === 0) return 2;       // gone already; only the click-time count can save it
   return 3;                    // ambiguous
+}
+
+/** An address as its origin — what a frame is known by — or null for about:blank and the like. */
+function originOf(u) {
+  try { const x = new URL(u); return /^https?:$/.test(x.protocol) ? x.origin : null; } catch { return null; }
 }
 
 function pathOf(u) {

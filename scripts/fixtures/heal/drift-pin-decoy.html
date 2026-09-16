@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Harbour — a Docs twin in the pinned header</title>
+<!--
+  The pinned-header rule, attacked: the recording says the first Docs link
+  (nth1/link:Docs), pressed at 320,200. A redesign added a "Docs" link to the
+  changelog in a FIXED header, earlier in the page, so nth1 now names that one,
+  621px away. The Docs the person pressed is still under the recorded point.
+
+  `count()` on nth1's own locator is 1, and the header is fixed — "the only
+  match, and pinned" was true of the wrong element. With the name judged
+  without its ordinal there are two Docs links, one of them under the point:
+  nothing about this is a layout that moved.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d}
+  header{position:fixed;top:0;left:0;right:0;height:56px;background:#fff;border-bottom:1px solid #ddd;z-index:10}
+  a{color:#2f5bea}
+</style>
+<header><a id="changelog" href="#/changelog" style="position:absolute;left:900px;top:16px">Docs</a></header>
+<main style="height:1600px"><a id="docs" href="#/docs" style="position:absolute;left:303px;top:189px;display:block;width:34px;height:22px">Docs</a></main>
+<script>for (const a of document.querySelectorAll('a')) a.addEventListener('click', () => { window.flag = a.id; });</script>

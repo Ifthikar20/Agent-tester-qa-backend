@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Inbox — Archived. Undo</title>
+<!--
+  A target that is only there for a while: the Undo in a toast that closes
+  2.5s after the page loads, far from where Undo was recorded. Today the step
+  presses it straight away and passes. A position check that held the press
+  for a model's answer outlived the toast, and the step failed — and then hung
+  on a box that no longer existed. Nothing else is called Undo and nothing is
+  under the recorded point, so no answer could change what is pressed.
+-->
+<style>*{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d} button{font:inherit}</style>
+<main><h1>Inbox</h1></main>
+<div id="toast" style="position:absolute;left:900px;top:600px;background:#222;color:#fff;padding:8px">Archived. <button id="undo">Undo</button></div>
+<script>
+  undo.onclick = () => { window.flag = 'undone'; location.hash = '#/undone'; };
+  setTimeout(() => toast.remove(), 2500);
+</script>

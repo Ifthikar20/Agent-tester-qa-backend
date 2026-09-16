@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sign in — behind a newsletter sign-up</title>
+<!--
+  A newsletter layer with an address field on it. It reads as dismissible and
+  has "No thanks", but a layer that asks for input is never closed for you.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d}
+  h1{position:absolute;left:310px;top:110px;margin:0;font-size:22px}
+  label{position:absolute;left:310px;font-size:13px;color:#5b6880}
+  input{display:block;width:560px;height:40px;margin-top:4px;padding:0 12px;border:1px solid #d6d9de;border-radius:8px;font:inherit}
+  .em{top:176px} .pw{top:256px}
+  #go{position:absolute;left:310px;top:352px;padding:9px 18px;font:inherit;border:0;border-radius:8px;background:#2f5bea;color:#fff}
+  .promo{position:fixed;inset:0;z-index:50;background:rgba(15,20,30,.45);display:flex;align-items:center;justify-content:center}
+  .card{background:#fff;width:460px;padding:20px 24px;border-radius:12px}
+  .card input{width:100%}
+</style>
+<h1>Sign in</h1>
+<label class="em">Email <input id="em" type="email" autocomplete="off"></label>
+<label class="pw">Password <input id="pw" type="password" autocomplete="off"></label>
+<button type="button" id="go">Sign in</button>
+<div class="promo" id="promo">
+  <div class="card" role="dialog" aria-labelledby="nt">
+    <h2 id="nt">Get the newsletter</h2>
+    <p>One email a month.</p>
+    <input type="email" aria-label="Newsletter address" placeholder="you@example.com">
+    <button type="button">Subscribe</button>
+    <button type="button" id="no">No thanks</button>
+  </div>
+</div>
+<script>
+  document.getElementById('no').onclick = () => document.getElementById('promo').remove();
+  document.getElementById('go').onclick = () => {
+    if (document.getElementById('em').value && document.getElementById('pw').value) location.hash = '#/dashboard';
+  };
+</script>

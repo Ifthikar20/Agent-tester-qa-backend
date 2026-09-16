@@ -7,7 +7,7 @@ is not an entitlement. A plan says what one organisation may do; a switch
 says what this deployment does at all, and a feature that is switched off is
 off on every plan.
 
-The catalogue is shared with the runner, which keeps the same nine keys in
+The catalogue is shared with the runner, which keeps the same ten keys in
 ../switches.js and enforces the `runner.*` half itself. A test reads that file
 and fails when the two lists differ, because a key one side knows and the
 other does not is a switch that does nothing where it matters.
@@ -45,6 +45,7 @@ CATALOGUE = {
     'runner.onboarding': 'creating suites, pages and page scans',
     'runner.origins': 'allowing or removing origins',
     'runner.driving': 'opening URLs and driving the page from the console',
+    'runner.heal': 'fixing broken steps automatically',
     'control.signup': 'self-service sign-up (including sign-up through Google)',
     'control.invitations': 'issuing and accepting invitations',
     'control.google': 'Google sign-in',

@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Harbour — a Docs twin beside the Docs</title>
+<!--
+  A wrong twin within LAYOUT_REACH: nth1/link:Docs, recorded at 320,200, now
+  names a "Docs" link to the changelog 120px to the right — close enough to
+  read as "the layout shifted". The Docs the person pressed is still under the
+  recorded point. A nearer element of the same name is not a shifted layout,
+  and a suggestion to record the twin's place would hide the bug for good.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d}
+  a{position:absolute;display:block;width:34px;height:22px;line-height:22px;color:#2f5bea}
+</style>
+<main>
+  <a id="changelog" href="#/changelog" style="left:423px;top:189px">Docs</a>
+  <a id="docs" href="#/docs" style="left:303px;top:189px">Docs</a>
+</main>
+<script>for (const a of document.querySelectorAll('a')) a.addEventListener('click', () => { window.flag = a.id; });</script>

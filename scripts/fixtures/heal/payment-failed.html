@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Checkout — Payment failed</title>
+<!--
+  A broken app, reporting itself: paying shows "Payment failed" over the page.
+  The dialog mentions a newsletter subscription and has a Close button, so every
+  rule but the veto says it may go. Closing it and pressing Continue would pass.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d}
+  main{max-width:520px;margin:80px auto;padding:0 32px}
+  .backdrop{position:fixed;inset:0;z-index:50;background:rgba(22,24,29,.5);display:none;align-items:center;justify-content:center}
+  .modal{background:#fff;max-width:420px;padding:24px;border-radius:12px}
+</style>
+<main>
+  <h1>Checkout</h1>
+  <button type="button" id="pay">Pay now</button>
+  <button type="button" id="continue">Continue</button>
+</main>
+<div class="backdrop" id="failed">
+  <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="pf">
+    <h2 id="pf">Payment failed</h2>
+    <p>Your card was declined, so your newsletter subscription was not renewed. Subscribe again to keep it.</p>
+    <button type="button" id="close">Close</button>
+  </div>
+</div>
+<script>
+  const failed = document.getElementById('failed');
+  document.getElementById('pay').onclick = () => { failed.style.display = 'flex'; };
+  document.getElementById('close').onclick = () => { failed.style.display = 'none'; };
+  document.getElementById('continue').onclick = () => { location.hash = '#/next'; };
+</script>

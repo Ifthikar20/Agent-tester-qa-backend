@@ -1,0 +1,7 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sign in with Google</title>
+<!-- What in-frame.html's iframe loads: the button another site draws. -->
+<style>body{margin:8px;font:14px system-ui,sans-serif} button{font:inherit;padding:6px 14px}</style>
+<button type="button" aria-label="Continue with Google. Opens in new tab">Continue with Google</button>
+<script>document.querySelector('button').onclick = () => { location.hash = '#pressed'; };</script>

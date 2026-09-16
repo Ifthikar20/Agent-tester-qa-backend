@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sign in — placeholders instead of labels</title>
+<!--
+  A harmless difference: the visible labels became placeholders with the same
+  names, in the same places. ?far moves the Email field 400px from where it was
+  recorded — the same name somewhere else is not taken for it.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d}
+  h1{position:absolute;left:310px;top:110px;margin:0;font-size:22px}
+  input{position:absolute;left:310px;width:560px;height:40px;padding:0 12px;border:1px solid #d6d9de;border-radius:8px;font:inherit}
+  #em{top:196px} #pw{top:276px}
+  .far #em{top:596px}
+  #go{position:absolute;left:310px;top:352px;padding:9px 18px;font:inherit;border:0;border-radius:8px;background:#2f5bea;color:#fff}
+</style>
+<h1>Sign in</h1>
+<input id="em" type="email" autocomplete="off" placeholder="Email">
+<input id="pw" type="password" autocomplete="off" placeholder="Password">
+<button type="button" id="go">Sign in</button>
+<script>
+  if (location.search.includes('far')) document.body.classList.add('far');
+  document.getElementById('go').onclick = () => {
+    if (document.getElementById('em').value && document.getElementById('pw').value) location.hash = '#/dashboard';
+  };
+</script>

@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Shop — every row says Add to cart</title>
+<!--
+  "Add Widget Pro" became "Add to cart" on every row, so the new name is on the
+  page twice. The model's element is the second row's; the only way to write
+  that down in the grammar is nth2/button:Add to cart, counted in DOM order.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d}
+  h1{position:absolute;left:310px;top:80px;margin:0;font-size:22px}
+  .row{position:absolute;left:310px;width:560px;height:44px;display:flex;align-items:center;justify-content:space-between}
+  .a{top:150px} .b{top:204px}
+  button{padding:8px 16px;font:inherit;border:0;border-radius:8px;background:#2f5bea;color:#fff}
+  #basket{position:absolute;left:310px;top:280px;margin:0}
+</style>
+<h1>2 results</h1>
+<div class="row a"><span>Widget</span><button type="button" data-item="Widget">Add to cart</button></div>
+<div class="row b"><span>Widget Pro</span><button type="button" data-item="Widget Pro">Add to cart</button></div>
+<p id="basket">Your basket is empty</p>
+<script>
+  for (const b of document.querySelectorAll('button[data-item]')) {
+    b.onclick = () => { document.getElementById('basket').textContent = `${b.dataset.item} × 1`; };
+  }
+</script>

@@ -1,0 +1,32 @@
+[
+  {
+    "id": "signin-settings",
+    "name": "Sign in and open Settings",
+    "file": "demo.html",
+    "flow": "%% suite \"Recorded flow\"\nflowchart TD\n  n0((\"http://localhost:3000/demo.html\"))\n  n1[\"/demo.html#/dashboard\"]\n  n2[\"/demo.html#/settings\"]\n\n  n0 -->|fill 'Email' : label = 'qa@example.com'; fill 'Password' : label = $QA_PASS; click 'Sign in' : button| n1\n  n1 -->|click 'Settings' : link| n2\n\n%% entry [\"link:Settings\",\"textbox:Email\",\"textbox:Password\",\"button:Sign in\"]\n%% at 1 590,228 560x41 in 1180x760\n%% at 2 590,308 560x41 in 1180x760\n%% at 3 353,371 87x38 in 1180x760\n%% at 5 165,23 57x16 in 1180x760"
+  },
+  {
+    "id": "nav-docs",
+    "name": "Nav to docs",
+    "file": "site.html",
+    "flow": "%% suite \"Recorded flow\"\nflowchart TD\n  n0((\"http://localhost:3000/site.html\"))\n  n1[\"/site.html#pricing\"]\n  n2[\"/site.html#docs\"]\n\n  n0 -->|click 'Pricing' : navigation/link| n1\n  n1 -->|click 'Docs' : navigation/link| n2\n\n%% entry [\"link:Features\",\"link:Pricing\",\"link:Docs\",\"link:Contact\",\"link:See how Harbour prices\",\"link:Read the documentation\",\"button:Back to top\",\"link:Careers\"]\n%% at 1 894,26 51x24 in 1180x760\n%% at 3 958,26 37x24 in 1180x760"
+  },
+  {
+    "id": "shop",
+    "name": "Search, add Widget Pro, open the cart",
+    "file": "shop.html",
+    "flow": "%% suite \"Shop\"\ntestcase TD\n  n0((\"http://localhost:3000/shop.html\"))\n  n1{{\"2 results\"}}\n  n2[\"/shop.html#/cart\"]\n  n3{{\"Widget Pro × 1\"}}\n\n  n0 -->|fill 'Search' : textbox = 'widget'; click 'Search' : button| n1\n  n1 -->|click 'Add Widget Pro' : button; click 'Cart' : link| n2\n  n2 --> n3"
+  },
+  {
+    "id": "dropdown",
+    "name": "Choose Texas as the state",
+    "file": "select.html",
+    "flow": "%% suite \"Paycheck state\"\ntestcase TD\n  n0((\"http://localhost:3000/select.html\"))\n  n1{{\"Paid Bi-weekly in Texas\"}}\n\n  n0 -->|click 'California' : button; click 'Texas' : option| n1"
+  },
+  {
+    "id": "signin-noat",
+    "name": "Sign in and open Settings, recorded without click points",
+    "file": "demo.html",
+    "flow": "%% suite \"Recorded flow\"\nflowchart TD\n  n0((\"http://localhost:3000/demo.html\"))\n  n1[\"/demo.html#/dashboard\"]\n  n2[\"/demo.html#/settings\"]\n\n  n0 -->|fill 'Email' : label = 'qa@example.com'; fill 'Password' : label = $QA_PASS; click 'Sign in' : button| n1\n  n1 -->|click 'Settings' : link| n2"
+  }
+]

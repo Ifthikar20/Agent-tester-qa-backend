@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Harbour — the header is pinned</title>
+<!--
+  Position drift that is only the layout: the Pricing link lives in a
+  position:fixed header, so it is drawn at the top of the viewport however far
+  the page is scrolled. The recording was made while scrolled, and its point is
+  500px below where the link is now. It is the only Pricing link on the page.
+  A rule, not the model, says "the layout shifted".
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d}
+  header{position:fixed;top:0;left:0;right:0;height:56px;background:#fff;border-bottom:1px solid #e3e6ea;z-index:10}
+  header a{position:absolute;top:16px;color:#2f5bea}
+  section{height:1600px;padding:96px 32px}
+</style>
+<header><nav aria-label="Main"><a href="#" style="left:32px">Harbour</a><a href="#pricing" style="left:300px">Pricing</a></nav></header>
+<main><section id="top">Plans for every harbour.</section><section id="pricing">Pricing</section></main>

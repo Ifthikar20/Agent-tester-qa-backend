@@ -1,0 +1,114 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Paycheck — two selects</title>
+<!--
+  Two dropdowns, built the two ways component libraries build them. A recording
+  of the second kind broke on a real paycheck calculator.
+
+    - Pay frequency opens on CLICK and leaves the page alone, like a Headless UI
+      listbox. Its list sits flush under the trigger, so the pointer never
+      leaves a control on its way to an option.
+    - State opens on the PRESS, like a Bits UI or Radix select: pointerdown
+      opens it, and while it is open the rest of the page takes no pointer
+      events. The release lands on nothing and the click that follows goes to
+      <html> — so a recorder listening for clicks kept the option you picked
+      and lost the click that opened the list.
+    - Both triggers are plain buttons named by their value, as on the real site,
+      and State's list scrolls, with Texas below its fold.
+    - An option is chosen the way its kind chooses — on the release for State —
+      and the list lingers for an exit animation, so the click that follows
+      still lands on the option.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.6 system-ui,sans-serif;color:#16181d}
+  main{max-width:520px;margin:80px auto;padding:0 32px}
+  .field{margin:0 0 22px} .caption{display:block;font-size:13px;color:#6b7280;margin-bottom:6px}
+  .trigger{width:100%;text-align:left;font:inherit;padding:10px 14px;border:1px solid #d6d9de;
+           border-radius:10px;background:#fff;cursor:pointer}
+  [role=listbox]{position:absolute;max-height:176px;overflow-y:auto;background:#fff;border:1px solid #d6d9de;
+                 border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);pointer-events:auto;padding:4px}
+  [role=option]{padding:6px 10px;border-radius:6px;cursor:default}
+  [role=option]:hover{background:#f1f3f6}
+</style>
+
+<main>
+  <h1>Paycheck</h1>
+  <div class="field">
+    <span class="caption" id="payLabel">Pay frequency</span>
+    <button type="button" class="trigger" role="combobox" aria-labelledby="payLabel" data-open="click"
+            data-options="Weekly,Bi-weekly,Semi-monthly,Monthly">Bi-weekly</button>
+  </div>
+  <div class="field">
+    <span class="caption" id="stateLabel">State</span>
+    <button type="button" class="trigger" role="combobox" aria-labelledby="stateLabel" data-open="press"
+            data-options="Alabama,Alaska,Arizona,Arkansas,California,Colorado,Connecticut,Delaware,Florida,Georgia,Oregon,Tennessee,Texas,Utah">California</button>
+  </div>
+  <p id="summary">Paid Bi-weekly in California</p>
+</main>
+
+<script>
+  let open = null;    // { trigger, list }
+
+  const [pay, state] = document.querySelectorAll('.trigger');
+  const summarise = () => {
+    document.getElementById('summary').textContent = `Paid ${pay.textContent} in ${state.textContent}`;
+  };
+
+  function shut() {
+    if (!open) return;
+    const { trigger, list } = open;
+    open = null;
+    trigger.setAttribute('aria-expanded', 'false');
+    trigger.dataset.state = 'closed';
+    document.body.style.pointerEvents = '';
+    setTimeout(() => list.remove(), 120);           // the exit animation
+  }
+
+  function show(trigger) {
+    const list = document.createElement('div');
+    list.setAttribute('role', 'listbox');
+    const choose = trigger.dataset.open === 'press' ? 'pointerup' : 'click';
+    for (const name of trigger.dataset.options.split(',')) {
+      const option = document.createElement('div');
+      option.setAttribute('role', 'option');
+      option.setAttribute('aria-selected', String(name === trigger.textContent));
+      option.textContent = name;
+      option.addEventListener(choose, () => {
+        if (open?.list !== list) return;
+        trigger.textContent = name;
+        summarise();
+        shut();
+      });
+      list.append(option);
+    }
+    const r = trigger.getBoundingClientRect();
+    Object.assign(list.style, {
+      left: `${r.left + scrollX}px`, top: `${r.bottom + scrollY - 1}px`, width: `${r.width}px`,
+    });
+    document.body.append(list);
+    trigger.setAttribute('aria-expanded', 'true');
+    trigger.dataset.state = 'open';
+    open = { trigger, list };
+    if (trigger.dataset.open === 'press') document.body.style.pointerEvents = 'none';
+  }
+
+  for (const trigger of [pay, state]) {
+    trigger.setAttribute('aria-haspopup', 'listbox');
+    trigger.setAttribute('aria-expanded', 'false');
+    trigger.dataset.state = 'closed';
+    if (trigger.dataset.open === 'press') {
+      trigger.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        if (open) shut(); else show(trigger);
+      });
+    } else {
+      trigger.addEventListener('click', () => { if (open) shut(); else show(trigger); });
+    }
+  }
+
+  // A press anywhere but the open list and its trigger closes it.
+  document.addEventListener('pointerdown', (e) => {
+    if (open && !open.list.contains(e.target) && !open.trigger.contains(e.target)) shut();
+  }, true);
+</script>

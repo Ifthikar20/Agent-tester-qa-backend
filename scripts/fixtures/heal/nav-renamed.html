@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sign in, two links in — the button reads Log in</title>
+<!--
+  login-renamed.html's rename, on a page reached by following two links in the
+  same tab (?page=2, then ?page=3). Every navigation gives the main frame's refs
+  in Playwright's ai snapshot a new prefix — e4, then f1e4, then f2e4 — so the
+  model names this top-level button with an f-prefixed ref. It is not inside a
+  frame, and a use_element on it must not be refused as if it were.
+-->
+<style>
+  *{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;color:#16181d}
+  h1{position:absolute;left:310px;top:110px;margin:0;font-size:22px}
+  a{position:absolute;left:310px;top:200px}
+  #go{position:absolute;left:310px;top:352px;padding:9px 18px;font:inherit;border:0;border-radius:8px;background:#2f5bea;color:#fff}
+</style>
+<section data-page="1" hidden><h1>Welcome</h1><a href="?page=2">Page 2</a></section>
+<section data-page="2" hidden><h1>Account</h1><a href="?page=3">Page 3</a></section>
+<section data-page="3" hidden><h1>Log in</h1><button type="button" id="go">Log in</button></section>
+<script>
+  const page = new URLSearchParams(location.search).get('page') || '1';
+  document.querySelector(`[data-page="${page}"]`).hidden = false;
+  document.getElementById('go').onclick = () => { location.hash = '#/dashboard'; };
+</script>

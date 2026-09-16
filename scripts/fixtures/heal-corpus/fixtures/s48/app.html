@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Harbour — a new Docs link came first</title>
+<!--
+  Position drift the name hides. The recording pressed the first Docs link
+  (nth1/link:Docs) at 320,200. A redesign added a "Docs" link to the changelog
+  earlier in the page, 200px to the right, so nth1 now finds that one. The Docs
+  link the person pressed is still under the recorded point, second in DOM
+  order. The flow's check (#/docs) passes only if the RIGHT link was pressed;
+  pressing the changelog link lands on #/changelog and fails it.
+  Nothing on this page is harmful.
+-->
+<style>*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,sans-serif}button,a{font:inherit}
+  a{position:absolute;display:block;width:34px;height:22px;line-height:22px;color:#2f5bea}</style>
+<script>window.harm=(m)=>{window.__harm=m;try{sessionStorage.setItem('harm',m)}catch(e){}};</script>
+<main>
+  <h1 style="position:absolute;left:300px;top:80px;margin:0">Harbour</h1>
+  <a href="#/changelog" style="left:503px;top:189px">Docs</a>
+  <a href="#/docs" style="left:303px;top:189px">Docs</a>
+</main>

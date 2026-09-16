@@ -1,0 +1,67 @@
+{
+  "a consent overlay, answered with Reject": {
+    "ok": false,
+    "step": 4,
+    "error": "expected the URL to contain \"#/dashboard\", but it is \"http://heal.test/consent.html\" — the step before this one did not navigate anywhere"
+  },
+  "a What's new dialog, closed": {
+    "ok": false,
+    "step": 2,
+    "error": "expected the URL to contain \"#pricing\", but it is \"http://heal.test/whats-new.html\" — the step before this one did not navigate anywhere"
+  },
+  "a late render inside the grace period": {
+    "ok": false,
+    "step": 1,
+    "error": "\"navigation/link:Pricing\" was not visible within 1200ms, but it appeared Nms later.\n  This is a timing problem, not a naming one — the element is correct.\n  Give it longer:   GC_TIMEOUT_MS=N npm start\n  Or let the page settle first, with a step before it:  wait Nms"
+  },
+  "an option in a closed custom listbox": {
+    "ok": false,
+    "step": 1,
+    "error": "\"option:Texas\" never became visible — and it did not turn up in the 2.7s this waited, so waiting longer will not help.\n  An option is only on the page while its list is open, and nothing opened it.\n  The dropdowns here: button:Bi-weekly, button:California — click the one it belongs to in the step before.\n  Recordings made before this was fixed lost that click — re-record the step, or add the click by hand."
+  },
+  "a label that became a placeholder of the same name": {
+    "ok": false,
+    "step": 1,
+    "error": "\"label:Email\" never became visible — and it did not turn up in the 2.7s this waited, so waiting longer will not help.\n  The page does have: textbox:Email.\n  If yours lives in a menu, put a hover step before it:\n    home -->|hover 'Use Cases' : link; click '…' : menuitem| home"
+  },
+  "a dead button": {
+    "ok": false,
+    "step": 4,
+    "error": "expected the URL to contain \"#/dashboard\", but it is \"http://heal.test/dead-button.html\" — the step before this one did not navigate anywhere"
+  },
+  "a removed link": {
+    "ok": false,
+    "step": 1,
+    "error": "\"link:Settings\" never became visible — and it did not turn up in the 2.7s this waited, so waiting longer will not help.\n  Nothing with a similar name is on the page right now.\n  2 targets are — open \"Targets on this page\" to see them."
+  },
+  "Sign in removed while Sign up routes onward": {
+    "ok": false,
+    "step": 3,
+    "error": "\"button:Sign in\" never became visible — and it did not turn up in the 2.7s this waited, so waiting longer will not help.\n  Nothing with a similar name is on the page right now.\n  3 targets are — open \"Targets on this page\" to see them."
+  },
+  "a broken header link whose footer twin works": {
+    "ok": false,
+    "step": 3,
+    "error": "\"navigation/link:Docs\" never became visible — and it did not turn up in the 2.7s this waited, so waiting longer will not help.\n  The page does have: link:Docs.\n  If yours lives in a menu, put a hover step before it:\n    home -->|hover 'Use Cases' : link; click '…' : menuitem| home"
+  },
+  "a dialog with only Accept and OK": {
+    "ok": false,
+    "step": 4,
+    "error": "expected the URL to contain \"#/dashboard\", but it is \"http://heal.test/accept-only.html\" — the step before this one did not navigate anywhere"
+  },
+  "a \"Payment failed\" dialog with Close": {
+    "ok": false,
+    "step": 3,
+    "error": "expected the URL to contain \"#/next\", but it is \"http://heal.test/payment-failed.html\" — the step before this one did not navigate anywhere"
+  },
+  "an \"Unsaved changes? Keep editing / Discard\" dialog": {
+    "ok": false,
+    "step": 2,
+    "error": "expected the URL to contain \"#/projects\", but it is \"http://heal.test/unsaved.html\" — the step before this one did not navigate anywhere"
+  },
+  "a newsletter banner with an email field": {
+    "ok": false,
+    "step": 4,
+    "error": "expected the URL to contain \"#/dashboard\", but it is \"http://heal.test/newsletter.html\" — the step before this one did not navigate anywhere"
+  }
+}
