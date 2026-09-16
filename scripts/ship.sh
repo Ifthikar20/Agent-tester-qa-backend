@@ -16,6 +16,9 @@
 #   EC2_USER=ubuntu   REMOTE_DIR=/opt/ghostclick
 #   SERVICES="runner"             rebuild fewer images (default all three)
 #   COMPOSE_FILES="-f docker/docker-compose.prod.yml"   headless, no attach
+#   UI_DIR=/path/to/poc-qa-stack  ALSO ship the UI: build it there and put the
+#                                 build where the box serves it (see below).
+#                                 Unset, only the backend goes.
 #
 # This is a WORKING-TREE deploy: whatever is on disk goes, committed or not.
 # Fast for iterating, but it leaves the box's git checkout dirty — for a
@@ -38,6 +41,23 @@ SSH="ssh -i $PEM -o StrictHostKeyChecking=accept-new"
 [ -f "$PEM" ] || { echo "  no key at $PEM — set PEM=/path/to/key.pem"; exit 1; }
 say() { printf '\n  %s\n' "$*"; }
 
+# 0. Build the UI, when told where it is. The runner image carries no UI
+#    (docker/no-ui): in production it serves the folder .env.prod names as
+#    GC_WEB_DIR (docker/docker-compose.prod.yml), read per request — so the UI
+#    is a folder to replace, not an image to rebuild, and this script used to
+#    leave it alone entirely. Built FIRST, so a build that fails stops the
+#    deploy before anything has reached the box. The control plane's address
+#    is baked in at build time (VITE_AUTH_URL; poc-qa-stack/src/config.js).
+UI_OUT=""
+if [ -n "${UI_DIR:-}" ]; then
+  [ -f "$UI_DIR/package.json" ] || { echo "  no UI at $UI_DIR (no package.json) — set UI_DIR=/path/to/poc-qa-stack"; exit 1; }
+  UI_OUT="$UI_DIR/.ship-dist"
+  trap 'rm -rf "$UI_OUT"' EXIT
+  say "building the UI from $UI_DIR (VITE_AUTH_URL=http://$EC2_HOST)"
+  ( cd "$UI_DIR" && rm -rf .ship-dist && VITE_AUTH_URL="http://$EC2_HOST" npx vite build --outDir .ship-dist >/dev/null )
+  [ -f "$UI_OUT/index.html" ] || { echo "  the UI build left no index.html in $UI_OUT"; exit 1; }
+fi
+
 # 1. Ship the source. tar-over-ssh (portable — Git Bash has tar, not always
 #    rsync), additive (never deletes), and it never carries .git, dependencies,
 #    builds, secrets, or the box's OWN org state (suites/, .ghostclick/).
@@ -48,6 +68,23 @@ tar czf - \
   --exclude='*__pycache__*' --exclude='*.pyc' --exclude='*.pem' \
   --exclude='./.env' --exclude='./.env.*' --exclude='./.last_deploy_prior' \
   . | $SSH "$EC2_USER@$EC2_HOST" "mkdir -p '$DIR' && tar xzf - -C '$DIR'"
+
+# 1b. Ship the UI build over the folder the runner serves. Extracted OVER it
+#     rather than swapped in: the folder is bind-mounted into the running
+#     container, and a mount follows the directory, not its name — a renamed
+#     replacement would not be seen until the runner restarted. Additive, so
+#     earlier builds' hashed assets stay behind unreferenced; harmless, and
+#     the runner picks up the new index.html on the next request. .env.prod
+#     is root's (it holds secrets), so it is read with sudo, the way docker
+#     compose reads it above.
+if [ -n "$UI_OUT" ]; then
+  say "shipping the UI -> the box's GC_WEB_DIR"
+  tar czf - -C "$UI_OUT" . | $SSH "$EC2_USER@$EC2_HOST" "set -e; cd '$DIR'
+    WEB=\$(sudo grep '^GC_WEB_DIR=' .env.prod | cut -d= -f2- | sed -e 's/^\"//' -e 's/\"\$//' -e \"s/^'//\" -e \"s/'\$//\")
+    [ -n \"\$WEB\" ] || { echo '    .env.prod names no GC_WEB_DIR'; exit 1; }
+    sudo mkdir -p \"\$WEB\" && sudo tar xzf - -C \"\$WEB\" --no-same-owner
+    echo \"    -> \$WEB\""
+fi
 
 # 2. Rebuild only the code images; chrome / cdp-proxy / caddy / postgres / redis
 #    stay up, so the attached browser survives. Then migrate (a no-op unless a
