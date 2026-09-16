@@ -705,8 +705,56 @@ const historyOf = (req) => {
   return req.space.history;
 };
 
-app.get('/api/runs', (req, res) => res.json(historyOf(req).summary(14, req.query.suite || null)));
-app.get('/api/defects', (req, res) => res.json(historyOf(req).defects(14)));
+/**
+ * The organisation's defects (defects.js), brought up to date with its
+ * history before they are read and pruned on the plan's schedule — closed
+ * ones, that is: an open defect is kept however old it is, because it is
+ * still true.
+ */
+const defectsOf = (req) => {
+  const { defects } = req.space;
+  defects.sync(historyOf(req).list());
+  defects.prune(req.ent.limit('history.retention_days'));
+  return defects;
+};
+
+app.get('/api/runs', (req, res) => {
+  const summary = historyOf(req).summary(14, req.query.suite || null);
+  const defects = defectsOf(req);
+  // Each failed run names its defect, so a history table can link to the
+  // number. Copies: `latest` holds history's own entries, and a field set on
+  // one of those would be written into runs.json by the next run.
+  summary.latest = summary.latest.map((r) => ({ ...r, defect: defects.idFor(r) }));
+  res.json(summary);
+});
+
+app.get('/api/defects', (req, res) => {
+  const defects = defectsOf(req);
+  res.json({ defects: defects.list(), totals: defects.totals() });
+});
+
+/** One defect by any spelling of its number, with its activity and the failed runs history still holds. */
+app.get('/api/defects/:id', (req, res) => {
+  try {
+    const defects = defectsOf(req);
+    const defect = defects.get(req.params.id);
+    res.json({ ok: true, defect, runs: defects.runsOf(defect.id, req.space.history.list()) });
+  } catch (err) { fail(res, err, err.name === 'NoSuchDefect' ? 404 : 400); }
+});
+
+/**
+ * Triage: assign, overrule the severity, park as a known issue or won't-fix.
+ * An owner's or admin's, like the other changes to what the organisation
+ * keeps (docs/AUTH.md §10) — but not step-up, since none of it reaches the
+ * browser. Who made the change is read from the token and nowhere else.
+ */
+app.patch('/api/defects/:id', (req, res) => {
+  try {
+    tenancy.requireManager(req.user);
+    const by = { sub: req.user?.sub ?? null, email: req.user?.email ?? null };
+    sendOk(res, { defect: defectsOf(req).triage(req.params.id, req.body, by) });
+  } catch (err) { fail(res, err, err.name === 'NoSuchDefect' ? 404 : 400); }
+});
 
 /**
  * Pictures for the hero panels, if anyone has put any there.
@@ -984,9 +1032,10 @@ app.get('/api/origins', (req, res) => res.json({ origins: req.space.origins.list
 app.post('/api/origins', (req, res) => {
   try {
     // Origins are an owner's or admin's to change (docs/AUTH.md §10), and
-    // then only with a recent authentication, and then only within the plan.
+    // then only within the plan. No recent-sign-in check: being signed in as an
+    // owner or admin is enough, so allowing a site never asks for the password
+    // again.
     tenancy.requireManager(req.user);
-    if (!steppedUp(req.user)) return res.status(403).json({ ok: false, error: 'step_up_required' });
     const r = req.space.origins.add(req.body?.origin,
       () => req.ent.check('origins.max', req.space.origins.list().length));
     emitTo(req.space.org, { t: 'origins', origins: req.space.origins.list() });
@@ -2127,8 +2176,22 @@ async function run(plan, meta = {}) {
       url: plan.steps.find((s) => s.op === 'goto')?.url ?? '',
       ms: results.reduce((a, r) => a + (r.ms ?? 0), 0),
       results,
+      steps: plan.steps,
     });
     space.history.prune(ent.limit('history.retention_days'));
+    // What this run filed, closed or reopened (defects.js), said in the log as
+    // it happens: a number that turns up on the Defects page with no word
+    // about where it came from reads as somebody else's. Like the report
+    // below, failing at it must not cost the run its verdict.
+    let defect = null;
+    try {
+      for (const c of space.defects.sync(space.history.list())) {
+        emit({ t: 'log', level: c.kind === 'closed' ? 'info' : 'warn', msg: `${c.id} ${c.kind}: ${c.title}` });
+      }
+      defect = space.defects.idFor(entry);
+    } catch (err) {
+      emit({ t: 'log', level: 'error', msg: `could not file the defect: ${err.message}` });
+    }
     // Same function, same IR — with outcomes folded in, the plan diagram
     // becomes the run report. Drawing it is a nicety; failing to draw it must
     // not cost you the run's verdict.
@@ -2138,7 +2201,7 @@ async function run(plan, meta = {}) {
       emit({ t: 'log', level: 'error', msg: `could not draw the report: ${err.message}` });
     }
     await publishTargets();
-    return { ok, passed, total: results.length, error: entry.error, fixed: entry.fixed };
+    return { ok, passed, total: results.length, error: entry.error, fixed: entry.fixed, defect };
   } finally {
     // Clear the lock BEFORE announcing the end. run.end means "you may start
     // another run"; emitting it while still locked makes a caller that runs
@@ -2535,15 +2598,10 @@ wss.on('connection', (ws) => {
     }
 
     // Allowing an origin is a human act, through the UI — an owner's or an
-    // admin's, and, identical to POST /api/origins, one with a recent
-    // authentication and room left on the plan. No plan can reach it.
+    // admin's, and, identical to POST /api/origins, one within the plan. No
+    // recent-sign-in check, so it never asks for the password again.
     if (m.t === 'origin.add') {
       try { tenancy.requireManager(claims); } catch (err) { return refuse('origin.add', err); }
-      if (!steppedUp(claims)) {
-        tell({ t: 'refused', of: 'origin.add', error: 'step_up_required' });
-        tell({ t: 'log', level: 'error', msg: 'allowing an origin needs a recent sign-in — sign in again and retry' });
-        return;
-      }
       try {
         const r = space.origins.add(m.origin,
           () => ent.check('origins.max', space.origins.list().length));

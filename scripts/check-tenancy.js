@@ -522,12 +522,14 @@ try {
   if (aTook && strayLog) ok('and a plan with no goto is refused rather than run on what was there', strayLog.msg);
   else bad('and a plan with no goto is refused rather than run on what was there', JSON.stringify(a.got.events.map((e) => e.t)));
 
-  // Step-up on the socket, and a member on the socket.
+  // No step-up on the socket: a token past its `su` still allows an origin.
+  // A member is still refused.
   const staleSu = await socketFor(tokenFor('check-acme', { su: nowS() - 1, sub: 'sub-stale-su' }));
   staleSu.send({ t: 'origin.add', origin: 'https://another.example' });
-  const suRefused = await until(staleSu.got, (e) => e.t === 'refused' && e.of === 'origin.add');
-  if (suRefused?.error === 'step_up_required') ok('origin.add over the socket needs step-up', 'refused: step_up_required');
-  else bad('origin.add over the socket needs step-up', JSON.stringify(suRefused));
+  const suAnswer = await until(staleSu.got, (e) => (e.t === 'refused' && e.of === 'origin.add')
+    || (e.t === 'origins' && e.origins?.includes('https://another.example')));
+  if (suAnswer?.t === 'origins') ok('origin.add over the socket needs no step-up', 'allowed past su');
+  else bad('origin.add over the socket needs no step-up', JSON.stringify(suAnswer));
   staleSu.ws.close();
   const m = await socketFor(M);
   m.send({ t: 'origin.add', origin: 'https://another.example' });

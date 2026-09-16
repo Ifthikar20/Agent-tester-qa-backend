@@ -35,6 +35,7 @@ import * as origins from './origins.js';
 import * as vault from './secrets.js';
 import * as sessions from './sessions.js';
 import * as history from './runs.js';
+import * as defects from './defects.js';
 import * as suites from './suites.js';
 import * as fixes from './fixes.js';
 
@@ -61,6 +62,7 @@ export function workspace(org) {
       vault: vault.forOrg(org),
       session: sessions.forOrg(org),
       history: history.forOrg(org),
+      defects: defects.forOrg(org),
       suites: suites.forOrg(org),
       // Suggested fixes from its runs, and whether it lets a model make them.
       fixes: fixes.forOrg(org),
