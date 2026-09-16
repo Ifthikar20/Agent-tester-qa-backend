@@ -16,9 +16,10 @@
  */
 import Anthropic from '@anthropic-ai/sdk';
 import {
-  createResolver, requestFor, SYSTEM_PROMPT, DECISION_SCHEMA, FALLBACK_BETA, MODEL, MAX_TOKENS,
+  createResolver, requestFor, understandRequestFor, SYSTEM_PROMPT, DECISION_SCHEMA, FALLBACK_BETA, MODEL, MAX_TOKENS,
 } from '../resolver.js';
 import { composeReport, stripValues, MOVES, FAILURES } from '../heal.js';
+import { composeUnderstanding, UNDERSTANDING_SCHEMA, UNDERSTAND_PROMPT } from '../understand.js';
 
 let failures = 0;
 const ok = (l, d = '') => console.log(`  ✓  ${l.padEnd(58)} ${d}`);
@@ -73,7 +74,10 @@ const message = (content, stop_reason = 'end_turn') => new Response(JSON.stringi
   usage: { input_tokens: 1, output_tokens: 1 },
 }), { status: 200, headers: { 'content-type': 'application/json', 'request-id': 'req_check' } });
 const decisionText = (d) => [{ type: 'text', text: JSON.stringify(d) }];
-const good = { reason: 'The button reads Log in now, in the same place.', failure: 'unknown', move: 'use_element', ref: 'e5', confidence: 0.82 };
+const good = {
+  noticed: ['The sign-in form has one button, "Log in"'], ruled_out: ['"Sign up" in the header, a different action'],
+  reason: 'The button reads Log in now, in the same place.', failure: 'unknown', move: 'use_element', ref: 'e5', confidence: 0.82, advice: '',
+};
 
 const resolver = createResolver({ client, timeoutMs: 5000 });
 answer = () => message(decisionText(good));
@@ -82,7 +86,11 @@ const sent = calls[0];
 const body = JSON.parse(sent?.init?.body ?? '{}');
 const headers = new Headers(sent?.init?.headers ?? {});
 
-check('a decision comes back as sent', JSON.stringify(first) === JSON.stringify({ move: 'use_element', ref: 'e5', reason: good.reason, confidence: 0.82, failure: 'unknown' }));
+check('a decision comes back as sent, with what it noticed and ruled out',
+  JSON.stringify(first) === JSON.stringify({
+    move: 'use_element', ref: 'e5', reason: good.reason, confidence: 0.82, failure: 'unknown',
+    noticed: good.noticed, ruled_out: good.ruled_out, advice: '',
+  }), JSON.stringify(first));
 check('one POST to /v1/messages', calls.length === 1 && /\/v1\/messages\b/.test(sent.url) && sent.init.method === 'POST', sent?.url);
 check('model claude-opus-5', body.model === 'claude-opus-5');
 check(`max_tokens ${MAX_TOKENS}`, body.max_tokens === 4096);
@@ -93,7 +101,10 @@ check('output_config.format is the Decision schema',
 const schema = body.output_config?.format?.schema ?? {};
 check('and the schema is closed, with every field required',
   schema.additionalProperties === false &&
-  ['move', 'ref', 'reason', 'confidence', 'failure'].every((k) => schema.required?.includes(k)) &&
+  ['noticed', 'ruled_out', 'move', 'ref', 'reason', 'confidence', 'failure', 'advice'].every((k) => schema.required?.includes(k)) &&
+  schema.required.every((k) => k in (schema.properties ?? {})) &&
+  schema.properties?.noticed?.type === 'array' && schema.properties.noticed.items?.type === 'string' &&
+  schema.properties?.ruled_out?.type === 'array' && schema.properties?.advice?.type === 'string' &&
   JSON.stringify(schema.properties?.move?.enum) === JSON.stringify(MOVES) &&
   JSON.stringify(schema.properties?.failure?.enum) === JSON.stringify(FAILURES));
 check('one frozen system block, cached',
@@ -132,7 +143,7 @@ console.log('\n— 2b · a position check: same request, a different question �
  */
 check('the frozen system prompt covers the position check',
   SYSTEM_PROMPT.includes('failure kind: moved') && /use_element with that same ref/.test(SYSTEM_PROMPT) &&
-  /Otherwise answer not_present\. No other move applies to a position check\.$/.test(SYSTEM_PROMPT));
+  /Otherwise answer not_present\. No other move applies to a position check\./.test(SYSTEM_PROMPT));
 const movedReport = composeReport({
   ...raw, kind: 'moved', error: 'none: the step has not failed. Its target resolved, far from the recorded point.',
   region: '40x40', resolved: { ref: 'e5', cx: 917, cy: 611, dist: 725 },
@@ -156,6 +167,61 @@ check('it goes out as the same request: one user message, the same schema, the s
   JSON.stringify(movedBody.output_config) === JSON.stringify(body.output_config) &&
   movedBody.messages?.length === 1 && movedBody.messages[0].content === movedReport.text);
 check('with nothing typed and no secret in it', ![SECRET, TYPED_PIN, TYPED_EMAIL].some((v) => (calls[2]?.init?.body ?? '').includes(v)));
+
+// ---------------------------------------------------------------------------
+console.log('\n— 2c · why a step failed: the same request, nothing acted on ———————');
+
+/**
+ * ops.js explainFailure: a check, a page load, a scroll or a wait failed, and
+ * no fix may change it — so the model is asked only why. The same request as a
+ * fix; the report says so, and lists the frames inside the page, which is how a
+ * check recorded from a sign-in button's frame is told apart from a page that
+ * never navigated.
+ */
+check('the frozen system prompt covers an explanation, and what noticed and ruled_out are for',
+  SYSTEM_PROMPT.includes('failure kind: explain') && /nothing you answer is acted on/.test(SYSTEM_PROMPT) &&
+  /noticed holds up to three short facts/.test(SYSTEM_PROMPT) && /ruled_out holds up to two things/.test(SYSTEM_PROMPT));
+const explainReport = composeReport({
+  ...raw, op: 'expect', line: "expect the URL to contain '/gsi/button'", kind: 'explain',
+  error: 'expected the URL to contain "/gsi/button", but it is "https://www.example.com/"',
+  frames: [`https://accounts.google.com/gsi/button?client_id=abc123&token=${SECRET}`],
+}, [SECRET]);
+const framesLine = explainReport.text.split('\n').find((l) => l.startsWith('frames loaded inside the page:')) ?? '';
+check('an explanation says so, and lists the frames — inside the untrusted block, their parameters blanked',
+  /^A recorded QA step failed on today's version of the page, and it is a step no fix may change\./.test(explainReport.text) &&
+  explainReport.text.includes('failure kind: explain') &&
+  framesLine === 'frames loaded inside the page: https://accounts.google.com/gsi/button?client_id=…&token=…' &&
+  explainReport.text.indexOf(framesLine) > explainReport.text.indexOf('<<<UNTRUSTED PAGE CONTENT') &&
+  !explainReport.text.includes(SECRET) && !explainReport.text.includes('abc123'), framesLine);
+// A fix report lists them too — none, for a page with none — because the
+// snapshot shows a frame's contents, and the model must know that nothing
+// under an iframe line can be reached: a target names elements of the page.
+check('and a failure report lists the frames too — none, on a page with none',
+  report.text.split('\n').includes('frames loaded inside the page: none') &&
+  report.text.indexOf('frames loaded inside the page:') > report.text.indexOf('<<<UNTRUSTED PAGE CONTENT'));
+check('the frozen system prompt says nothing inside a frame can be reached, and what to answer instead',
+  /never give the ref of an element under an iframe line/.test(SYSTEM_PROMPT) &&
+  /exists only inside a frame[^.]*answer not_present with failure test_script and advise removing the step/.test(SYSTEM_PROMPT));
+answer = () => message(decisionText({
+  ...good, move: 'not_present', ref: '', failure: 'test_script', reason: 'The check expects a frame\'s address.', advice: 'Remove this check.',
+}));
+const explained = await resolver.decide(explainReport);
+const explainBody = JSON.parse(calls.at(-1)?.init?.body ?? '{}');
+check('it goes out as the same request, and the answer carries its advice',
+  explained?.move === 'not_present' && explained.failure === 'test_script' && explained.advice === 'Remove this check.' &&
+  JSON.stringify(explainBody.system) === JSON.stringify(body.system) &&
+  JSON.stringify(explainBody.output_config) === JSON.stringify(body.output_config) &&
+  explainBody.messages?.[0]?.content === explainReport.text);
+
+answer = () => message(decisionText({ reason: 'Log in, same place.', failure: 'unknown', move: 'use_element', ref: 'e5', confidence: 0.8 }));
+const older = await resolver.decide(report);
+check('an answer without noticed, ruled_out or advice is still a decision, with nothing more to say',
+  older?.move === 'use_element' && Array.isArray(older.noticed) && !older.noticed.length && !older.ruled_out.length && older.advice === '');
+answer = () => message(decisionText({ ...good, noticed: ['one', 7, '  two  ', 'three', 'four'], ruled_out: 'not a list', advice: { no: 1 } }));
+const messy = await resolver.decide(report);
+check('noticed keeps up to three strings, trimmed; anything else is dropped',
+  JSON.stringify(messy?.noticed) === '["one","two","three"]' && JSON.stringify(messy?.ruled_out) === '[]' && messy?.advice === '',
+  JSON.stringify(messy));
 
 // ---------------------------------------------------------------------------
 console.log('\n— 3 · answers that are not a decision ——————————————————————');
@@ -196,9 +262,56 @@ await expectNull('no answer in time is APIConnectionTimeoutError', (init) => new
 await expectNull('a client that is not a client is still only a null', () => message([]), 'Error',
   { resolver: createResolver({ client: {} }) });
 
+// ---------------------------------------------------------------------------
+console.log('\n— 4 · a step just recorded: its own question ——————————————————');
+
+/**
+ * understand.js: each recorded step is described to the model as it is
+ * recorded. The same model, effort, fallbacks and cache shape, with its own
+ * frozen system block and schema — and the same care about what goes out.
+ */
+const stepReport = composeUnderstanding({
+  step: { op: 'click', target: 'label:Continue with Google', at: { x: 590, y: 300, w: 40, h: 40, vw: 1180, vh: 760 } },
+  index: 3,
+  steps: [
+    { op: 'goto', url: 'https://www.example.com/' },
+    { op: 'fill', target: 'label:PIN', value: TYPED_PIN },
+    { op: 'click', target: 'button:Dismiss' },
+    { op: 'click', target: 'label:Continue with Google' },
+  ],
+  capture: { url: 'https://www.example.com/', title: 'Sign in', frames: ['https://accounts.google.com'], snapshot: raw.snapshot },
+  evidence: { inFrame: true, frame: 'https://accounts.google.com' },
+}, [SECRET, TYPED_PIN]);
+calls = [];
+answer = () => message([{ type: 'text', text: JSON.stringify({
+  noticed: ['A Google sign-in button sits in a frame'], summary: 'Pressed Continue with Google inside its frame',
+  concern: 'in_frame', concern_text: 'A replay cannot press inside this frame.', fix: 'remove_step', confidence: 0.9,
+}) }]);
+const understood = await resolver.understand(stepReport);
+const stepBody = JSON.parse(calls[0]?.init?.body ?? '{}');
+check('a recorded step is its own question: the same model, effort and fallbacks, its own cached system block and schema',
+  stepBody.model === 'claude-opus-5' && stepBody.output_config?.effort === 'low' && stepBody.fallbacks === 'default' &&
+  stepBody.system?.length === 1 && stepBody.system[0].text === UNDERSTAND_PROMPT && stepBody.system[0].cache_control?.type === 'ephemeral' &&
+  JSON.stringify(stepBody.output_config?.format?.schema) === JSON.stringify(UNDERSTANDING_SCHEMA) &&
+  JSON.stringify(Object.fromEntries(Object.entries(understandRequestFor(stepReport)).filter(([k]) => k !== 'betas'))) === JSON.stringify(stepBody));
+check('and the schema is closed, with every field it names required',
+  UNDERSTANDING_SCHEMA.additionalProperties === false && Object.keys(UNDERSTANDING_SCHEMA.properties).every((k) => UNDERSTANDING_SCHEMA.required.includes(k)));
+check('the answer comes back checked', understood?.concern === 'in_frame' && understood.fix === 'remove_step' &&
+  understood.summary === 'Pressed Continue with Google inside its frame' && understood.noticed.length === 1, JSON.stringify(understood));
+check('the report says where it happened; nothing typed and no secret goes out',
+  stepReport.text.includes('it happened inside a frame loaded from https://accounts.google.com') &&
+  stepReport.text.includes("fill 'PIN' : label = '…' (typed text, 14 chars)") &&
+  /<<<UNTRUSTED PAGE CONTENT[\s\S]*END UNTRUSTED PAGE CONTENT>>>$/.test(stepReport.text) &&
+  ![SECRET, TYPED_PIN, TYPED_EMAIL].some((v) => (calls[0]?.init?.body ?? '').includes(v)));
+answer = () => message([], 'refusal');
+check('a refusal says nothing about the step, and is not an error', (await resolver.understand(stepReport)) === null && resolver.unavailable === null);
+answer = () => message([{ type: 'text', text: JSON.stringify({ summary: 'x', concern: 'maybe', fix: 'none', confidence: 1, noticed: [], concern_text: '' }) }]);
+check('a concern off the list is no answer', (await resolver.understand(stepReport)) === null && resolver.unavailable === 'InvalidDecision');
+
 console.log(failures
   ? `\n  ${failures} FAILED\n`
   : '\n  OK — the SDK sends claude-opus-5 at low effort with the Decision schema, a cached\n' +
-    '       system block and fallbacks "default"; nothing typed or secret goes out, and\n' +
-    '       every failure is a null with the SDK\'s class name, never a throw.\n');
+    '       system block and fallbacks "default", and a recorded step the same way with its\n' +
+    '       own; nothing typed or secret goes out, and every failure is a null with the\n' +
+    '       SDK\'s class name, never a throw.\n');
 process.exit(failures ? 1 : 0);

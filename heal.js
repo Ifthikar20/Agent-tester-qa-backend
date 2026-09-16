@@ -86,7 +86,7 @@ export function modeFromEnv(raw) {
  * `true` and `on` are `safe`, the spelling an earlier draft documented. The
  * call budget is a whole number or absent.
  *
- * @returns {{mode: 'off'|'safe'|'ai', aiCalls: number, error: string|null}}
+ * @returns {{mode: 'off'|'safe'|'ai', aiCalls: number, aiPerDay: number, aiRecordCalls: number, error: string|null}}
  */
 export function readHealEnv(env = process.env) {
   const shown = (v) => JSON.stringify(String(v).slice(0, 40));
@@ -106,10 +106,18 @@ export function readHealEnv(env = process.env) {
   }
   const day = String(env.GC_HEAL_AI_MAX_CALLS_PER_DAY ?? '').trim();
   if (day && !/^\d{1,6}$/.test(day)) {
-    return { mode, aiCalls: max ? Number(max) : AI_CALLS, aiPerDay: AI_CALLS_PER_DAY,
+    return { mode, aiCalls: max ? Number(max) : AI_CALLS, aiPerDay: AI_CALLS_PER_DAY, aiRecordCalls: AI_RECORD_CALLS,
       error: `GC_HEAL_AI_MAX_CALLS_PER_DAY is ${shown(env.GC_HEAL_AI_MAX_CALLS_PER_DAY)}; it takes a whole number of model calls per organisation per day (default ${AI_CALLS_PER_DAY}).` };
   }
-  return { mode, aiCalls: max ? Number(max) : AI_CALLS, aiPerDay: day ? Number(day) : AI_CALLS_PER_DAY, error: null };
+  const record = String(env.GC_HEAL_AI_MAX_RECORD_CALLS ?? '').trim();
+  if (record && !/^\d{1,4}$/.test(record)) {
+    return { mode, aiCalls: max ? Number(max) : AI_CALLS, aiPerDay: day ? Number(day) : AI_CALLS_PER_DAY, aiRecordCalls: AI_RECORD_CALLS,
+      error: `GC_HEAL_AI_MAX_RECORD_CALLS is ${shown(env.GC_HEAL_AI_MAX_RECORD_CALLS)}; it takes a whole number of model calls per recording (default ${AI_RECORD_CALLS}).` };
+  }
+  return {
+    mode, aiCalls: max ? Number(max) : AI_CALLS, aiPerDay: day ? Number(day) : AI_CALLS_PER_DAY,
+    aiRecordCalls: record ? Number(record) : AI_RECORD_CALLS, error: null,
+  };
 }
 
 /**
@@ -119,6 +127,13 @@ export function readHealEnv(env = process.env) {
  * key — so the day has a ceiling of its own (GC_HEAL_AI_MAX_CALLS_PER_DAY).
  */
 export const AI_CALLS_PER_DAY = 100;
+
+/**
+ * How many questions one recording may ask about its steps (understand.js),
+ * unless GC_HEAL_AI_MAX_RECORD_CALLS says otherwise — inside the day's ceiling
+ * above, which runs share, so a few long recordings cannot quietly spend it.
+ */
+export const AI_RECORD_CALLS = 20;
 
 /**
  * A `ctx.heal` for a script or a check, from the environment.
@@ -248,10 +263,76 @@ export const THINKING = Object.freeze({
   reading: 'Reading the page…',
   deciding: 'Working out what changed…',
   position: 'Checking this is the element you recorded…',
+  explaining: 'Working out why it failed…',
   checking: 'Checking the fix…',
   done: '',
 });
 export const THINKING_PHASES = ['reading', 'deciding', 'checking', 'done'];
+
+// ------------------------------------------------------------------ the trace
+
+/**
+ * How a step was worked out, for the person reading the run — one short entry
+ * at a time, in the order it happened: what the runner saw, which rules it
+ * tried, what the model noticed, ruled out and decided, what the guards
+ * checked, and what was done (the `step.trace` event, and `trace` on the
+ * step's verdict).
+ *
+ * step.thinking says only WHICH phase a model call is in, in the fixed words
+ * above. The trace says what happened in it, so it carries what the run log
+ * already carries — target names, a layer's heading, a guard's refusal, the
+ * model's own short words — made the way a log line is made (ops.js trace: the
+ * run's secrets and URL parameter values taken out). Never a snapshot, never a
+ * typed value.
+ *
+ *   saw        what the runner found: a target that never came, a layer over
+ *              it, an element far from where it was recorded
+ *   rule       a safe fix that could not help, and why (ok: false)
+ *   asked      a model call, and what went with it
+ *   noticed    the model: a fact from the page its answer rests on
+ *   ruled_out  the model: something it considered and rejected, and why
+ *   decided    the model's move, with its reason (`detail`) and confidence
+ *   checked    the guards: passed (ok: true), or refused and why (ok: false)
+ *   did        what was done to the page: a fix's note
+ *   why        the model: why a step failed that no fix may change
+ *   advice     the model: one thing a tester could change
+ *   note       anything else a reader needs: no calls left, no answer
+ *
+ * `tier` says whose it is: the runner's own, a rule's, or the model's.
+ */
+export const TRACE_KINDS = ['saw', 'rule', 'asked', 'noticed', 'ruled_out', 'decided', 'checked', 'did', 'why', 'advice', 'note'];
+export const TRACE_TIERS = ['runner', 'rule', 'ai'];
+/** How many entries one step keeps. A step asked about twice fits with room to spare. */
+export const TRACE_MAX = 32;
+/** How long one entry's text, or its detail, may be. */
+export const TRACE_TEXT = 300;
+
+/** Text as one plain line of at most `max` characters. */
+export const oneLine = (s, max) => {
+  const t = String(s ?? '').replace(/\s+/g, ' ').trim();
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+};
+
+/**
+ * One trace entry in the contract's shape, or null when there is nothing to
+ * say. A field is present only when it says something: `ok` on a rule or a
+ * check, `detail` on a decision (the model's reason), `confidence` and
+ * `failure` on what the model answered.
+ */
+export function traceEntry(kind, text, { tier = 'runner', ok = null, detail = null, confidence = null, failure = null } = {}) {
+  const said = oneLine(text, TRACE_TEXT);
+  if (!TRACE_KINDS.includes(kind) || !said) return null;
+  const more = oneLine(detail, TRACE_TEXT);
+  return {
+    kind,
+    tier: TRACE_TIERS.includes(tier) ? tier : 'runner',
+    text: said,
+    ...(typeof ok === 'boolean' ? { ok } : {}),
+    ...(more ? { detail: more } : {}),
+    ...(typeof confidence === 'number' && Number.isFinite(confidence) ? { confidence: Math.min(1, Math.max(0, confidence)) } : {}),
+    ...(FAILURES.includes(failure) ? { failure } : {}),
+  };
+}
 
 // --------------------------------------------------------------- blockers
 
@@ -507,8 +588,18 @@ export function checkDecision(d) {
     reason: String(d.reason ?? '').replace(/\s+/g, ' ').trim().slice(0, 300),
     confidence: Math.min(1, Math.max(0, confidence)),
     failure: FAILURES.includes(d.failure) ? d.failure : 'unknown',
+    // For the person reading the run (the trace), and nothing decides by
+    // them. An answer without them — a fallback model's, a scripted one — is
+    // still a decision, with nothing more to say.
+    noticed: shortLines(d.noticed, 3),
+    ruled_out: shortLines(d.ruled_out, 2),
+    advice: typeof d.advice === 'string' ? oneLine(d.advice, 200) : '',
   };
 }
+
+/** Up to `n` of a model's short strings, each one line of at most 200 characters; anything that is not a string is dropped. */
+export const shortLines = (v, n) => (Array.isArray(v) ? v : [])
+  .filter((s) => typeof s === 'string').map((s) => oneLine(s, 200)).filter(Boolean).slice(0, n);
 
 // ---------------------------------------------------------------- reports
 
@@ -604,6 +695,15 @@ export function redactSecrets(text, secretValues = []) {
   for (const v of values.filter((x) => x.length < 4)) {
     out = out.replace(new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(v)}(?![\\p{L}\\p{N}])`, 'giu'), () => MARK);
   }
+  // A number is the same number however a page sets it out: a card typed as
+  // 4242424242424242 and shown as "4242 4242 4242 4242", a phone typed as
+  // 5551234567 and shown as "(555) 123-4567". Six digits or more, with what a
+  // page puts between them.
+  for (const v of values) {
+    const digits = v.replace(/[\s().+-]/g, '');
+    if (!/^\d{6,}$/.test(digits)) continue;
+    out = out.replace(new RegExp(`(?<!\\d)${digits.split('').join('[\\s().+-]{0,3}')}(?!\\d)`, 'g'), () => MARK);
+  }
   return out.split(MARK).join('$SECRET');
 }
 
@@ -647,6 +747,24 @@ export function privateLiteral(step) {
  * button. A fragment that is a route (`#/reports`) has no `=` and is kept.
  */
 export const scrubUrls = (text) => String(text ?? '').replace(/([?&#;][^\s=&#?'"<>\]]{1,64}=)[^\s&#'"<>\]]+/g, '$1…');
+
+/**
+ * An address as its origin and path, for a report that needs to say where
+ * something is and never what it carried: no query, no fragment, and any path
+ * segment that looks like a token — sixteen characters or more mixing letters
+ * and digits, or a long hex id or UUID — as `…`. A reset link's
+ * `/reset/MQ/c4a1b2-8f14…/` keeps its shape and loses its secret, which
+ * scrubUrls cannot see because it is not a parameter; `/gsi/button` stays
+ * itself. Null for anything that is not an http(s) address.
+ */
+export function maskPath(url) {
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  if (!/^https?:$/.test(u.protocol)) return null;
+  const opaque = (seg) => (seg.length >= 16 && /\d/.test(seg) && /[a-z]/i.test(seg)) ||
+    (seg.length >= 12 && /^[0-9a-f]{12,}$/i.test(seg.replace(/-/g, '')));
+  return `${u.origin}${u.pathname.split('/').map((seg) => (opaque(seg) ? '…' : seg)).join('/')}`;
+}
 
 /**
  * One snapshot line's header: its role, its accessible name, and the attribute
@@ -761,7 +879,7 @@ export async function gatherReport(page, step, ctx, err) {
 }
 
 /** Page text may not close the untrusted block it sits in. */
-const fence = (s) => String(s ?? '').replace(/<<</g, '‹‹‹').replace(/>>>/g, '›››');
+export const fence = (s) => String(s ?? '').replace(/<<</g, '‹‹‹').replace(/>>>/g, '›››');
 
 /**
  * The report as the model receives it: one user message, the page's content
@@ -780,13 +898,23 @@ export function composeReport(raw, secretValues = []) {
   // whether it is the right element. Said in our words, outside the untrusted
   // block — the ref and the numbers are measured here, not read off the page.
   const moved = raw.kind === 'moved' && raw.resolved;
+  // An explanation (ops.js explainFailure): a step no fix may change failed,
+  // and the only question is why. Said in our words, like a position check.
+  // The frames inside the page are listed for every kind — for a fix, they
+  // are why nothing under an iframe line of the snapshot may be named — and
+  // they are the page's, so they sit inside the untrusted block.
+  const explain = raw.kind === 'explain';
   const lines = [
     moved
       ? 'A recorded QA step is being replayed on today\'s version of the page. It has not failed: its target resolved, ' +
         'but far from where the person clicked. Decide whether the resolved element is the one they recorded.'
-      : 'A recorded QA step failed on today\'s version of the page. Choose one move for it.',
+      : explain
+        ? 'A recorded QA step failed on today\'s version of the page, and it is a step no fix may change. ' +
+          'Explain why it failed; nothing you answer is acted on.'
+        : 'A recorded QA step failed on today\'s version of the page. Choose one move for it.',
     '',
     ...(moved ? ['failure kind: moved (a position check)', ''] : []),
+    ...(explain ? ['failure kind: explain (why it failed; no move is acted on)', ''] : []),
     `Step being replayed (${raw.op}):`,
     `  ${raw.line}`,
     ...(raw.scope ? [`  recorded in the page's ${raw.scope} landmark`] : []),
@@ -812,6 +940,7 @@ export function composeReport(raw, secretValues = []) {
     `page path: ${fence(raw.path)}`,
     `page title: ${fence(raw.title)}`,
     `error: ${fence(raw.error)}`,
+    `frames loaded inside the page: ${raw.frames?.length ? raw.frames.map((f) => fence(f)).join(', ') : 'none'}`,
     'accessibility snapshot (refs look like [ref=e12]; typed field values are removed):',
     fence(snapshot),
     'END UNTRUSTED PAGE CONTENT>>>',

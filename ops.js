@@ -9,7 +9,7 @@ import {
   OPENER_TRIES, OPENER_WAIT, POPUPS, FIELD_FORMS, FIELD_ROLES, FIELD_REACH, AI_OPS, MIN_CONFIDENCE, AI_REACH,
   WAIT_LONGER_MS, OP_ROLES, REF, checkDecision, gatherReport, composeReport, refLine, grammarOf,
   CONSENT, NEVER, HARMFUL, harmAdded, OPENER_REACH, ROLE_FAMILIES, redactSecrets, redactionsFor, lineHeader,
-  LAYOUT_REACH, MOVED_MIN, RESOLVER_WAIT_MS, THINKING, refsIn,
+  LAYOUT_REACH, MOVED_MIN, RESOLVER_WAIT_MS, THINKING, refsIn, traceEntry, scrubUrls, maskPath,
 } from './heal.js';
 
 const DEFAULT_ORIGIN = `http://localhost:${process.env.PORT || 3000}`;
@@ -343,6 +343,43 @@ async function dropdowns(page, limit = 4) {
 }
 
 /**
+ * On a failure, the frame the target is in — origin and path (heal.js
+ * maskPath) — when the page has it and the target cannot: a symbol, so it
+ * never reaches a JSON body or a log line. And on a failure the rules have
+ * said everything about: no fix is tried for it, and the model is not asked
+ * why (explainFailure), because the rule's words are already the answer.
+ */
+const IN_FRAME = Symbol('in-frame');
+const EXPLAINED = Symbol('explained');
+
+/**
+ * The frame the target resolves in, when it is on the page but not OF it:
+ * the first child frame where it is one visible element, as its origin and
+ * path (maskPath). Null when no child frame has it, or the page has none.
+ *
+ * A sign-in button another site draws — Google's /gsi/button, Microsoft's
+ * signinbutton — is the usual case. The recorder saw the press and wrote the
+ * button's name, and the name is right; but a target names elements of the
+ * page, and a locator on the page never reaches into a frame. No fix can
+ * change that, and no amount of waiting: so it is worth a look in every
+ * frame before saying "nothing like it is here", which would be false.
+ */
+async function frameHolding(page, target) {
+  let frames;
+  try { frames = page.frames().filter((f) => f !== page.mainFrame()); } catch { return null; }
+  if (!frames.length) return null;
+  let t;
+  try { t = parseTarget(target, aliasesFor(new URL(page.url()).origin)); } catch { return null; }
+  for (const frame of frames.slice(0, 8)) {
+    const node = locate(frame, t);
+    if ((await node.count().catch(() => 0)) < 1) continue;
+    if (!(await node.first().isVisible().catch(() => false))) continue;
+    return maskPath(frame.url()) ?? 'another site';
+  }
+  return null;
+}
+
+/**
  * Throw the reason a target never became visible — or only did late.
  *
  * Always throws. Its own function so the fixes below can have the failure
@@ -359,6 +396,21 @@ async function explainMissing(page, target, late, opts) {
       `  Give it longer:   GC_TIMEOUT_MS=${Math.ceil((waited + late) / 1000) * 1000} npm start\n` +
       `  Or let the page settle first, with a step before it:  wait ${Math.ceil(late / 100) * 100}ms`
     );
+  }
+
+  const frame = await frameHolding(page, target);
+  if (frame) {
+    // It is right there — inside a frame another site draws, which is not
+    // the page. "Nothing like it is here" would be false, and every fix,
+    // every wait and every rename is beside the point.
+    const err = new Error(
+      `"${target}" never became visible — it is on the page, but inside a frame loaded from ${frame}, ` +
+      `and a step cannot reach inside a frame.\n` +
+      `  A sign-in button another site draws is the usual case: the recorder saw the press, and no replay can make it.\n` +
+      `  Remove the step, or record the flow without it — no fix can make it pass.`
+    );
+    err[IN_FRAME] = frame;
+    throw err;
   }
 
   const here = (await discover(page).catch(() => [])).map((t) => t.target);
@@ -437,6 +489,21 @@ const pending = new WeakMap();
 const hide = (ctx, s) => (s == null ? s : redactSecrets(s, redactionsFor(ctx?.heal)));
 
 /**
+ * One entry of the step's trace (heal.js traceEntry), for ctx.heal.onTrace —
+ * made the way a log line is made: the run's secrets out (hide), and the
+ * values of URL parameters too, because a trace quotes addresses. Never with
+ * fixes off, which says exactly what it always said; and a watcher that throws
+ * is the watcher's problem, never the step's.
+ */
+const plain = (ctx, s) => (s == null ? null : scrubUrls(hide(ctx, String(s))));
+function trace(ctx, kind, text, extra = {}) {
+  if (modeOf(ctx) === 'off' || typeof ctx.heal?.onTrace !== 'function') return;
+  const entry = traceEntry(kind, plain(ctx, text), { ...extra, detail: plain(ctx, extra.detail) });
+  if (!entry) return;
+  try { ctx.heal.onTrace(entry); } catch { /* nothing a display does may change the step */ }
+}
+
+/**
  * A fix took effect: say so now, report it when the step passes.
  *
  * `to` and `insert` are lines of the test itself — the script shows them, and
@@ -453,13 +520,17 @@ function applied(ctx, fix, msg) {
   const secrets = Array.isArray(ctx?.heal?.secretValues) ? ctx.heal.secretValues : [];
   const carries = (s) => s != null && redactSecrets(s, secrets) !== s;
   const unsafe = carries(fix.to) || carries(fix.insert);
+  const note = `${hide(ctx, fix.note)}${unsafe ? ' (not offered as a change: it would write a secret into the test)' : ''}`;
   pending.get(ctx)?.push({
     ...fix,
-    note: `${hide(ctx, fix.note)}${unsafe ? ' (not offered as a change: it would write a secret into the test)' : ''}`,
+    note,
     to: unsafe ? null : fix.to,
     insert: unsafe ? null : fix.insert,
     reason: hide(ctx, fix.reason),
   });
+  // What was done, on the step's trace. A position that moved did nothing to
+  // the page, and the check that found it has said so there already.
+  if (fix.kind !== 'moved') trace(ctx, 'did', note, { tier: fix.tier === 'ai' ? 'ai' : 'rule' });
 }
 
 /** Are two element handles the same node? */
@@ -501,6 +572,13 @@ function think(ctx, phase, text) {
  * retry behaves exactly as a step did before any of this existed.
  */
 const retrying = new WeakSet();
+
+/**
+ * The step each context last put a question to the model about (spend). A
+ * step that already has the model's answer — a consult, a position check — is
+ * not asked again why it failed (explainFailure): that answer is on its trace.
+ */
+const consulted = new WeakMap();
 
 /**
  * The shortest target in the grammar that names exactly this element.
@@ -726,6 +804,7 @@ const GONE_FOR = 300;
 async function uncover(page, node, target, ctx, opts) {
   const layer = await coveredBy(node, opts);
   if (!layer) return null;
+  trace(ctx, 'saw', `${showTarget(target)} is covered by ${layer.what}`);
 
   const verdict = dismissible(layer);
   const consent = CONSENT.test(`${layer.name}\n${layer.text}`);
@@ -734,6 +813,9 @@ async function uncover(page, node, target, ctx, opts) {
   const choice = verdict.ok ? dismissButton(layer.buttons.filter((b) => b.onTop).map((b) => b.name), { consent }) : null;
   if (!choice) {
     const names = layer.buttons.map((b) => b.name).filter(Boolean).slice(0, 4);
+    trace(ctx, 'rule', `Not closed, because ${!verdict.ok ? verdict.why
+      : consent ? 'a cookie or consent notice is only answered with its reject button, and it has none'
+        : 'none of its buttons is a safe way out'}`, { tier: 'rule', ok: false });
     throw healable(new Error(hide(ctx,
       `"${target}" is covered by ${layer.what}, and it was not dismissed, because ` +
       (!verdict.ok
@@ -758,6 +840,7 @@ async function uncover(page, node, target, ctx, opts) {
 
   const still = await coveredBy(node, opts);
   if (still) {
+    trace(ctx, 'saw', `It is still covered, by ${still.what}`);
     throw healable(new Error(hide(ctx,
       `"${target}" is still covered, by ${still.what}, after pressing "${choice}" on ${layer.what}.` +
       `\n  A fix dismisses one layer per step; whatever is left is in the way of the target.`
@@ -781,6 +864,7 @@ async function stillUncovered(node, target, ctx, opts, dismissed) {
   if (wait > 0) await sleep(wait);
   const back = await coveredBy(node, opts);
   if (back) {
+    trace(ctx, 'saw', `${back.what} came back after "${dismissed.choice}" was pressed, and covers it again`);
     throw healable(new Error(hide(ctx,
       `"${target}" is covered again, by ${back.what}, after pressing "${dismissed.choice}" on ${dismissed.what} — it came back.` +
       `\n  A fix dismisses one layer per step; a layer that returns is in the way of the target.`
@@ -1058,9 +1142,25 @@ async function missing(page, target, node, ctx, opts) {
   try { await explainMissing(page, target, late, opts); } catch (err) { failure = err; }
   if (mode === 'off') throw failure;
 
+  trace(ctx, 'saw', `${showTarget(target)} did not appear in the ${(((opts.timeout ?? TIMEOUT) + GRACE) / 1000).toFixed(1)}s it was waited for`);
+  if (failure[IN_FRAME]) {
+    // Not healable: a target names elements of the page, so no move — not a
+    // rename, not a wait, not a layer closed — can reach it. Nothing on the
+    // page is pressed to look for it, and the model is not asked: the rule
+    // has said all there is to say, in the failure's own words.
+    trace(ctx, 'rule', `No fix can reach it: it is inside a frame loaded from ${failure[IN_FRAME]}, which a target cannot name`,
+      { tier: 'rule', ok: false });
+    failure[EXPLAINED] = true;
+    throw failure;
+  }
   const found = (opts.op === 'fill' && await sameNameField(page, target, ctx, opts)) ||
     await revealHidden(page, target, node, ctx, opts);
-  if (!found) throw healable(failure, 'missing');
+  if (!found) {
+    trace(ctx, 'rule', opts.op === 'fill'
+      ? 'No safe fix applies: it was not just late, no field near where it was recorded has the same name, and rules never use a different name'
+      : 'No safe fix applies: it was not just late, and rules never use a different name', { tier: 'rule', ok: false });
+    throw healable(failure, 'missing');
+  }
   return found;
 }
 
@@ -1209,6 +1309,11 @@ async function placed(page, target, node, box, d, ctx, opts) {
   if (!twins.nearer && (d.dist <= LAYOUT_REACH || (unique && sticky))) {
     await handle?.dispose().catch(() => {});
     say(ctx, `${target} moved from ${d.px},${d.py} to ${d.cx},${d.cy} — the layout shifted${sticky ? ' (a pinned header)' : ''}`);
+    // On the trace from MOVED_MIN only, like the suggestion: a font loading is
+    // not something a reader of the run needs a line for.
+    if (d.dist >= MOVED_MIN) {
+      trace(ctx, 'saw', `${showTarget(target)} is ${d.dist}px from where it was recorded — the layout shifted${sticky ? ' (a pinned header)' : ''}`, { tier: 'rule' });
+    }
     // Not for a step a rule already had to find (a same-name field, an option
     // in an opened list): that fix changes the step's line, and a second
     // suggestion made from the old line would only ever go stale beside it.
@@ -1224,15 +1329,22 @@ async function placed(page, target, node, box, d, ctx, opts) {
   // call left, and never about an element a rule already had to find for this
   // step: that step has taken its one fix.
   const heal = ctx.heal;
+  trace(ctx, 'saw', `${showTarget(target)} matched ${d.dist}px from where it was recorded` +
+    (twins.nearer ? ', and another element of the same name is nearer that point' : ''));
   if (modeOf(ctx) !== 'ai' || opts.rescued || typeof heal.resolver?.decide !== 'function' || !(heal.budget?.aiCalls > 0)) {
     await handle?.dispose().catch(() => {});
     warn();
+    trace(ctx, 'note', modeOf(ctx) === 'ai' && !opts.rescued && typeof heal.resolver?.decide === 'function'
+      ? 'Pressed as recorded: no AI calls were left in this run to check it is the element you recorded'
+      : 'Pressed as recorded: nothing has confirmed it is the element you recorded');
     return as;
   }
   const couldNot = (why = null) => {
     warn();
     if (why) say(ctx, `AI move use_element not used: ${why}`, 'warn');
     say(ctx, `AI couldn't confirm ${target} is the element you recorded`, 'warn');
+    if (why) trace(ctx, 'checked', `Not used: ${why}`, { ok: false });
+    trace(ctx, 'note', 'Pressed as recorded: the AI could not confirm it is the element you recorded');
     return as;
   };
   if (!handle) return couldNot();
@@ -1248,11 +1360,13 @@ async function placed(page, target, node, box, d, ctx, opts) {
     // so. The press is the one it was going to be anyway; only the words and
     // the suggestion are refused.
     if (block) { couldNot(block); return true; }
+    trace(ctx, 'checked', 'Passed the checks: it is not inside an alert, a dialog it was not recorded in, or a consent layer', { ok: true });
     say(ctx, `AI confirmed ${target} is the element you recorded — the layout moved`);
     applied(ctx, fixFor(ctx, opts.step, opts.op, {
       kind: 'moved', tier: 'ai', at: now, note: movedNote(' — the model confirmed it is the element recorded'),
       reason: decision.reason, confidence: decision.confidence,
     }), null);
+    trace(ctx, 'did', 'Pressed it as recorded: only the layout had moved', { tier: 'ai' });
     return true;
   };
 
@@ -1328,6 +1442,7 @@ async function placed(page, target, node, box, d, ctx, opts) {
         if (layer) refuse(`${to} is covered by ${layer.what}`);
       }
       const nextBox = await next.boundingBox().catch(() => null) ?? refuse(`${to} has no box`);
+      trace(ctx, 'checked', `Passed the checks: ${[...hit.passed, `nearer where it was recorded than ${showTarget(target)}`].join(' · ')}`, { ok: true });
       applied(ctx, fixFor(ctx, opts.step, opts.op, {
         kind: 'used_element', tier: 'ai', to,
         note: `Used ${showTarget(to)} in place of ${showTarget(target)}, which resolved ${d.dist}px from the recorded point`,
@@ -1508,7 +1623,7 @@ async function refFor(page, snapshot, handle, name, deadline = null) {
     for (const h of lines) {
       if (want && (h.name.toLowerCase().includes(want)) !== named) continue;
       if (!want && !named) continue;
-      for (const m of h.attrs.matchAll(/\[ref=(e\d+)\]/g)) if (once.has(m[1]) && !refs.includes(m[1])) refs.push(m[1]);
+      for (const m of h.attrs.matchAll(/\[ref=((?:f\d+)?e\d+)\]/g)) if (once.has(m[1]) && !refs.includes(m[1])) refs.push(m[1]);
     }
   }
   for (const ref of refs.slice(0, 80)) {
@@ -1554,11 +1669,14 @@ async function ask(page, step, ctx, err) {
  * case `reading` is followed straight by `done`: the page was read, and there
  * was nothing in it to ask about.
  */
-async function readFor(page, step, ctx, err, moved = null) {
+async function readFor(page, step, ctx, err, moved = null, { explain = false } = {}) {
   const heal = ctx.heal;
   if (typeof heal.resolver?.decide !== 'function') return null;
   if (!(heal.budget?.aiCalls > 0)) {
-    if (!moved) say(ctx, 'AI: unknown - no AI calls left in this run', 'warn');
+    if (!moved) {
+      say(ctx, 'AI: unknown - no AI calls left in this run', 'warn');
+      trace(ctx, 'note', 'No AI calls left in this run, so the AI was not asked');
+    }
     return null;
   }
   think(ctx, 'reading');
@@ -1579,6 +1697,11 @@ async function readFor(page, step, ctx, err, moved = null) {
   let point = null;
   try {
     raw = await gatherReport(page, step, ctx, err);
+    // Every report lists the frames inside the page: for an explanation
+    // (explainFailure) the evidence that a step was recorded in one of them,
+    // and for a fix the reason the model must not name anything in one — the
+    // snapshot shows a frame's contents, and a target can never reach them.
+    Object.assign(raw, { frames: framesIn(page), ...(explain ? { kind: 'explain' } : {}) });
     if (moved) {
       let name = '';
       try { name = parseTarget(step.target).name ?? ''; } catch { /* an alias: no name to look for first */ }
@@ -1598,7 +1721,7 @@ async function readFor(page, step, ctx, err, moved = null) {
   }
   // `under` is the report's own: whether anything a reroute could name sits
   // under the recorded point (placed decides from it whether to hold the press).
-  const report = { ...composeReport(raw, redactionsFor(heal)), kind: moved ? 'moved' : 'failed', resolved, under: point };
+  const report = { ...composeReport(raw, redactionsFor(heal)), kind: moved ? 'moved' : explain ? 'explain' : 'failed', resolved, under: point };
   if (moved && !report.refs.has(resolved)) return null;
   return report;
 }
@@ -1612,7 +1735,9 @@ async function readFor(page, step, ctx, err, moved = null) {
 function spend(ctx, report, limit) {
   const heal = ctx.heal;
   heal.budget.aiCalls -= 1;
-  think(ctx, 'deciding', report.kind === 'moved' ? THINKING.position : THINKING.deciding);
+  consulted.set(ctx, heal.step);
+  think(ctx, 'deciding', { moved: THINKING.position, explain: THINKING.explaining }[report.kind] ?? THINKING.deciding);
+  trace(ctx, 'asked', ASKED[report.kind] ?? ASKED.failed, { tier: 'ai' });
   let timer = null;
   let timedOut = false;
   return Promise.race([
@@ -1622,13 +1747,70 @@ function spend(ctx, report, limit) {
     new Promise((resolve) => { timer = setTimeout(() => { timedOut = true; resolve(null); }, limit); }),
   ]).catch(() => null).then((answer) => {
     clearTimeout(timer);
-    if (!answer) return { decision: null, why: `AI unavailable: ${timedOut ? 'Timeout' : heal.resolver.unavailable ?? 'no answer'}` };
+    if (!answer) {
+      const why = timedOut ? 'Timeout' : heal.resolver.unavailable ?? 'no answer';
+      trace(ctx, 'note', `No answer from the AI (${why})`);
+      return { decision: null, why: `AI unavailable: ${why}` };
+    }
     // An answer whose fields throw when read is an answer of the wrong shape,
     // not an exception that replaces the step's own error.
     let decision = null;
     try { decision = checkDecision(answer); } catch { /* reported below */ }
-    return decision ? { decision, why: null } : { decision: null, why: 'AI unavailable: InvalidDecision' };
+    if (!decision) {
+      trace(ctx, 'note', 'The AI’s answer could not be read, so nothing was done with it');
+      return { decision: null, why: 'AI unavailable: InvalidDecision' };
+    }
+    heard(ctx, decision, report);
+    return { decision, why: null };
   });
+}
+
+/** What a model call is sent with, in words, by the kind of question it is. */
+const ASKED = {
+  failed: 'Asked the AI what changed, sending the page’s structure with typed values and secrets removed',
+  moved: 'Asked the AI whether it is the element you recorded, sending the page’s structure with typed values and secrets removed',
+  explain: 'Asked the AI why it failed, sending the page’s structure with typed values and secrets removed',
+};
+
+/**
+ * What the model said, on the step's trace: the facts it noticed, what it
+ * ruled out, and its decision — or, asked why a step failed, its answer and
+ * the one thing a tester could change. Its own words, redacted like every
+ * entry; whether anything is done with a move is for the guards, after.
+ */
+function heard(ctx, d, report) {
+  for (const fact of d.noticed ?? []) trace(ctx, 'noticed', fact, { tier: 'ai' });
+  for (const other of d.ruled_out ?? []) trace(ctx, 'ruled_out', other, { tier: 'ai' });
+  if (report.kind === 'explain') {
+    trace(ctx, 'why', d.reason || 'The AI gave no reason', { tier: 'ai', confidence: d.confidence, failure: d.failure });
+  } else {
+    trace(ctx, 'decided', decidedText(d, report), {
+      tier: 'ai', detail: d.reason, confidence: d.confidence, ...(d.move === 'not_present' ? { failure: d.failure } : {}),
+    });
+    if (d.move !== 'not_present' && d.confidence < MIN_CONFIDENCE) {
+      trace(ctx, 'checked', `Not acted on: ${Math.round(d.confidence * 100)}% sure is under the ${Math.round(MIN_CONFIDENCE * 100)}% a move needs`, { ok: false });
+    }
+  }
+  if (d.advice && (report.kind === 'explain' || d.move === 'not_present')) trace(ctx, 'advice', d.advice, { tier: 'ai' });
+}
+
+/** A model's move in words, naming the element its ref points at in the snapshot it was shown. */
+function decidedText(d, report) {
+  const line = d.ref ? refLine(report.snapshot, d.ref) : null;
+  const named = line ? `${line.role}${line.name ? ` "${line.name}"` : ''}` : null;
+  if (report.kind === 'moved') {
+    if (d.move !== 'use_element') return 'It could not say this is the element you recorded';
+    return d.ref === report.resolved
+      ? 'It is the element you recorded; only the layout moved'
+      : `The element you recorded is ${named ?? 'another one'}, nearer where you clicked`;
+  }
+  return {
+    wait_longer: 'Wait longer: it is still on its way',
+    dismiss_blocker: `Close what is in the way, with ${named ?? 'its close button'}`,
+    reveal: `Open ${named ?? 'the list it is in'} first`,
+    use_element: `Use ${named ?? 'another element'} instead: the same control, renamed`,
+    not_present: 'It is not on the page to use',
+  }[d.move];
 }
 
 /**
@@ -1637,13 +1819,19 @@ function spend(ctx, report, limit) {
  */
 async function refElement(page, d, report) {
   if (!REF.test(d.ref) || !report.refs.has(d.ref)) refuse(`ref "${d.ref}" is not in the snapshot that was sent`);
-  if (d.ref.startsWith('f')) refuse('the element is inside a frame, which a target cannot name');
   if (!refLine(report.snapshot, d.ref)) refuse(`ref ${d.ref} is not on exactly one line of the snapshot`);
   const locator = page.locator(`aria-ref=${d.ref}`);
   if ((await locator.count().catch(() => 0)) !== 1 || !(await locator.isVisible().catch(() => false))) {
     refuse(`ref ${d.ref} is not exactly one visible element`);
   }
   const handle = await locator.elementHandle({ timeout: 1000 }).catch(() => null) ?? refuse(`ref ${d.ref} went away`);
+  // The frame is the element's to say, never the ref's: after a navigation in
+  // the same tab every main-frame ref carries an f prefix too (e4, then f1e4,
+  // then f2e4), and reading the prefix refused every move on such a page.
+  if ((await handle.ownerFrame().catch(() => null)) !== page.mainFrame()) {
+    await handle.dispose().catch(() => {});
+    refuse('the element is inside a frame, which a target cannot name');
+  }
   // normalize() BEFORE anything is pressed: after a click it bakes in
   // whatever the click changed, a toggle's new name included.
   const normalized = String(await locator.normalize().catch(() => ''));
@@ -1703,6 +1891,7 @@ async function useElement(op, page, step, ctx, d, report, insert = null) {
   const hit = await refElement(page, d, report);
   try {
     const to = await vetElement(op, page, step, hit);
+    trace(ctx, 'checked', `Passed the checks: ${hit.passed.join(' · ')}`, { ok: true });
     await ACT[op](page, { ...step, target: to }, ctx);
     applied(ctx, fixFor(ctx, step, op, {
       kind: insert ? 'opened_menu' : 'used_element', tier: 'ai', to, insert,
@@ -1730,16 +1919,21 @@ async function vetElement(op, page, step, hit) {
   // on input and passes the run.
   if (step.valueRef) refuse('a vault value is only ever typed into the field it was recorded for');
   if (!OP_ROLES[op].has(hit.role)) refuse(`a ${hit.role} is not something a ${op} acts on`);
+  // What it passed, in words, left on `hit.passed` for the step's trace: a
+  // reader sees which checks stood between the model's answer and the press.
+  const passed = [`a ${hit.role}, which a ${op} acts on`];
   let recorded;
   try { recorded = parseTarget(step.target, aliasesFor(new URL(page.url()).origin)); } catch { refuse('the recorded target does not parse'); }
   const harm = harmAdded(recordedName(recorded), hit.name);
   if (harm) refuse(`"${hit.name}" says "${harm}", and the recorded step did not — that is a different action, not a rename`);
+  passed.push('its name adds no word that acts');
   const landmark = LANDMARKS.has(recorded.scope) ? recorded.scope : null;
   if (landmark) {
     const region = await page.getByRole(landmark).first().elementHandle({ timeout: 1000 }).catch(() => null);
     const inside = region ? await page.evaluate(([r, e]) => r.contains(e), [region, hit.handle]).catch(() => false) : false;
     await region?.dispose().catch(() => {});
     if (!inside) refuse(`the element is outside the recorded ${landmark} landmark`);
+    passed.push(`inside the recorded ${landmark} landmark`);
   }
   // A same-named button inside a dialog is the dialog's button. "Continue"
   // in a "Payment failed" alertdialog sat 30px from the page's own Continue
@@ -1747,20 +1941,25 @@ async function vetElement(op, page, step, hit) {
   // Accept on a cookie bar is the bar's (layerGuard).
   const layered = await layerGuard(page, hit.handle, recorded, hit.name);
   if (layered) refuse(layered);
+  passed.push('not in an alert, a consent layer or a dialog it was not recorded in');
   if (step.at) {
     await hit.handle.scrollIntoViewIfNeeded({ timeout: 1000 }).catch(() => {});
     const box = await hit.handle.boundingBox().catch(() => null) ?? refuse('the element has no box');
     const off = drift(step.at, box, page.viewportSize());
     if (off && off.dist > AI_REACH) refuse(`the element is ${off.dist}px from the recorded point, more than ${AI_REACH}px`);
+    passed.push(off ? `${off.dist}px from where it was recorded (at most ${AI_REACH}px)` : 'where it was recorded');
   } else {
     // No point to measure: a landmark says which region, not which control,
     // so the kind of control has to stay the same either way.
     const was = recordedFamily(recorded, op);
     const now = op === 'fill' && FIELD_ROLES.has(hit.role) ? 'field' : ROLE_FAMILIES[hit.role] ?? hit.role;
     if (!was || was !== now) refuse(`with no recorded point the kind of control has to stay ${was ?? 'the same'}, and this is a ${hit.role}`);
+    passed.push('the same kind of control as recorded');
   }
-  return await expressible(page, hit.handle, candidatesFor(hit), landmark)
+  const to = await expressible(page, hit.handle, candidatesFor(hit), landmark)
     ?? refuse('the element cannot be written as a target — a frame, or CSS only');
+  hit.passed = passed;
+  return to;
 }
 
 /**
@@ -1787,6 +1986,7 @@ async function dismissBlocker(op, page, step, ctx, d, report, err) {
     }
     const verdict = dismissible(layer, { wording: false });
     if (!verdict.ok) refuse(`the ${layer.what} may not be dismissed, because ${verdict.why}`);
+    trace(ctx, 'checked', `Passed the checks: "${hit.name}" is a reject or close button on the ${layer.what} covering the target, and that layer reads as harmless`, { ok: true });
     if (!(await press(hit.handle, ctx))) refuse(`"${hit.name}" cannot be pressed where it is`);
     say(ctx, `${FIXED} pressed "${hit.name}" on the ${layer.what}, as the model suggested.`);
     await settle(page);
@@ -1822,6 +2022,7 @@ async function reveal(op, page, step, ctx, d, report, err) {
     const named = await expressible(page, hit.handle, candidatesFor(hit), null)
       ?? refuse('the opener cannot be written as a target');
     const insert = clickLine(named);
+    trace(ctx, 'checked', `Passed the checks: ${showTarget(named)} opens a list, is not a link, and says nothing that acts`, { ok: true });
 
     before = await page.locator(POPUPS).count().catch(() => 0);
     if (!(await press(hit.handle, ctx))) { before = null; refuse(`${named} cannot be pressed where it is`); }
@@ -1902,6 +2103,7 @@ async function consultOnce(op, page, step, ctx, err) {
   } catch (e) {
     say(ctx, verdict);
     say(ctx, `AI move ${d.move} not used: ${e instanceof Refused ? e.message : 'the step still failed after it'}`, 'warn');
+    trace(ctx, 'checked', e instanceof Refused ? `Not used: ${e.message}` : 'Tried, and the step still failed after it', { ok: false });
     throw err;
   } finally {
     retrying.delete(ctx);
@@ -1939,6 +2141,74 @@ async function healing(op, page, step, ctx) {
     think(ctx, 'done');
   }
   for (const fix of fixes) ctx.heal.onFix?.(fix);
+}
+
+/**
+ * Where the frames inside the page come from, for an explanation — a step
+ * recorded in one cannot pass against the page. Each as its origin and path
+ * only (heal.js maskPath): no query, no fragment, no token-like segment.
+ */
+function framesIn(page) {
+  try {
+    return [...new Set(page.frames().filter((f) => f !== page.mainFrame()).map((f) => maskPath(f.url())).filter(Boolean))].slice(0, 8);
+  } catch { return []; }
+}
+
+/** Why a failure is only explained, by the op that failed: each is a step no fix may change. */
+const UNFIXABLE = {
+  expect: 'Checks are never changed by fixes, so the AI was only asked why this one failed',
+  goto: 'Opening a page is never changed by fixes, so the AI was only asked why it failed',
+  scroll: 'A scroll is never changed by fixes, so the AI was only asked why it failed',
+  wait: 'A wait is never changed by fixes, so the AI was only asked why it failed',
+};
+
+/**
+ * Why a step failed, from the model, when no fix may change it: a check, a
+ * page load, a scroll or a wait — never healed, by design — or a click, fill
+ * or hover whose failure no move mends. The answer goes in the log and on the
+ * step's trace, and nowhere else: nothing is pressed or retried, and the step's
+ * error stays the step's error, because defect numbers fingerprint it.
+ *
+ * Only in mode ai, with a model and a call left, and once a step — a step the
+ * model has already answered for is not asked again. The run loop calls this
+ * after a step has failed and before it says so. Never throws.
+ *
+ * @returns {Promise<{failure: string, reason: string, advice: string, confidence: number}|null>}
+ */
+export async function explainFailure(page, step, ctx, err) {
+  if (modeOf(ctx) !== 'ai') return null;
+  const heal = ctx.heal;
+  if (typeof heal.resolver?.decide !== 'function' || consulted.get(ctx) === heal.step) return null;
+  if (!(heal.budget?.aiCalls > 0)) {
+    trace(ctx, 'note', 'No AI calls left in this run, so the AI was not asked why it failed');
+    return null;
+  }
+  // A failure the rules have said everything about — a target inside a frame
+  // (missing) — is not put to the model: its own words already say why, and
+  // what to do, and a call would only say them again with less certainty.
+  if (err?.[EXPLAINED]) {
+    trace(ctx, 'note', 'The rules said why in full, so the AI was not asked');
+    return null;
+  }
+  trace(ctx, 'note', UNFIXABLE[step?.op] ?? 'No fix applies to this failure, so the AI was only asked why it failed');
+  try {
+    const report = await readFor(page, step, ctx, err, null, { explain: true });
+    if (!report) return null;
+    const { decision, why } = await spend(ctx, report, waitOf(heal.resolver) + 2000);
+    if (why) say(ctx, why, 'warn');
+    if (!decision) return null;
+    say(ctx, `AI: ${decision.failure} - ${decision.reason || 'no reason given'}`);
+    return {
+      failure: decision.failure,
+      reason: plain(ctx, decision.reason) ?? '',
+      advice: plain(ctx, decision.advice) ?? '',
+      confidence: decision.confidence,
+    };
+  } catch {
+    return null;
+  } finally {
+    think(ctx, 'done');
+  }
 }
 
 /**

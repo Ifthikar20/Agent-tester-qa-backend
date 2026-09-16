@@ -27,6 +27,10 @@
  *                                  may confirm it or name the twin under the
  *                                  point — and never fails a passing step; and
  *                                  step.thinking around every model call
+ *  10  the trace                   how each step was worked out, in order: what
+ *                                  was seen, tried, noticed, decided, checked and
+ *                                  done — why a check failed, asked once and
+ *                                  never changing its error — and nothing secret
  *
  *   node scripts/check-heal.js --pin    with GC_HEAL_BASELINE set, also rewrites
  *                                       fixtures/heal/off-baseline.json
@@ -45,7 +49,7 @@ delete process.env.PORT;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
-const { OPS } = await import('../ops.js');
+const { OPS, explainFailure } = await import('../ops.js');
 const { VirtualCursor, sleep } = await import('../cursor.js');
 const heal = await import('../heal.js');
 
@@ -120,6 +124,15 @@ check('normalize() strings map to the grammar',
   JSON.stringify(heal.grammarOf("locator('#css')")) === '[]');
 check('a decision off the menu is no decision', heal.checkDecision({ move: 'click', confidence: 1 }) === null &&
   heal.checkDecision({ move: 'reveal', ref: 'e1', reason: 'x', confidence: 7, failure: 'nope' })?.confidence === 1);
+check('an answer keeps what it noticed and ruled out: trimmed, capped, strings only',
+  JSON.stringify(heal.checkDecision({ move: 'not_present', confidence: 0.5, noticed: [' a ', 1, 'b', 'c', 'd'], ruled_out: ['x', 'y', 'z'], advice: '  do this  ' })) ===
+  JSON.stringify({ move: 'not_present', ref: '', reason: '', confidence: 0.5, failure: 'unknown', noticed: ['a', 'b', 'c'], ruled_out: ['x', 'y'], advice: 'do this' }));
+check('a trace entry has the contract\'s shape: only the fields that say something, its text one capped line',
+  JSON.stringify(heal.traceEntry('decided', 'Use   button "Log in"\ninstead', { tier: 'ai', detail: 'renamed', confidence: 1.4, failure: 'nope' })) ===
+    JSON.stringify({ kind: 'decided', tier: 'ai', text: 'Use button "Log in" instead', detail: 'renamed', confidence: 1 }) &&
+  heal.traceEntry('checked', 'x', { ok: false }).ok === false && !('ok' in heal.traceEntry('saw', 'x')) &&
+  heal.traceEntry('mystery', 'x') === null && heal.traceEntry('saw', '   ') === null &&
+  heal.traceEntry('saw', 'y'.repeat(900)).text.length === heal.TRACE_TEXT && heal.traceEntry('why', 'x', { tier: 'boss' }).tier === 'runner');
 
 // Section 8 drives these through real pages; here they are the lists alone.
 check('a button name is a way out only WHOLE: "Reject all changes" and "Close account" are not',
@@ -171,6 +184,8 @@ const browser = await chromium.launch({
 
 const VIEW = { width: 1180, height: 760 };
 const ORIGIN = 'http://heal.test';
+/** Where a frame another site draws is served from (in-frame.html), so it is a cross-origin frame as Google's is. */
+const FRAME_ORIGIN = 'http://frame.test';
 const ALLOW = { list: () => [ORIGIN], has: (o) => o === ORIGIN };
 const SECRET = 'vault-S3cret-value';
 const VAULT = {
@@ -296,34 +311,46 @@ function fixture(name) {
 async function run(ops, steps, healing, after, { vault = VAULT, secret = SECRET } = {}) {
   const context = await browser.newContext({ viewport: VIEW });
   await context.route('**/*', (route) => route.abort('blockedbyclient'));
-  await context.route(`${ORIGIN}/**`, (route) => {
-    const body = fixture(new URL(route.request().url()).pathname.slice(1));
-    return body ? route.fulfill({ contentType: 'text/html; charset=utf-8', body })
-      : route.fulfill({ status: 404, contentType: 'text/plain', body: 'Not found' });
-  });
+  for (const origin of [ORIGIN, FRAME_ORIGIN]) {
+    await context.route(`${origin}/**`, (route) => {
+      const body = fixture(new URL(route.request().url()).pathname.slice(1));
+      return body ? route.fulfill({ contentType: 'text/html; charset=utf-8', body })
+        : route.fulfill({ status: 404, contentType: 'text/plain', body: 'Not found' });
+    });
+  }
   const page = await context.newPage();
   const cdp = await context.newCDPSession(page);
   const logs = [];
   const fixes = [];
   const thinking = [];
+  const trace = [];
   const ctx = { cursor: new VirtualCursor(cdp, () => {}), emit: (e) => logs.push(e), pace: 0, origins: ALLOW, vault };
   if (healing) {
+    const { explain: _explain, ...given } = healing;
     ctx.heal = {
       resolver: null, budget: { aiCalls: 6 }, secretValues: [secret], step: 0, steps, onFix: (f) => fixes.push(f),
-      // What server.js sends as step.thinking, with the step it was sent on.
+      // What server.js sends as step.thinking and step.trace, with the step each was sent on.
       onThinking: (phase, text) => thinking.push({ i: ctx.heal.step, phase, text }),
-      ...healing,
+      onTrace: (entry) => trace.push({ i: ctx.heal.step, ...entry }),
+      ...given,
     };
   }
   let failed = null;
   try {
     for (const [i, step] of steps.entries()) {
       if (ctx.heal) ctx.heal.step = i;
-      try { await ops[step.op](page, step, ctx); } catch (err) { failed = { i, error: String(err?.message ?? err) }; break; }
+      try { await ops[step.op](page, step, ctx); } catch (err) {
+        failed = { i, error: String(err?.message ?? err) };
+        // As server.js's loop does, when a case asks for it: the model's why,
+        // for a failure no fix may change. Opt-in, so every section before 10
+        // counts calls and phases exactly as it always has.
+        if (healing?.explain) failed.why = await explainFailure(page, step, ctx, err);
+        break;
+      }
       await sleep(60);
     }
     const extra = after ? await after(page).catch(() => undefined) : undefined;
-    return { ok: !failed, failed, logs, fixes, thinking, extra, heal: ctx.heal };
+    return { ok: !failed, failed, logs, fixes, thinking, trace, extra, heal: ctx.heal };
   } finally {
     await context.close().catch(() => {});
   }
@@ -469,6 +496,59 @@ const menuOpen = await run(OPS, [go('removed-link.html'), click('link:Settings')
 check('the menu opened to look is shut again', menuOpen.extra === 'false', `aria-expanded=${menuOpen.extra}`);
 
 // ---------------------------------------------------------------------------
+console.log('\n— 3b · a step inside a frame: on the page, out of reach, in every mode ——');
+
+// The recorder saw a press on a sign-in button another site draws in a frame
+// (in-frame.html) and wrote its name. The name is right and the button is
+// there; but a target names elements of the page, never of a frame, so no
+// wait, rename or closed layer can make the step pass. The failure says so —
+// where the button is, and what to do — the same in every mode; the rules
+// say it on the trace; and the model is never asked, not for a fix and not why.
+{
+  const GOOGLE = 'button:Continue with Google. Opens in new tab';
+  const framed = [go('in-frame.html'), click('button:Add item'), click(GOOGLE), url('#pressed')];
+  const where = /^"button:Continue with Google\. Opens in new tab" never became visible — it is on the page, but inside a frame loaded from http:\/\/frame\.test\/in-frame-button\.html, and a step cannot reach inside a frame\./;
+  const fOff = await run(OPS, framed);
+  const fSafe = await run(OPS, framed, { mode: 'safe' });
+  const tempted = fake((report) => decide('use_element', refOf(report.snapshot, 'button', 'Continue with Google. Opens in new tab')));
+  const fAi = await run(OPS, framed, { mode: 'ai', resolver: tempted, explain: true });
+  const on = (r, i) => r.trace.filter((e) => e.i === i);
+  check('off: the failure says it is inside a frame, which one, and that no fix can help',
+    !fOff.ok && fOff.failed.i === 2 && where.test(fOff.failed.error) && /Remove the step, or record the flow without it/.test(fOff.failed.error) &&
+    !/Nothing with a similar name/.test(fOff.failed.error), first(fOff.failed?.error));
+  check('safe: the same failure, word for word, and no fix', !fSafe.ok && fSafe.failed.i === 2 && fSafe.failed.error === fOff.failed.error && !fSafe.fixes.length,
+    first(fSafe.failed?.error));
+  check('ai: the same failure, and the model was never asked — not for a fix, not why',
+    !fAi.ok && fAi.failed.i === 2 && fAi.failed.error === fOff.failed.error && !fAi.fixes.length && tempted.calls === 0 &&
+    fAi.failed.why === null && fAi.heal.budget.aiCalls === 6, `${tempted.calls} calls · why=${JSON.stringify(fAi.failed?.why)}`);
+  check('ai: the trace says the rule found it in the frame, and why the AI was not asked',
+    on(fAi, 2).map((e) => e.kind).join(' ') === 'saw rule note' &&
+    /^No fix can reach it: it is inside a frame loaded from http:\/\/frame\.test\/in-frame-button\.html, which a target cannot name$/.test(on(fAi, 2)[1]?.text ?? '') &&
+    on(fAi, 2)[1]?.tier === 'rule' && on(fAi, 2)[1]?.ok === false && /rules said why in full/.test(on(fAi, 2)[2]?.text ?? ''),
+    on(fAi, 2).map((e) => `${e.kind}: ${e.text}`).join(' | '));
+  check('the frame\'s parameters never reach the failure or the trace',
+    !/client_id|demo123/.test(fOff.failed.error) && !fAi.trace.some((e) => /client_id|demo123/.test(`${e.text} ${e.detail ?? ''}`)));
+  check('the page\'s own buttons still resolve on a page with a frame', fOff.failed.i === 2 && fAi.failed.i === 2, 'Add item passed first');
+
+  // A target the page has nowhere — not in it, not in a frame — is put to the
+  // model as before: told which frames the page holds, and refused when it
+  // names the frame's button anyway.
+  const nowhere = [go('in-frame.html'), click('button:Sign in'), url('#/dashboard')];
+  const told = notPresent();
+  const fAsked = await run(OPS, nowhere, { mode: 'ai', resolver: told });
+  const framesLine = (told.reports[0]?.text ?? '').split('\n').find((l) => l.startsWith('frames loaded inside the page:')) ?? '';
+  check('a fix report lists the frames inside the page — origin and path, parameters blanked',
+    !fAsked.ok && told.calls === 1 && framesLine === 'frames loaded inside the page: http://frame.test/in-frame-button.html' &&
+    !(told.reports[0]?.text ?? '').includes('demo123'), framesLine);
+  const fTempted = fake((report) => decide('use_element', refOf(report.snapshot, 'button', 'Continue with Google. Opens in new tab')));
+  const fRefused = await run(OPS, nowhere, { mode: 'ai', resolver: fTempted });
+  const fLog = fRefused.logs.map((e) => e.msg ?? '').find((m) => /^AI move use_element not used:/.test(m)) ?? '';
+  check('and the frame\'s button, named by the model for a target of the page, is refused',
+    !fRefused.ok && fTempted.calls === 1 && /inside a frame, which a target cannot name/.test(fLog) && !fRefused.fixes.length &&
+    fRefused.failed.error === fAsked.failed?.error, fLog || first(fRefused.failed?.error));
+}
+
+// ---------------------------------------------------------------------------
 console.log('\n— 4 · off is off: the same failures, word for word ——————————————');
 
 /** Only the measured part of a timing message may differ between two runs. */
@@ -585,6 +665,22 @@ for (const c of REFUSED) {
     Boolean(said) && noSnapshotInLogs(r) && (c.budget === 0 ? c.resolver.calls === 0 : c.resolver.calls >= 1),
     said ?? (r.ok ? 'PASSED' : `no log line; ${first(r.failed.error)}`));
 }
+
+// After a navigation in the same tab, Playwright prefixes every main-frame ref
+// in the ai snapshot: e4, then f1e4, then f2e4. A guard that read the prefix as
+// "inside a frame" refused every model move on any page reached by a click.
+let navRef = null;
+const navModel = fake((report) => { navRef = refOf(report.snapshot, 'button', 'Log in'); return decide('use_element', navRef); });
+const navigated = await run(OPS, [
+  go('nav-renamed.html'), click('link:Page 2'), url('page=2'), click('link:Page 3'), url('page=3'),
+  click('button:Sign in', at(345, 372)), url('#/dashboard'),
+], { mode: 'ai', resolver: navModel });
+const navUsed = navigated.fixes.find((f) => f.kind === 'used_element');
+const navRefusal = navigated.logs.map((e) => e.msg ?? '').find((m) => /^AI move \w+ not used:/.test(m));
+check('a rename two navigations in (an f-prefixed, top-level ref) passes',
+  /^f\d+e\d+$/.test(navRef ?? '') && navigated.ok && navModel.calls === 1 && !navRefusal &&
+  navUsed?.tier === 'ai' && navUsed.to === 'button:Log in' && navUsed.step === 5,
+  `ref ${navRef} · ${navigated.ok ? `${navUsed?.to} — ${navUsed?.note}` : navRefusal ?? first(navigated.failed?.error)}`);
 
 // ---------------------------------------------------------------------------
 console.log('\n— 6 · what the model is shown ——————————————————————————————');
@@ -1104,6 +1200,148 @@ const farOff = await drifted(farSteps);
     `${allThinking.length} phases`);
 }
 
+// ---------------------------------------------------------------------------
+console.log('\n— 10 · the trace: how each step was worked out ————————————————————');
+
+/**
+ * What server.js sends as step.trace (heal.js traceEntry), collected by run()
+ * with the step it was about. Every case here has a rule or a model working
+ * something out, and the trace has to say it in order — and say nothing on a
+ * step that needed no help, nothing with fixes off, and nothing a page printed
+ * or a run typed that the run keeps to itself.
+ */
+const kindsOn = (r, i) => r.trace.filter((e) => e.i === i).map((e) => e.kind).join(' ');
+const traceOf = (r, kind) => r.trace.find((e) => e.kind === kind);
+const allTraces = [];
+const traced = async (steps, healing, after) => {
+  const r = await run(OPS, steps, healing, after);
+  allTraces.push(...r.trace);
+  return r;
+};
+
+// a · a rename, from what went wrong to what was done
+{
+  const thinker = fake((report) => decide('use_element', refOf(report.snapshot, 'button', 'Log in'), {
+    reason: 'renamed in place', noticed: ['The form\'s one button now reads "Log in"'], ruled_out: ['"Sign up" in the header, a different action'],
+  }));
+  const r = await traced(signin('login-renamed.html'), { mode: 'ai', resolver: thinker });
+  check('a: a rename reads saw, rule, asked, noticed, ruled out, decided, checked, did — all on its step',
+    r.ok && kindsOn(r, 3) === 'saw rule asked noticed ruled_out decided checked did' && r.trace.every((e) => e.i === 3),
+    r.trace.map((e) => `${e.i}:${e.kind}`).join(' '));
+  const d = traceOf(r, 'decided');
+  check('a: the decision names the element, with the model\'s reason and confidence',
+    d?.tier === 'ai' && d.text === 'Use button "Log in" instead: the same control, renamed' && d.detail === 'renamed in place' &&
+    d.confidence === 0.9 && !('failure' in d), JSON.stringify(d));
+  const passed = traceOf(r, 'checked');
+  const did = traceOf(r, 'did');
+  check('a: the checks it passed are listed, and what was done is the fix\'s own note',
+    passed?.ok === true &&
+    /^Passed the checks: a button, which a click acts on · its name adds no word that acts · not in an alert, a consent layer or a dialog it was not recorded in · (?:\d+px from where it was recorded \(at most 250px\)|where it was recorded)$/.test(passed.text) &&
+    did?.tier === 'ai' && did.text === r.fixes.find((f) => f.kind === 'used_element')?.note, `${passed?.text} | ${did?.text}`);
+  check('a: the rule says why it could not help, and the model\'s words are marked as the model\'s',
+    traceOf(r, 'rule')?.ok === false && traceOf(r, 'rule')?.tier === 'rule' && traceOf(r, 'saw')?.tier === 'runner' &&
+    ['asked', 'noticed', 'ruled_out', 'decided'].every((k) => traceOf(r, k)?.tier === 'ai'));
+}
+
+// b · a move the guards refuse, and a function that is gone
+{
+  const r = await traced(signin('login-renamed.html?far'), { mode: 'ai', resolver: fake(logIn) });
+  const refused = r.trace.find((e) => e.kind === 'checked' && e.ok === false);
+  check('b: a refused move is a failed check, in the guard\'s words, and nothing is done',
+    !r.ok && /^Not used: the element is \d+px from the recorded point, more than 250px$/.test(refused?.text ?? '') && !traceOf(r, 'did'),
+    refused?.text ?? kindsOn(r, 3));
+  const gone = await traced(signin('signup-only.html'), { mode: 'ai', resolver: fake(decide('not_present', '', {
+    failure: 'app_bug', reason: 'Sign in is gone', advice: 'Check whether sign-in was removed on purpose.',
+  })) });
+  const said = traceOf(gone, 'decided');
+  check('b: not_present is decided with its failure, and its advice follows',
+    !gone.ok && said?.text === 'It is not on the page to use' && said.failure === 'app_bug' && said.detail === 'Sign in is gone' &&
+    traceOf(gone, 'advice')?.text === 'Check whether sign-in was removed on purpose.' && !traceOf(gone, 'did'), kindsOn(gone, gone.failed?.i));
+}
+
+// c · safe: the rules say what they did, and what they would not do
+{
+  const closed = await traced(signin('consent.html'), { mode: 'safe' });
+  const note = closed.fixes.find((f) => f.kind === 'closed_popup')?.note;
+  check('c: a consent overlay: seen, then closed — by rule, in the fix\'s own words',
+    closed.ok && / is covered by /.test(traceOf(closed, 'saw')?.text ?? '') && traceOf(closed, 'did')?.tier === 'rule' &&
+    traceOf(closed, 'did')?.text === note && !closed.trace.some((e) => e.tier === 'ai'), closed.trace.map((e) => `${e.i}:${e.kind}`).join(' '));
+  const kept = await traced(signin('accept-only.html'), { mode: 'safe' });
+  check('c: a layer no rule may close: seen, and the rule says why not',
+    !kept.ok && Boolean(traceOf(kept, 'saw')) && traceOf(kept, 'rule')?.ok === false && /^Not closed, because /.test(traceOf(kept, 'rule')?.text ?? ''),
+    traceOf(kept, 'rule')?.text);
+}
+
+// d · why a check failed: asked once, explained, and its error untouched
+{
+  ATTACK_PAGES['frame-check.html'] = CSS + '<main><h1>Home</h1><button id="dismiss">Dismiss</button>' +
+    '<iframe title="Sign in with Google" src="/gsi-button.html?client_id=abc123" style="width:300px;height:60px;border:0"></iframe></main>' +
+    '<script>document.getElementById("dismiss").onclick=()=>document.getElementById("dismiss").remove()</script>';
+  ATTACK_PAGES['gsi-button.html'] = CSS + '<button>Continue with Google</button>';
+  const frameSteps = [go('frame-check.html'), click('button:Dismiss'), url('/gsi-button')];
+  const safe = await traced(frameSteps, { mode: 'safe', explain: true });
+  const explainer = fake(decide('not_present', '', {
+    failure: 'test_script', confidence: 0.85, reason: 'The check expects the address of the sign-in frame, not of the page.',
+    noticed: ['A frame inside the page loads /gsi-button.html'], advice: 'Remove this check.',
+  }));
+  const r = await traced(frameSteps, { mode: 'ai', resolver: explainer, explain: true });
+  const why = traceOf(r, 'why');
+  check('d: a failed check is explained — note, asked, noticed, why, advice — and its error is the error without a model',
+    !r.ok && r.failed.i === 2 && r.failed.error === safe.failed?.error && explainer.calls === 1 &&
+    kindsOn(r, 2) === 'note asked noticed why advice' && why?.failure === 'test_script' && why.confidence === 0.85 &&
+    r.failed.why?.failure === 'test_script' && r.failed.why.advice === 'Remove this check.' && r.heal.budget.aiCalls === 5,
+    `${kindsOn(r, 2)} · ${JSON.stringify(r.failed.why)}`);
+  const shown = explainer.reports[0]?.text ?? '';
+  check('d: the model was told it is an explanation, and which frames the page holds — origin and path, nothing after',
+    shown.includes('failure kind: explain') && shown.includes('frames loaded inside the page: http://heal.test/gsi-button.html\n') &&
+    !shown.includes('client_id') && !shown.includes('abc123') && explainer.reports[0]?.kind === 'explain',
+    shown.split('\n').find((l) => l.startsWith('frames loaded')));
+  check('d: thinking went reading, deciding (why it failed), done — on the failed step',
+    r.thinking.map((t) => t.phase).join(' ') === 'reading deciding done' && r.thinking[1]?.text === heal.THINKING.explaining &&
+    r.thinking.every((t) => t.i === 2), r.thinking.map((t) => t.phase).join(' '));
+  check('d: safe never asks, and says nothing about it', !safe.ok && safe.failed.why === null && !safe.trace.length,
+    safe.trace.map((e) => e.kind).join(' '));
+
+  const once = fake(decide('not_present', '', { failure: 'app_bug', reason: 'Sign in is gone' }));
+  const asked = await traced(signin('signup-only.html'), { mode: 'ai', resolver: once, explain: true });
+  check('d: a step the model already answered for is not asked again why it failed',
+    !asked.ok && once.calls === 1 && asked.failed.why === null && !traceOf(asked, 'why'), `${once.calls} calls`);
+
+  const spent = await traced(frameSteps, { mode: 'ai', resolver: fake(decide('not_present')), explain: true, budget: { aiCalls: 0 } });
+  check('d: with no calls left it is not asked, and the trace says so',
+    !spent.ok && spent.heal.resolver.calls === 0 && spent.failed.why === null && kindsOn(spent, 2) === 'note' &&
+    /No AI calls left/.test(traceOf(spent, 'note')?.text ?? ''), kindsOn(spent, 2));
+
+  const silent = await traced(frameSteps, { mode: 'ai', resolver: fake(null, 'RateLimitError'), explain: true });
+  check('d: a model that does not answer: the trace says so, the error is untouched, done still arrives',
+    !silent.ok && silent.failed.error === safe.failed?.error && silent.failed.why === null &&
+    kindsOn(silent, 2) === 'note asked note' && /RateLimitError/.test(silent.trace.at(-1)?.text ?? '') &&
+    silent.thinking.map((t) => t.phase).join(' ') === 'reading deciding done', kindsOn(silent, 2));
+
+  const offRun = await traced(frameSteps, { mode: 'off', resolver: explainer, explain: true });
+  check('d: off: no trace, no question, no why', !offRun.ok && !offRun.trace.length && offRun.failed.why === null && explainer.calls === 1);
+}
+
+// e · what a trace may never carry, and its shape
+{
+  const leaky = fake(decide('not_present', '', {
+    failure: 'app_bug', reason: `the page printed ${SECRET} and ${PIN}`, noticed: [`typed ${EMAIL} here`], advice: `use ${SECRET}`,
+  }));
+  const r = await traced([go('secret-echo.html'), fill('label:Email', EMAIL), fill('label:Password', '$QA_PASS'), fill('label:PIN', PIN),
+    click('button:Continue')], { mode: 'ai', resolver: leaky, explain: true });
+  const words = (e) => `${e.text} ${e.detail ?? ''}`;
+  check('e: a secret, a typed PIN or an address the model repeats is redacted in every entry',
+    r.trace.length > 0 && !r.trace.some((e) => [SECRET, PIN, EMAIL].some((v) => words(e).includes(v))) &&
+    r.trace.some((e) => words(e).includes('$SECRET')), r.trace.map(words).find((w) => w.includes('$SECRET')));
+  const offRun = await traced(signin('consent.html'), { mode: 'off' });
+  check('e: off has no trace at all, even where safe says a lot', !offRun.trace.length);
+  check('e: every entry is in the contract\'s shape',
+    allTraces.length > 20 && allTraces.every((e) => heal.TRACE_KINDS.includes(e.kind) && heal.TRACE_TIERS.includes(e.tier) &&
+      typeof e.text === 'string' && e.text.length > 0 && e.text.length <= heal.TRACE_TEXT && !e.text.includes('\n') &&
+      (!('ok' in e) || typeof e.ok === 'boolean') && !/\[ref=/.test(e.text)),
+    `${allTraces.length} entries`);
+}
+
 await browser.close();
 
 // ---------------------------------------------------------------------------
@@ -1128,9 +1366,13 @@ check('the server reads GC_HEAL strictly: off, safe, ai, and the old spellings',
   env({}).mode === 'off' && env({}).aiCalls === 6 && !env({}).error && env({ GC_HEAL: 'off' }).mode === 'off' &&
   env({ GC_HEAL: 'AI', GC_HEAL_AI_MAX_CALLS: '2' }).mode === 'ai' && env({ GC_HEAL: 'ai', GC_HEAL_AI_MAX_CALLS: '2' }).aiCalls === 2 &&
   env({ GC_HEAL: 'on' }).mode === 'safe' && !env({ GC_HEAL: 'true' }).error);
+check('a recording has a budget of its own, 20 unless GC_HEAL_AI_MAX_RECORD_CALLS says otherwise',
+  env({}).aiRecordCalls === 20 && env({ GC_HEAL: 'ai', GC_HEAL_AI_MAX_RECORD_CALLS: '5' }).aiRecordCalls === 5 &&
+  env({ GC_HEAL: 'ai', GC_HEAL_AI_MAX_RECORD_CALLS: '0' }).aiRecordCalls === 0);
 check('and a word it does not know is an error naming the variable',
   /^GC_HEAL is "sometimes"/.test(env({ GC_HEAL: 'sometimes' }).error ?? '') &&
-  /^GC_HEAL_AI_MAX_CALLS/.test(env({ GC_HEAL: 'ai', GC_HEAL_AI_MAX_CALLS: 'lots' }).error ?? ''),
+  /^GC_HEAL_AI_MAX_CALLS/.test(env({ GC_HEAL: 'ai', GC_HEAL_AI_MAX_CALLS: 'lots' }).error ?? '') &&
+  /^GC_HEAL_AI_MAX_RECORD_CALLS is "many"/.test(env({ GC_HEAL: 'ai', GC_HEAL_AI_MAX_RECORD_CALLS: 'many' }).error ?? ''),
   env({ GC_HEAL: 'sometimes' }).error);
 
 const scratch = mkdtempSync(join(tmpdir(), 'gc-heal-fixes-'));

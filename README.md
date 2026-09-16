@@ -1229,8 +1229,10 @@ boot (like a typo in `GC_SWITCHES_OFF`):
 GC_HEAL=off    # the default: the same steps and the same messages as before
 GC_HEAL=safe   # the rules below, no model (1, true and on mean safe too)
 GC_HEAL=ai     # the rules, then Claude for what they could not fix
-               # (GC_HEAL_AI_MAX_CALLS, default 6 calls per run, and
-               #  GC_HEAL_AI_MAX_CALLS_PER_DAY, default 100 per organisation)
+               # (GC_HEAL_AI_MAX_CALLS, default 6 calls per run,
+               #  GC_HEAL_AI_MAX_RECORD_CALLS, default 20 per recording, and
+               #  GC_HEAL_AI_MAX_CALLS_PER_DAY, default 100 per organisation,
+               #  which runs and recordings share)
 ```
 
 Each run then gets its own effective mode (ops.js reads it from `ctx.heal` and
@@ -1283,6 +1285,16 @@ log, as a line starting `fixed:`:
   inside the recorded landmark when there is no click point. A vault value goes
   only into a password field.
 
+One thing is not a fix but is said plainly, in every mode: **a target inside a
+frame**. The page has the element, but inside a frame another site draws — a
+Google or Microsoft sign-in button — and a target names elements of the page,
+never of a frame. The step fails at once naming the frame, and says that no
+fix can make it pass: nothing on the page is pressed to look for it, and in
+`ai` the model is not asked, for a fix or why — the rule's words are the
+answer. (The recorder flags such a step as it is recorded, too, and offers to
+take it out.) When the model is asked about a page with frames, its report
+lists them, and it is told never to name anything under an iframe line.
+
 With `ai`, a click, fill or hover the rules could not fix is described to
 `claude-opus-5` (resolver.js) — the step, its neighbours but never a later
 check, the page's accessibility snapshot with every typed value and secret
@@ -1319,9 +1331,11 @@ fails at that step, saying what covers it. With fixes off the click still lands
 on the layer and the case fails a step or two later, as before.
 
 **What is sent to Anthropic**, and only in `ai`, only for an organisation that
-opted in, only for a click, fill or hover the rules could not fix, at most
-`GC_HEAL_AI_MAX_CALLS` times a run and `GC_HEAL_AI_MAX_CALLS_PER_DAY` times a
-day per organisation: the recorded step as a line of the flow language, the two
+opted in, for a click, fill or hover the rules could not fix — and, as below,
+to explain a failed step and to read each recorded step — at most
+`GC_HEAL_AI_MAX_CALLS` times a run, `GC_HEAL_AI_MAX_RECORD_CALLS` times a
+recording and `GC_HEAL_AI_MAX_CALLS_PER_DAY` times a day per organisation, runs
+and recordings together. For a step the rules could not fix: the recorded step as a line of the flow language, the two
 steps before it and the next two actions (never a later check), the error, the
 page's path and title, and its accessibility snapshot — the structure of the
 page AND its visible text, capped at 12,000 characters — with every typed field
@@ -1335,6 +1349,15 @@ model. The request is pinned by `npm run check:heal-request`. It goes to
 Anthropic's API under the deployment's one key, shared by every organisation
 on it, and is handled under the API's data-retention terms — read them before
 an organisation opts in.
+
+The same goes, with the same redaction, for the two other questions below: an
+explanation of a failed step sends that step's report plus the frames loaded
+inside the page, each as its origin and path with no query or fragment and any
+token-like path segment masked; each recorded step sends the step as a line of
+the flow language, the two steps before it, what the rules found, and the page
+captured just after it, its address masked the same way. A number the run typed
+or keeps in the vault is also redacted when a page sets it out differently
+("4242 4242 4242 4242"). Both are pinned by `npm run check:heal-request`.
 
 **Cost and time.** One fixed step is usually one call, two when the model opens
 a menu and then names the item. A call is a cached ~600-token system prompt plus
@@ -1380,6 +1403,51 @@ defect number that includes the failed step's index is not — sees a new index.
 A fix whose opener has no name to write down is reported with the run and not
 kept, since accepting it could change nothing.
 
+**How a step was worked out.** With `safe` or `ai`, a step that needed anything
+worked out carries a trace: what the runner saw (a target that never came, a
+layer over it, an element far from where it was recorded), which rule it tried
+and why that could not help, what the model was asked, the facts it noticed,
+what it ruled out, what it decided with its reason and confidence, which guards
+the move passed or which one refused it, and what was done. Each entry goes out
+as it happens as `step.trace` — `{ i, entry: { kind, tier, text, ok?, detail?,
+confidence?, failure? } }` — and the whole list rides on that step's `step.pass`
+or `step.fail`; the Run panel draws it under the step, open while it runs or once
+it fails. Entries are made like log lines, with the run's secrets and URL
+parameter values taken out, and never carry a snapshot. `step.thinking` still
+says only which phase a model call is in.
+
+**Why a step failed.** With `ai`, a step that failed and that no fix may change —
+a check, a page load, a scroll or a wait, or a click, fill or hover no move could
+mend — is put to the model once more, as a report that says `failure kind:
+explain` and lists the frames loaded inside the page. Nothing is pressed or
+retried and the step's error is untouched, so defect numbers stay the same. The
+answer is logged as `AI: <failure> - <reason>`, ends the step's trace (`why`,
+`advice`), rides on `step.fail` as `why: { failure, reason, advice, confidence }`
+and is kept on that run's row of `GET /api/runs`. It is not asked for a step the
+model was already asked about (whether or not it answered), for a plan refusal
+or a Turnstile page, or once the run's calls are spent.
+
+**Recording.** With `safe` or `ai`, each step is read as it is recorded
+(understand.js). The page just after it is captured — its origin and path with
+any token-like segment masked, its title, the origins of the frames inside it, and its
+accessibility snapshot with typed values stripped and secrets redacted — and
+rules flag a step recorded inside a frame, which a replay cannot reach; the step
+before it again with nothing on the page changed in between; and a
+credential-shaped value typed as plain text. With `ai` the model is also asked
+what the step did and whether it looks like a recording mistake: at most
+`GC_HEAL_AI_MAX_RECORD_CALLS` questions a recording (default 20), two at a time,
+inside the organisation's daily ceiling. Each question is checked again when
+its turn comes, so none is asked once the recording is replaced, while a run
+holds the page, or after the organisation's AI is turned off. What is known goes out as `notes` on every
+`recorded` event and as `record.notes`, both under the recording's `rev`; a note
+is `{ i, state: 'thinking'|'done', tier, summary?, noticed?, concern?: { kind,
+by, text, fix }, confidence? }`. A concern may offer one fix — taking the step
+out — which only a person applies, as `{ t: 'record.fix', i, rev, fix:
+'remove_step' }`, refused unless that revision is current and that step's note
+offered it. Separately, a frame's own address change or scroll is never recorded
+as the page's: a sign-in button another site draws in a frame once added a
+`url contains /gsi/button` check that no run could pass.
+
 Off is the default. `npm run check:heal` runs each fixed case with fixes on and
 off, a set of broken apps that must fail in every mode — including when a fake
 model suggests the tempting wrong move, and every attack a review found on the
@@ -1389,7 +1457,9 @@ in scripts/fixtures/heal/off-baseline.json), and walks a suggestion through its 
 against the recorded cases in `suites/local`. `npm run check:heal-request` pins
 the request the SDK sends, with no network and no key. `node scripts/check-fixes.js`
 starts a gated runner of its own and checks the routes, roles, switch, state
-and an accept that re-runs green.
+and an accept that re-runs green. `npm run check:notes` reads recorded steps —
+frames, repeats, typed values, the model's notes and the fix a person applies —
+against pages served in-process and a fake model.
 
 `node scripts/eval-heal.js` is not part of `check:all`: it replays a corpus of
 46 recorded-case scenarios (scripts/fixtures/heal-corpus — renames, overlays,

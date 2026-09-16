@@ -20,6 +20,14 @@ import { stateDir } from './org.js';
 const CAP = 500;                       // enough for a fortnight of honest use
 const FIXES_KEPT = 20;                 // a run's fixes, as the history keeps them
 const DAY_MS = 86_400_000;
+
+/** The model's why for a failed step, as the history keeps it: its words cut short, like a fix's reason. */
+const whyKept = (why) => ({
+  failure: typeof why.failure === 'string' ? why.failure : 'unknown',
+  reason: String(why.reason ?? '').slice(0, 300),
+  advice: why.advice ? String(why.advice).slice(0, 200) : null,
+  confidence: typeof why.confidence === 'number' ? why.confidence : null,
+});
 const startOfDay = (t) => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
 
 const histories = new Map();
@@ -70,6 +78,10 @@ export function forOrg(org) {
         // Just the first failure. A run stops at the first one anyway.
         error: failed[0]?.error?.split('\n')[0]?.slice(0, 240) ?? null,
         step: failed[0] ? failed[0].i : null,
+        // The model's why, for a failure no fix may change (ops.js
+        // explainFailure) — only when there is one, so every other row is the
+        // row it always was.
+        ...(failed[0]?.why ? { why: whyKept(failed[0].why) } : {}),
       };
       all.push(entry);
       if (all.length > CAP) all = all.slice(-CAP);

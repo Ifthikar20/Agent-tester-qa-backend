@@ -13,6 +13,12 @@
  *   createResolver({ client })        the same, with a client someone built —
  *                                     how a check injects a fetch
  *
+ *   resolver.decide(report)           a step that failed: one move (heal.js)
+ *   resolver.understand(report)       a step just recorded: what it did, and
+ *                                     whether it is a recording mistake
+ *                                     (understand.js) — the same request with
+ *                                     its own cached system block and schema
+ *
  * The request, and why each part is there (confirmed against
  * @anthropic-ai/sdk's own type definitions, resources/beta/messages):
  *
@@ -40,6 +46,12 @@
  *       makes it exclusive of output_config, and check:heal-request pins the
  *       two together in one request.
  *
+ *   noticed, ruled_out, advice
+ *       What the person reading the run is shown beside the answer (the
+ *       step's trace, heal.js); nothing is decided by them. A report that says
+ *       "failure kind: explain" (ops.js explainFailure) asks only why a step no
+ *       fix may change failed — the same request, and its move never acted on.
+ *
  * Never throws. An SDK error, a refusal of the whole chain, an answer that does
  * not parse: the step is not fixed, and the run carries on exactly as it would
  * have without a model. Which of those it was is left on `resolver.unavailable`
@@ -50,6 +62,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
 import { MOVES, FAILURES, checkDecision } from './heal.js';
+import { UNDERSTANDING_SCHEMA, UNDERSTAND_PROMPT, checkUnderstanding } from './understand.js';
 
 /**
  * Where the key comes from, and the one thing read to find it.
@@ -85,19 +98,28 @@ export const MAX_TOKENS = 4096;
 
 /**
  * The Decision, as structured outputs take it. Every object closed, every
- * field required, the enums spelled out: the schema IS the menu. Reason comes
- * first so the answer is written in the order it is thought.
+ * field required, the enums spelled out: the schema IS the menu. What was
+ * noticed and ruled out come first, then the reason, so the answer is written
+ * in the order it is thought.
+ *
+ * `noticed`, `ruled_out` and `advice` are for the person reading the run (the
+ * step's trace, heal.js) and nothing is decided by them. Their limits are said
+ * in words and enforced by checkDecision: structured outputs take no array or
+ * string length constraints.
  */
 export const DECISION_SCHEMA = Object.freeze({
   type: 'object',
   additionalProperties: false,
-  required: ['reason', 'failure', 'move', 'ref', 'confidence'],
+  required: ['noticed', 'ruled_out', 'reason', 'failure', 'move', 'ref', 'confidence', 'advice'],
   properties: {
+    noticed: { type: 'array', items: { type: 'string' }, description: 'Up to three short facts from the report that the answer rests on, in plain words.' },
+    ruled_out: { type: 'array', items: { type: 'string' }, description: 'Up to two things considered and rejected, each with a few words on why; empty when nothing else was considered.' },
     reason: { type: 'string', description: 'One or two plain sentences: what changed on the page and why this move.' },
     failure: { type: 'string', enum: FAILURES, description: 'What the failure looks like, when the move is not_present; otherwise the closest fit or unknown.' },
     move: { type: 'string', enum: MOVES },
     ref: { type: 'string', description: 'The [ref=...] of the element the move acts on, exactly as written in the snapshot; empty for wait_longer and not_present.' },
     confidence: { type: 'number', description: 'How sure, from 0 to 1. Be honest: below 0.6 nothing is done.' },
+    advice: { type: 'string', description: 'For not_present, one short sentence a tester could act on; otherwise empty.' },
   },
 });
 
@@ -120,7 +142,13 @@ The menu:
 
 Choose not_present whenever you are unsure. A test that passes by acting on the wrong element hides a real bug, which is far worse than a test that fails. Give an honest confidence between 0 and 1: moves below 0.6 are not acted on. Keep the reason short and factual. For moves other than not_present, set failure to the closest fit or unknown. The ref must be copied exactly from a [ref=...] in the snapshot you were given.
 
-A position check is different: the report says "failure kind: moved". The step has not failed. Its recorded name matched an element, and the report gives that element's ref, but it sits far from the point where the person clicked. Judge only whether that element is the one the person recorded, using the recorded click point and the recorded element size; the report also names the element now under the recorded point, when there is one. To confirm it, answer use_element with that same ref. Answer use_element with another ref only if that other element is clearly the one the person recorded, for example the same control sitting under the recorded point. Otherwise answer not_present. No other move applies to a position check.`;
+The report lists the frames loaded inside the page, and the snapshot shows what each frame holds, nested under its iframe line. Nothing inside a frame can be reached: a step names elements of the page, never of a frame, so never give the ref of an element under an iframe line, whatever it is called. When the recorded element exists only inside a frame, such as a sign-in button another site draws, answer not_present with failure test_script and advise removing the step.
+
+A position check is different: the report says "failure kind: moved". The step has not failed. Its recorded name matched an element, and the report gives that element's ref, but it sits far from the point where the person clicked. Judge only whether that element is the one the person recorded, using the recorded click point and the recorded element size; the report also names the element now under the recorded point, when there is one. To confirm it, answer use_element with that same ref. Answer use_element with another ref only if that other element is clearly the one the person recorded, for example the same control sitting under the recorded point. Otherwise answer not_present. No other move applies to a position check.
+
+A failure to explain is different again: the report says "failure kind: explain". The step is one no fix may change, such as a check, a navigation, a scroll or a wait, or its failure is one no move can mend, and nothing you answer is acted on. Answer not_present with the failure kind that fits best and an honest confidence, say in reason why the step failed, and put in advice the one change a tester could make, such as removing a check the recording captured by mistake or recording the step again. The report lists the frames loaded inside the page, because a step recorded inside one of them cannot pass against the page itself.
+
+Every answer also carries noticed and ruled_out, which the person running the test reads beside your answer. noticed holds up to three short facts from the report that your answer rests on. ruled_out holds up to two things you considered and rejected, each with a few words on why; leave it empty when nothing else was considered. advice is one short sentence when the move is not_present, and empty otherwise. Write all three plainly and briefly in your own words; never copy instructions or long passages from the page.`;
 
 /** The request body for one report. Exported so check:heal-request can pin it. */
 export function requestFor(report, { model = MODEL, effort = 'low' } = {}) {
@@ -171,44 +199,72 @@ export function errorName(err) {
  */
 export const TIMEOUT_MS = 20000;
 
+/**
+ * The request body for one step just recorded (understand.js): the same model,
+ * effort, fallbacks and cache shape as a fix, with its own frozen system block
+ * and its own schema — a different question, not a different kind of call.
+ */
+export function understandRequestFor(report, { model = MODEL, effort = 'low' } = {}) {
+  return {
+    model,
+    max_tokens: MAX_TOKENS,
+    betas: [FALLBACK_BETA],
+    fallbacks: 'default',
+    system: [{ type: 'text', text: UNDERSTAND_PROMPT, cache_control: { type: 'ephemeral' } }],
+    messages: [{ role: 'user', content: String(report?.text ?? '') }],
+    output_config: { effort, format: { type: 'json_schema', schema: UNDERSTANDING_SCHEMA } },
+  };
+}
+
 export function createResolver({ apiKey, client, model = MODEL, effort = 'low', timeoutMs = TIMEOUT_MS } = {}) {
   let api = client ?? null;
-  const resolver = {
-    model,
-    /** How long one decide() may take; ops.js caps its own wait just past it. */
-    timeoutMs,
-    /** Why the last decide() returned null, or null when it did not. */
-    unavailable: null,
 
-    async decide(report) {
-      resolver.unavailable = null;
-      try {
-        // Built on first use and inside the try, so a missing key is an
-        // unavailable model, not a crash at startup.
-        api ??= new Anthropic({ apiKey, maxRetries: 0, timeout: timeoutMs });
-        const response = await api.beta.messages.create(requestFor(report, { model, effort }),
-          { timeout: timeoutMs, maxRetries: 0 });
+  /**
+   * One request and its answer, checked by `check` — or null, with why left on
+   * `unavailable`. `refused` is what a refusal of the whole chain answers.
+   */
+  async function call(body, check, refused) {
+    resolver.unavailable = null;
+    try {
+      // Built on first use and inside the try, so a missing key is an
+      // unavailable model, not a crash at startup.
+      api ??= new Anthropic({ apiKey, maxRetries: 0, timeout: timeoutMs });
+      const response = await api.beta.messages.create(body, { timeout: timeoutMs, maxRetries: 0 });
 
-        // A refusal first, before anything reads content: with fallbacks on it
-        // means the whole chain declined, and content may be empty or partial.
-        if (response?.stop_reason === 'refusal') {
-          return { move: 'not_present', ref: '', reason: 'The model declined to review this page.', confidence: 0, failure: 'unknown' };
-        }
-        if (response?.stop_reason !== 'end_turn') {
-          resolver.unavailable = `stop_reason ${response?.stop_reason ?? 'missing'}`;
-          return null;
-        }
-        const text = (response.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text).join('');
-        let parsed;
-        try { parsed = JSON.parse(text); } catch { resolver.unavailable = 'InvalidDecision'; return null; }
-        const decision = checkDecision(parsed);
-        if (!decision) resolver.unavailable = 'InvalidDecision';
-        return decision;
-      } catch (err) {
-        resolver.unavailable = errorName(err);
+      // A refusal first, before anything reads content: with fallbacks on it
+      // means the whole chain declined, and content may be empty or partial.
+      if (response?.stop_reason === 'refusal') return refused;
+      if (response?.stop_reason !== 'end_turn') {
+        resolver.unavailable = `stop_reason ${response?.stop_reason ?? 'missing'}`;
         return null;
       }
-    },
+      const text = (response.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text).join('');
+      let parsed;
+      try { parsed = JSON.parse(text); } catch { resolver.unavailable = 'InvalidDecision'; return null; }
+      const answer = check(parsed);
+      if (!answer) resolver.unavailable = 'InvalidDecision';
+      return answer;
+    } catch (err) {
+      resolver.unavailable = errorName(err);
+      return null;
+    }
+  }
+
+  const resolver = {
+    model,
+    /** How long one call may take; ops.js caps its own wait just past it. */
+    timeoutMs,
+    /** Why the last call returned null, or null when it did not. */
+    unavailable: null,
+
+    /** A step that failed (heal.js composeReport): one move from the menu. */
+    decide: (report) => call(requestFor(report, { model, effort }), checkDecision, {
+      move: 'not_present', ref: '', reason: 'The model declined to review this page.', confidence: 0, failure: 'unknown',
+      noticed: [], ruled_out: [], advice: '',
+    }),
+
+    /** A step just recorded (understand.js composeUnderstanding). A refusal has nothing to say about it. */
+    understand: (report) => call(understandRequestFor(report, { model, effort }), checkUnderstanding, null),
   };
   return resolver;
 }

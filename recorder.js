@@ -432,6 +432,9 @@ const LISTENERS = `
 const INJECT = `${PROPOSE_SRC}\n${LISTENERS}`;
 
 export class Recorder {
+  /** step -> what was seen beside it that its line cannot say (the frame it happened in). */
+  #evidence = new WeakMap();
+
   /**
    * @param nav a NavigationLog, when there is one. A click that navigates gets
    *   the chain it went through recorded alongside it — the hops and their
@@ -450,9 +453,23 @@ export class Recorder {
   }
 
   async attach() {
-    await this.page.exposeBinding('__gcRecord', (_src, payload) => {
+    await this.page.exposeBinding('__gcRecord', (src, payload) => {
+      // The listeners run in every frame a page loads, and a frame's address is
+      // not the page's. A sign-in button another site draws in a frame
+      // (accounts.google.com/gsi/button) reported its own URL, and the
+      // recording checked that the PAGE had gone there: a step that could never
+      // pass. So a frame's route changes and scrolls are not the page's, and
+      // anything else it reports is filed at the page's address, with the frame
+      // kept beside the step as evidence (understand.js says what it means).
+      const frame = src?.frame && src.frame !== this.page.mainFrame() ? src.frame : null;
+      let inFrame;
+      if (frame) {
+        if (!payload || ['url', 'scroll', 'jumped-to-top'].includes(payload.kind)) return;
+        payload = { ...payload, href: this.page.url() };
+        inFrame = { inFrame: true, frame: originOf(frame.url()) };
+      }
       this.queue = this.queue
-        .then(() => this.#ingest(payload))
+        .then(() => this.#ingest(payload, inFrame))
         .catch((e) => this.onError(e.message));
     });
     await this.page.addInitScript({ content: INJECT });
@@ -489,6 +506,21 @@ export class Recorder {
     if (url) this.#noteUrl(url);
     this.recording = false;
     return this.steps;
+  }
+
+  /** What was seen beside a step that its line cannot say — `{ inFrame, frame }` — or null for most steps. */
+  evidenceOf(step) {
+    return this.#evidence.get(step) ?? null;
+  }
+
+  /**
+   * Take one step out: a person's decision, from a flagged step's fix
+   * (understand.js, server.js record.fix). Never the first — a recording
+   * starts where it was opened. Returns the step taken out, or null.
+   */
+  remove(index) {
+    if (!Number.isInteger(index) || index < 1 || index >= this.steps.length) return null;
+    return this.steps.splice(index, 1)[0];
   }
 
   #push(step) {
@@ -548,6 +580,8 @@ export class Recorder {
   async #verify(candidates, id, { enclosing = false } = {}) {
     const tagged = this.page.locator(`[data-gc-el="${id}"]`);
     const tried = [];
+    // A name the click itself changed — kept only if nothing resolves outright.
+    let renamed = null;
 
     // Ask about the promising ones first.
     //
@@ -640,6 +674,28 @@ export class Recorder {
         // legitimate case and dropped the click that submits a login.
         const reachable = await tagged.and(this.page.locator('*:visible')).count();
         if (!reachable && n === 1) return { target, via: 'click-time' };
+        /**
+         * Or the click RENAMED it. A hamburger says "Open navigation" until it
+         * is pressed and "Close navigation" after; an accordion's "Show all 7
+         * questions" becomes "Hide all 7 questions". The element is right
+         * there, still the role the proposal named, and the name it had at
+         * click time — the one the page counted exactly one of — is the name a
+         * fresh page shows at replay. Reading this as "our name is wrong"
+         * dropped precisely the click that opens a menu, and the replay then
+         * looked for the menu's items in a menu nobody had opened.
+         *
+         * Two things must hold, or this stays a drop: the proposal was unique
+         * at click time, and the element's accessible name is now something
+         * ELSE under the same role. A proposal that never described the
+         * element has the same name now as then, and still falls through.
+         * Kept as a fallback rather than returned: a later candidate that
+         * resolves outright — a test id, say — is the better name.
+         */
+        if (reachable && n === 1 && !renamed && await this.#renamedByClick(parsed, tagged)) {
+          renamed = { target, via: 'renamed' };
+          tried.push(`${target} (renamed by the click — kept as the name it had)`);
+          continue;
+        }
         tried.push(`${target} (${reachable
           ? 'the element is still visible, so this name does not describe it'
           : n < 0 ? 'ambiguous by nature' : `${n} at click time`})`);
@@ -673,10 +729,32 @@ export class Recorder {
       }
       tried.push(`${target} (${found} matches)`);
     }
+    if (renamed) return renamed;
     return { target: null, tried };
   }
 
-  async #ingest(p) {
+  /**
+   * Is the tagged element still the role a proposal named, under a different
+   * accessible name than the proposal's? The name comes from the element's own
+   * aria snapshot — the same model getByRole queries at replay — so "different"
+   * means the query that found exactly one at click time finds none now because
+   * the click changed the words, not because they were never the element's.
+   * Only for role proposals: a test id or a placeholder does not change when
+   * pressed, and a bare text proposal has no role to hold it to.
+   */
+  async #renamedByClick(parsed, tagged) {
+    if (parsed.kind !== 'role') return false;
+    const snap = await tagged.first().ariaSnapshot().catch(() => '');
+    let line = snap.split('\n')[0].replace(/^\s*-\s+/, '');
+    if (line.startsWith("'")) line = line.slice(1, line.lastIndexOf("'")).replace(/''/g, "'");
+    const m = line.match(/^([a-z]+)(?:\s+"((?:[^"\\]|\\.)*)")?/);
+    if (!m || m[1] !== parsed.role) return false;
+    const now = (m[2] ?? '').replace(/\\(.)/g, '$1');
+    const fold = (t) => String(t).trim().replace(/\s+/g, ' ').toLowerCase();
+    return fold(now) !== fold(parsed.name);
+  }
+
+  async #ingest(p, inFrame = undefined) {
     if (!this.recording) return;
 
     if (p.kind === 'url') return this.#noteUrl(p.href);
@@ -704,19 +782,22 @@ export class Recorder {
     }
 
     const at = p.at;
-    if (p.kind === 'scroll') return this.#push({ op: 'scroll', target, at });
-    if (p.kind === 'hover') return this.#push({ op: 'hover', target, at });
+    // The frame is kept beside the step BEFORE anyone is told of the step:
+    // the notes read it the moment the step arrives.
+    const seen = (step) => { if (inFrame) this.#evidence.set(step, inFrame); return step; };
+    if (p.kind === 'scroll') return this.#push(seen({ op: 'scroll', target, at }));
+    if (p.kind === 'hover') return this.#push(seen({ op: 'hover', target, at }));
     if (p.kind === 'click') {
-      this.#push({ op: 'click', target, at });
+      this.#push(seen({ op: 'click', target, at }));
       // A click that navigated: keep what it went through. This is evidence,
       // not instruction — the assertions it suggests are a person's decision,
       // and #noteUrl has already filed the URL change that goes with it.
       return this.#noteNavigation();
     }
     if (p.kind === 'fill') {
-      return this.#push(p.secret
+      return this.#push(seen(p.secret
         ? { op: 'fill', target, valueRef: 'secrets.TODO', at }
-        : { op: 'fill', target, value: p.value ?? '', at });
+        : { op: 'fill', target, value: p.value ?? '', at }));
     }
   }
 }
@@ -736,6 +817,11 @@ function rank(n) {
   if (n === -1) return 1;      // `text:` — the page cannot count it
   if (n === 0) return 2;       // gone already; only the click-time count can save it
   return 3;                    // ambiguous
+}
+
+/** An address as its origin — what a frame is known by — or null for about:blank and the like. */
+function originOf(u) {
+  try { const x = new URL(u); return /^https?:$/.test(x.protocol) ? x.origin : null; } catch { return null; }
 }
 
 function pathOf(u) {
