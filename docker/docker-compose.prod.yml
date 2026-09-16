@@ -134,12 +134,12 @@ services:
       # ended and its viewers have gone quiet (docs/AUTH.md §10); a minute
       # unless said otherwise.
       GC_RUNNER_IDLE_MS: ${GC_RUNNER_IDLE_MS:-60000}
-      # Agentic monitoring's mind and its budget (.env.prod.example). The key
-      # is read once at boot and taken out of the environment the browser is
-      # started with; an empty value is the mock compiler and judge.
+      # Agentic monitoring's mind and its budget (.env.prod.example). It reads
+      # the same ANTHROPIC_API_KEY as the fixes above, once at boot, and takes
+      # it out of the environment the browser is started with; an empty value
+      # is the mock compiler and judge.
       GC_MONITOR_LLM: ${GC_MONITOR_LLM:-auto}
       GC_MONITOR_AI_MAX_PER_DAY: ${GC_MONITOR_AI_MAX_PER_DAY:-200}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # The same public site key the control plane hands the UI. The runner
       # never uses its value; its presence widens the UI's CSP to admit the
       # Turnstile widget's host, and one line feeding both services is how
