@@ -35,6 +35,13 @@ import { LANGUAGE_VERSION } from './vocabulary.js';
 import { toMermaid } from './diagram.js';
 import { Recorder } from './recorder.js';
 import { NavigationLog } from './navlog.js';
+import * as monitoring from './monitor.js';
+import { MonitorAgent } from './monitor-page.js';
+// Aliased: resolver.js (automatic fixes) exports the same two names, and each
+// layer keeps its own copy of the key lookup and its own client.
+import { findApiKey as findMonitorApiKey, createResolver as createMonitorResolver, createBudget, MODEL as MONITOR_MODEL } from './monitor-resolver.js';
+import { llmModeFrom, compactSnapshot } from './monitor-rules.js';
+import { redactWith } from './redact.js';
 
 const require = createRequire(import.meta.url);
 const PORT = Number(process.env.PORT) || 3000;
@@ -151,6 +158,33 @@ const HEADED = /^(1|true|yes|on)$/i.test(process.env.HEADED ?? '');
 const CDP_URL = (process.env.GC_CDP_URL ?? '').trim();
 
 /**
+ * Agentic monitoring's mind (monitor-rules.js, monitor-resolver.js): Claude
+ * when a key is here, the mock compiler and judge otherwise, and
+ * GC_MONITOR_LLM to say so explicitly — a word the runner does not know stops
+ * it here, never read as off.
+ *
+ * The key is found once (the environment, else ANTHROPIC_API_KEY alone out of
+ * .env.local) and held only inside the resolver. It is then taken OUT of the
+ * environment: Playwright starts the browser with this process's environment,
+ * and the browser is the part of the runner that renders pages other people
+ * choose. Nothing that prints ever sees the key, only where it came from.
+ */
+const MONITOR_KEY = findMonitorApiKey({ env: process.env, root: fileURLToPath(new URL('./', import.meta.url)) });
+delete process.env.ANTHROPIC_API_KEY;
+const MONITOR_LLM = llmModeFrom({ env: process.env, haveKey: Boolean(MONITOR_KEY.key) });
+if (MONITOR_LLM.error) {
+  console.error(`\n  ${MONITOR_LLM.error}\n`);
+  process.exit(1);
+}
+const MONITOR_AI_PER_DAY = process.env.GC_MONITOR_AI_MAX_PER_DAY?.trim() ? Number(process.env.GC_MONITOR_AI_MAX_PER_DAY) : 200;
+if (!Number.isInteger(MONITOR_AI_PER_DAY) || MONITOR_AI_PER_DAY < 0) {
+  console.error(`\n  GC_MONITOR_AI_MAX_PER_DAY is "${process.env.GC_MONITOR_AI_MAX_PER_DAY}"; it takes a whole number of calls a day.\n`);
+  process.exit(1);
+}
+const monitorResolver = MONITOR_LLM.mode === 'claude' ? createMonitorResolver({ apiKey: MONITOR_KEY.key }) : null;
+const monitorBudget = createBudget({ max: MONITOR_AI_PER_DAY });
+
+/**
  * Every store is keyed by organisation (tenancy.js, docs/AUTH.md §10). The
  * flat files a pre-tenancy runner left behind are moved under `local` first,
  * BEFORE any store is opened, so the move is one rename and not a merge.
@@ -219,6 +253,9 @@ let nav = null;
 let view = { ...VIEW };
 let currentDevice = DEFAULT_DEVICE;
 let originalUA = null;   // the browser's own user-agent, captured per session, to restore on 'desktop'
+/** The monitoring agent inside the driven page (monitor-page.js); remade with the session. */
+let monitorAgent = null;
+let monitorSync = null;
 // Set once the browser is actually up. The port opens ~100 lines before
 // chromium.launch, so "the server answers" and "the app works" are two
 // different facts. /healthz reports this one, and a deploy waits on it.
@@ -529,7 +566,11 @@ const fail = (res, err, code = 400) => {
   // reach one — the nested ones used to answer 400, which contradicts §10 for
   // no gain, since the body is the same either way.
   if (err instanceof NoSuchSuite) return res.status(404).json({ ok: false, error: err.message });
-  return res.status(code).json({ ok: false, error: err.message ?? String(err) });
+  // A monitor or an incident this organisation does not have, likewise.
+  if (err instanceof monitoring.NoSuchMonitor || err instanceof monitoring.NoSuchIncident) return res.status(404).json({ ok: false, error: err.message });
+  // The monitoring engine names the status of its own refusals: 409 for
+  // nothing open or too many monitors, 422 for an element that is not there.
+  return res.status(err.status ?? code).json({ ok: false, error: err.message ?? String(err) });
 };
 const sendOk = (res, body) => res.json({ ok: true, ...body });
 
@@ -1412,6 +1453,123 @@ app.post('/api/recording', (req, res) => {
   emitTo(req.space.org, { t: 'log', level: 'info', msg: `recording imported — ${plan.steps.length} steps, not run` });
   res.json({ ok: true, steps: plan.steps.length });
 });
+
+// ---------------------------------------------------- agentic monitoring
+/**
+ * Monitors and incidents (monitor.js) are the organisation's — read and
+ * changed here by anyone signed in as it, whoever is driving. What needs the
+ * PAGE — measuring a baseline to create a monitor — needs the page to be this
+ * organisation's, and says so in the WS gate's own words rather than taking
+ * the browser: taking it just to say "nothing is open" would reset somebody's
+ * session.
+ */
+const monitorsOf = (req) => req.space.monitors;
+const pageIsOurs = (req, res) => {
+  if (driver.sees(req.space.org) && currentUrl()) return true;
+  fail(res, driver.org && !driver.sees(req.space.org)
+    ? new tenancy.RunnerBusy(driver.org)
+    : new Error('Nothing is open yet — open a URL first'), 409);
+  return false;
+};
+app.get('/api/monitoring', (req, res) => {
+  const engine = monitorsOf(req);
+  const mine = driver.sees(req.space.org);
+  res.json({ ok: true, llm: monitoring.llmState(), budget: monitoring.budgetState(), counts: engine.status().counts, picking: mine && !!(monitorAgent?.picking) });
+});
+// Declared before the /:id routes, so "shots" is never read as an id. The
+// name is checked before the disk is: nothing with a slash or a dot in it
+// reaches a path, and a name this organisation has no file for is a 404.
+app.get('/api/monitors/shots/:name', (req, res) => {
+  const name = String(req.params.name ?? '');
+  if (!monitoring.SHOT_NAME.test(name)) return res.status(400).json({ ok: false, error: 'not a screenshot name' });
+  const file = monitorsOf(req).shotPath(name);
+  if (!file) return res.status(404).json({ ok: false, error: 'no such screenshot' });
+  res.set('Cache-Control', 'private, max-age=86400');
+  res.type('png').sendFile(file);
+});
+/**
+ * The project a request is about (?suite=), as the engine's filter: the
+ * suite's id and origin (monitor.js belongs). One this organisation does not
+ * have is a 404, the way GET /api/suites/:id answers.
+ */
+const projectOf = (req) => {
+  if (!req.query.suite) return null;
+  const s = req.space.suites.get(String(req.query.suite));
+  return { id: s.id, origin: originOf(s) };
+};
+app.get('/api/monitors', (req, res) => {
+  try { res.json({ ok: true, monitors: monitorsOf(req).list(projectOf(req)) }); }
+  catch (err) { fail(res, err, 404); }
+});
+app.post('/api/monitors', async (req, res) => {
+  if (!pageIsOurs(req, res)) return;
+  try {
+    const engine = monitorsOf(req);
+    const body = { ...(req.body ?? {}) };
+    // A monitor made from a project belongs to it — one this organisation has.
+    if (body.suiteId != null && body.suiteId !== '') {
+      try { req.space.suites.get(String(body.suiteId)); }
+      catch { return res.status(400).json({ ok: false, error: `No such suite: ${String(body.suiteId).slice(0, 80)}` }); }
+    } else delete body.suiteId;
+    // An unknown limit is unlimited (tenancy.js): free until a plan names it.
+    req.ent.check('monitors.max', engine.monitors.size);
+    driver.touch(req.space.org);
+    armRelease();
+    const m = await engine.create(body);
+    sendOk(res, { monitor: engine.publicMonitor(m) });
+  } catch (err) { fail(res, err); }
+});
+app.delete('/api/monitors/:id', async (req, res) => {
+  try { await monitorsOf(req).remove(req.params.id); sendOk(res, { id: req.params.id }); }
+  catch (err) { fail(res, err); }
+});
+app.post('/api/monitors/:id/pause', async (req, res) => {
+  try { const engine = monitorsOf(req); const m = await engine.pause(req.params.id); sendOk(res, { monitor: engine.publicMonitor(m) }); }
+  catch (err) { fail(res, err); }
+});
+app.post('/api/monitors/:id/resume', async (req, res) => {
+  try { const engine = monitorsOf(req); const m = await engine.resume(req.params.id); sendOk(res, { monitor: engine.publicMonitor(m) }); }
+  catch (err) { fail(res, err); }
+});
+app.get('/api/incidents', (req, res) => {
+  const status = ['open', 'resolved'].includes(req.query.status) ? req.query.status : null;
+  try { res.json({ ok: true, incidents: monitorsOf(req).listIncidents(status, projectOf(req)) }); }
+  catch (err) { fail(res, err, 404); }
+});
+// Manual resolve is "accept the current state" (monitor.js resolve).
+app.post('/api/incidents/:id/resolve', async (req, res) => {
+  try {
+    const engine = monitorsOf(req);
+    const inc = await engine.resolve(req.params.id, 'manual');
+    const m = engine.monitors.get(inc.monitorId);
+    sendOk(res, { incident: inc, monitor: m ? engine.publicMonitor(m) : null });
+  } catch (err) { fail(res, err); }
+});
+// ------------------------------------------------------- help & support
+/**
+ * A request from the top bar (support.js): recorded for the organisation,
+ * printed here so whoever runs this process sees it as it happens, and
+ * answered to the organisation's sockets so every open tab shows support
+ * access as on. The switch is a statement, not a token — nothing in this
+ * process reads it to allow anything.
+ */
+app.get('/api/support', (req, res) => res.json({ ok: true, ...req.space.support.state() }));
+app.post('/api/support/request', (req, res) => {
+  try {
+    const r = req.space.support.request({ ...(req.body ?? {}), by: req.user?.sub ?? LOCAL });
+    const s = req.space.support.state();
+    console.log(`  support: ${req.space.org} asked for help — ${r.topic}: ${r.message.replace(/\s+/g, ' ').slice(0, 120)}${r.page ? ` (on ${r.page})` : ''}`);
+    emitTo(req.space.org, { t: 'support', enabled: s.enabled, since: s.since });
+    emitTo(req.space.org, { t: 'log', level: 'info', msg: `support requested (${r.topic}) — support access is on for this organisation` });
+    sendOk(res, { enabled: s.enabled, since: s.since, request: r });
+  } catch (err) { fail(res, err); }
+});
+app.delete('/api/support/access', (req, res) => {
+  const s = req.space.support.disable();
+  emitTo(req.space.org, { t: 'support', enabled: false, since: null });
+  emitTo(req.space.org, { t: 'log', level: 'info', msg: 'support access is off for this organisation' });
+  sendOk(res, { enabled: s.enabled, since: s.since });
+});
 /**
  * Redirect shapes worth testing, for the bundled demo.
  *
@@ -1604,6 +1762,9 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  ai fixes    ->  ${AI.have
               ? `key found (${AI.from})${HEAL_ENV.mode === 'ai' ? '' : ' — unused unless GC_HEAL=ai'}`
               : `no key${HEAL_ENV.mode === 'ai' ? ' — ANTHROPIC_API_KEY is unset, so ai runs as safe' : ''}`}` +
+            `\n  monitoring  ->  ${MONITOR_LLM.mode === 'claude'
+              ? `Claude (${MONITOR_MODEL}) compiles rules and judges incidents — key from ${MONITOR_KEY.source}, at most ${monitorBudget.max} calls a day (GC_MONITOR_AI_MAX_PER_DAY)`
+              : `the mock compiler and judge${MONITOR_KEY.key ? ' (GC_MONITOR_LLM=mock)' : ' — set ANTHROPIC_API_KEY for Claude'}`}` +
             `\n  version     ->  ${identity.commit ?? 'unknown'}` +
             `${buildTime() ? `, ui built ${buildTime().replace('T', ' ').slice(0, 16)}` : ', no ui to date'}\n`);
 
@@ -1979,6 +2140,42 @@ async function newSession() {
     publish: ({ url, items }) => emit({ t: 'targets', url, items }),
     busy: () => running,
   }));
+  /**
+   * Agentic monitoring (monitor-page.js, monitor.js). Installed the way the
+   * recorder is, and re-made with every session for the same reason. The
+   * agent belongs to the organisation whose page this is — `driver.org` now,
+   * which with auth off is the laptop's and with auth on is whoever took the
+   * browser — and every report it makes goes to THAT organisation's engine,
+   * even one that lands after the lock has moved on. What it hands the UI
+   * from a pick is page content, so it is redacted and cut like a console
+   * line.
+   */
+  const owner = driver.org ?? null;
+  const agent = new MonitorAgent(page, {
+    owner,
+    listFor: (href) => (agent.owner ? tenancy.workspace(agent.owner).monitors.monitorsForPage(href) : []),
+    onReport: (r) => { if (agent.owner) tenancy.workspace(agent.owner).monitors.ingest(r); },
+    onSelected: (info) => {
+      if (!agent.owner) return;
+      if (info && !info.cancelled && info.selector) {
+        const engine = tenancy.workspace(agent.owner).monitors;
+        const snapshot = engine.cleanSnapshot(compactSnapshot(info.snapshot));
+        emitTo(agent.owner, {
+          t: 'monitor.selected',
+          selector: String(info.selector).slice(0, monitoring.SELECTOR_MAX),
+          fingerprint: info.fingerprint ?? null,
+          snapshot,
+          label: engine.redact(String(info.label ?? '')).slice(0, monitoring.LABEL_MAX),
+          url: info.url ?? currentUrl(),
+        });
+      }
+      emitTo(agent.owner, { t: 'monitor.pick', on: false });
+    },
+    onError: (msg) => emit({ t: 'log', level: 'error', msg: `monitoring: ${msg}` }),
+  });
+  monitorAgent = agent;
+  await agent.attach();
+  if (owner) tenancy.workspace(owner).monitors.attach(agent);
 
   // An SPA route change is an assertion worth keeping, and it means the target
   // panel is stale.
@@ -2005,6 +2202,19 @@ async function newSession() {
      */
     emit({ t: 'url', url: currentUrl() });
     publishTargets();
+    // A navigation ends a pick — the element under the pointer is gone — and
+    // hands the new document its monitors. A new document arms them through
+    // the agent's own handshake as soon as its DOM exists; `sync` is for a
+    // same-document route change, which makes no new document.
+    if (monitorAgent?.picking) {
+      monitorAgent.picking = false;
+      if (monitorAgent.owner) emitTo(monitorAgent.owner, { t: 'monitor.pick', on: false });
+    }
+    if (monitorAgent?.owner) {
+      const a = monitorAgent;
+      clearTimeout(monitorSync);
+      monitorSync = setTimeout(() => { a.sync(a.listFor(currentUrl() ?? '')).catch(() => null); }, 400);
+    }
   });
 }
 
@@ -2040,11 +2250,33 @@ async function resetSession() {
   browserReady = false;
   lastFrame = null;
   if (recorder?.recording) { try { recorder.stop(null); } catch {} }
+  // The outgoing organisation's monitoring goes with its page: every timer
+  // off, its pick ended, and nothing in flight may touch the page again.
+  if (monitorAgent?.owner) {
+    if (monitorAgent.picking) emitTo(monitorAgent.owner, { t: 'monitor.pick', on: false });
+    tenancy.workspace(monitorAgent.owner).monitors.detach();
+  }
+  monitorAgent = null;
   const old = page;
   try { await old?.context().close(); } catch { /* already gone is the outcome we wanted */ }
   await newSession();
   browserReady = true;
 }
+
+/**
+ * Agentic monitoring's one configuration (monitor.js): how to reach an
+ * organisation's sockets, which mind it has, and whether the page is idle — a
+ * run or a recording holds it otherwise, and a screenshot must not scroll
+ * under them.
+ */
+monitoring.configure({
+  emitTo,
+  log: console,
+  llm: { mode: MONITOR_LLM.mode, model: MONITOR_LLM.mode === 'claude' ? MONITOR_MODEL : null, key: { have: Boolean(MONITOR_KEY.key), from: MONITOR_KEY.source } },
+  resolver: monitorResolver,
+  budget: monitorBudget,
+  isIdle: () => !running && !(recorder?.recording),
+});
 
 await newSession();
 browserReady = true;
@@ -2112,6 +2344,11 @@ async function run(plan, meta = {}) {
   running = true;
   const wasRecording = recorder.recording;
   recorder.recording = false;
+  // A run's clicks must reach the page: an active pick would swallow them.
+  if (monitorAgent?.picking) {
+    await monitorAgent.stopPicker().catch(() => null);
+    if (monitorAgent.owner) emitTo(monitorAgent.owner, { t: 'monitor.pick', on: false });
+  }
 
   const results = [];
   // A run can be told how much of itself to perform. Unset means this server's
@@ -2664,7 +2901,7 @@ wss.on('connection', (ws) => {
     // and the deliberate acts are refused out loud.
     if (!driver.sees(org)) {
       if (/^human\./.test(String(m.t))) return;
-      if (['inspect', 'record.start', 'record.stop', 'record.fix'].includes(m.t)) {
+      if (['inspect', 'record.start', 'record.stop', 'record.fix', 'monitor.pick.start', 'monitor.pick.stop'].includes(m.t)) {
         return refuse(m.t, driver.org ? new tenancy.RunnerBusy(driver.org) : new Error('Nothing is open yet — open a URL first'));
       }
       return;
@@ -2674,6 +2911,11 @@ wss.on('connection', (ws) => {
 
     // ------------------------------------------------------------ teach mode
     if (m.t === 'record.start' && !running) {
+      // The recorder listens for the person's clicks; an active pick would swallow them.
+      if (monitorAgent?.picking) {
+        await monitorAgent.stopPicker().catch(() => null);
+        emitTo(org, { t: 'monitor.pick', on: false });
+      }
       // Fingerprint where the recording begins, so replay can tell you when the
       // entry URL does not actually get you back here.
       const entry = await discover(page).then((i) => i.map((t) => t.target)).catch(() => []);
@@ -2716,6 +2958,31 @@ wss.on('connection', (ws) => {
       notes.removed(step);
       emitRecorded(recorder.steps);
       emit({ t: 'log', level: 'info', msg: `removed step ${i + 1} from the recording, as its note suggested` });
+      return;
+    }
+
+    // ------------------------------------------------- agentic monitoring
+    // Picking is the one monitoring act that needs the page: the person's
+    // pointer on the canvas becomes a real mousemove in it, and the agent's
+    // capture-phase listeners highlight and, on a click, choose. Refused while
+    // a run or a recording has the page — the picker would swallow their
+    // clicks — and answered with `monitor.pick`, which is what the UI's
+    // button follows; nothing is assumed until the runner says so.
+    if (m.t === 'monitor.pick.start') {
+      if (running) return refuse('monitor.pick.start', new Error('A run is in progress — wait for it to finish before picking'));
+      if (recorder?.recording) return refuse('monitor.pick.start', new Error('Recording is on — stop it before picking'));
+      if (!currentUrl()) return refuse('monitor.pick.start', new Error('Nothing is open yet — open a URL first'));
+      const on = monitorAgent ? await monitorAgent.startPicker().catch(() => false) : false;
+      if (!on) return refuse('monitor.pick.start', new Error('The page is not ready to pick from — open it again'));
+      emitTo(org, { t: 'monitor.pick', on: true });
+      return;
+    }
+    if (m.t === 'monitor.pick.stop') {
+      if (monitorAgent) {
+        await monitorAgent.stopPicker().catch(() => null);
+        await monitorAgent.clearSelection().catch(() => null);
+      }
+      emitTo(org, { t: 'monitor.pick', on: false });
       return;
     }
 
@@ -2777,6 +3044,9 @@ wss.on('connection', (ws) => {
     // registry, so the two cannot drift.
     device: { id: currentDevice, width: view.width, height: view.height, mobile: !!DEVICES[currentDevice]?.mobile },
     devices: deviceList(),
+    // Whether the monitoring picker is armed on the page: the UI's Pick button
+    // follows the runner, never the other way round.
+    picking: mine && !!(monitorAgent?.picking),
   }));
   if (mine) publishTargets();
 });
@@ -2794,5 +3064,5 @@ process.on('unhandledRejection', (err) => {
   try { emit({ t: 'log', level: 'error', msg: `internal error: ${err?.message ?? err}` }); } catch {}
 });
 
-process.on('SIGINT', async () => { await browser.close(); process.exit(0); });
-process.on('SIGTERM', async () => { await browser.close(); process.exit(0); });
+process.on('SIGINT', async () => { monitoring.flushAll(); await browser.close(); process.exit(0); });
+process.on('SIGTERM', async () => { monitoring.flushAll(); await browser.close(); process.exit(0); });

@@ -38,6 +38,8 @@ import * as history from './runs.js';
 import * as defects from './defects.js';
 import * as suites from './suites.js';
 import * as fixes from './fixes.js';
+import * as monitors from './monitor.js';
+import * as support from './support.js';
 
 export { LOCAL, isOrg };
 
@@ -67,6 +69,8 @@ export function workspace(org) {
       // Suggested fixes from its runs, and whether it lets a model make them.
       fixes: fixes.forOrg(org),
       healSetting: fixes.settingFor(org),
+      monitors: monitors.forOrg(org),
+      support: support.forOrg(org),
     };
     spaces.set(org, space);
   }

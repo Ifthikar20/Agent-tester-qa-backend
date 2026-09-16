@@ -554,7 +554,10 @@ fetches, and the page runs inside the runner's network namespace
   `GC_DEMO=1`; `/go/r` accepts relative paths only `[browser-side-6]`.
 - Runner responses carry `Content-Security-Policy: default-src 'self';
   connect-src 'self' wss: https:; img-src 'self' data: blob:; style-src 'self'
-  'unsafe-inline'; frame-ancestors 'none'`, `X-Frame-Options: DENY`,
+  'unsafe-inline' https://fonts.googleapis.com; font-src 'self'
+  https://fonts.gstatic.com; frame-ancestors 'none'` (the two font hosts
+  serve the UI's typeface and nothing that can run or connect),
+  `X-Frame-Options: DENY`,
   `X-Content-Type-Options: nosniff`, `Referrer-Policy:
   strict-origin-when-cross-origin`, `Permissions-Policy: camera=(),
   microphone=(), geolocation=()` `[browser-side-3] [browser-side-4]`. The

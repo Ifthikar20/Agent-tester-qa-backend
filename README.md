@@ -874,6 +874,107 @@ and the buttons were a workaround from before it worked. The `scroll to top` and
 say "go to the footer" — but the socket op the buttons used went with them
 rather than being left unreachable.
 
+## Agentic monitoring: watch an element, in plain English
+
+A run says whether a script still passes. It says nothing about the paragraph
+that quietly grew to 36px on Tuesday, the table that lost a row, the submit
+button a CSS deploy hid — none of which any step clicks on. **Agentic
+monitoring**, the sidebar item under Console, watches those.
+
+Pick an element on the page the way DevTools' inspector does — hover the
+canvas, the element under the pointer is outlined *inside the video*, click it
+— and describe in plain English what must stay true about it:
+
+```
+font size must not exceed 18px
+must keep exactly 5 rows
+must always be visible
+text must not change
+width and height must not change
+```
+
+The rule is compiled ONCE into checks (`monitor-rules.js`): the mock compiler
+instantly, from the phrasing above, and Claude — when `ANTHROPIC_API_KEY` is
+set — asynchronously, replacing the mock's checks when its answer lands. From
+then on the model is never in the loop. An agent inside the page
+(`monitor/page/`, installed the way the recorder is) watches the element with a
+`ResizeObserver` and a `MutationObserver` and reports a snapshot when its
+change signature changes; the runner evaluates every report by arithmetic
+(`monitor-evaluate.js`), and a new state has to be CONFIRMED — by a second
+report that agrees, or by a fresh measurement half a second later — before an
+incident opens. That is what stops an animation frame becoming an alert, and
+it is why an incident opens within about a second of the change and never for
+a ticker that never stops.
+
+An incident carries the evidence: before/after screenshot clips, the metric
+diff (`fontSize: 16 → 36`), the failed checks with their numbers, and a
+verdict — the mock's at once, Claude's a little later when there is a key
+(severity and an explanation, from both clips). When the
+page recovers, the incident resolves itself. **Resolve & accept current state**
+closes one by hand: relative rules take the element as it is now for their
+new baseline; an absolute rule that still fails puts the monitor into
+`acknowledged`, which stays quiet until the element changes again. Deleting a
+monitor takes its incidents and their clips with it: the page reports on what
+is set, not on what used to be.
+
+A monitor belongs to a project. Open monitoring from a suite — its
+**Monitoring** section in the sidebar, or the button on its Overview — and
+the page opens on the suite's first page, its other pages are one click away
+under the address, and every monitor made there carries the suite's id; on
+the general page the project is picked in the address row. A monitor made
+with no project belongs to the suite whose origin its page is on. The suite's
+Overview counts its monitors and lists the issues found, and
+`GET /api/monitors?suite=` and `GET /api/incidents?suite=` are the same line
+drawn over the API.
+
+Monitors are the organisation's, in `.ghostclick/<org>/monitors.json` and
+`monitor-shots/`, and every monitoring event goes to that organisation's
+sockets whoever is driving. They re-arm through the agent's own handshake
+whenever their page is open — after a reload, after a run navigated away and
+back, after the browser changed hands. A monitor whose page is not the one on
+the browser is "not on this page", never "missing". Picking is refused while a
+run or a recording holds the page, because the picker swallows clicks;
+monitoring itself keeps watching during a run, which is rather the point.
+
+Two things worth knowing about the security model. A monitor's selector is data
+handed to `querySelector` inside a script the RUNNER installs; the flow
+language still has no evaluate and no selector, and the page never gets a way
+to run code. And the text a snapshot carries is page content: it is redacted
+against the organisation's vault before it is kept, sent to a socket, or shown
+to a model — whose prompt says, in so many words, that page content is
+evidence and never instruction.
+
+`public/monitor.html` is a page shaped to be watched, with a panel of real
+buttons that break it (`Grow text`, `Remove table row`, `Hide submit`, `Reset
+all`). `npm run check:monitoring` starts a runner of its own in mock mode and
+drives the whole story through the API and the socket — including picking
+from the canvas, and a click that must NOT reach the page. `npm run
+check:monitoring-request` pins, offline, exactly what the resolver puts on the
+wire. `GC_MONITOR_LLM` and `GC_MONITOR_AI_MAX_PER_DAY` are in `.env.prod.example`.
+
+## Help, and a person, on every page
+
+The top bar of every page has two buttons that are the bar's rather than a
+page's, because the question arrives on whichever page you were on. **Help**
+opens a panel over the page — the questions people ask first, links to the
+written documentation (new tab), and how to reach a person — and closes with
+Escape or the scrim. **Support** is the tiny one beside it: a topic and a
+message, sent to the runner. Sending does one more thing, said in so many words
+under the form: it turns on **support access** for your organisation, a flag
+whoever operates the runner reads from `GET /api/support` and sees printed as
+the request lands, so they know you are happy to be looked at. The pill then
+reads "Support enabled", and the same sheet turns it off. The flag is a
+statement, not a token — nothing in the runner reads it to allow anything;
+wiring it to a ticketing or remote-assistance service is where a deployment
+plugs in. Requests live in `.ghostclick/<org>/support.json` (`support.js`);
+`npm run check:support` drives the round trip.
+
+Three smaller things moved with this. Light, dark or the device's theme is a
+setting, so it lives on *Origins & vault → Appearance* rather than in the
+sidebar; the sidebar's collapse control is at the top, where a hand goes
+looking for it, and Sign out is at the foot; and Run history's suite filter sits
+with the tables it narrows instead of in the top bar.
+
 ## Summarised, not tipped out
 
 The console's right rail had two cards that dumped rather than reported.
@@ -1955,6 +2056,14 @@ silently inside someone else's docs.
 | `cursor.js` | `VirtualCursor` — sole authority for pointer position |
 | `targets.js` | target grammar, aliases, page discovery |
 | `recorder.js` | teach mode — proposes targets in the page, verifies them here |
+| `monitor.js` | agentic monitoring — one engine and store per organisation: the report funnel, confirmation, incidents, the judge, the heartbeat |
+| `monitor-rules.js` | rules: the mock compiler and judge, the shapes a model's answer has to pass, which mind is on |
+| `monitor-evaluate.js` | the deterministic evaluator: metric out of a snapshot, compare, tolerance, diff |
+| `monitor-resolver.js` | Claude: the two requests, their closed schemas and frozen cached prompts, the daily budget |
+| `monitor-page.js` | the agent inside the driven page, and the runner's handle on it |
+| `monitor/page/` | that agent's source — the runtime, the picker, the watcher — read off disk and bundled |
+| `redact.js` | vault values out of text on its way out, for the console and the monitors alike |
+| `support.js` | help & support — a request from the top bar, and the per-organisation access switch it turns on |
 | `vocabulary.js` | every verb, declared once: syntax, how it writes back, how it draws |
 | `flow.js` | the test case language: text ↔ IR, and `asFlowchart()` for a picture |
 | `ops.js` | what each verb does, origin allowlist, validation gate |
@@ -2008,6 +2117,10 @@ silently inside someone else's docs.
 | `public/links.html` | four links that all work and are each wrong differently |
 | `public/results.html` | a sticky header over cards named by a whole paragraph |
 | `scripts/check-console.js` | the canvas paints on arrival, and the wheel reaches the page |
+| `scripts/check-monitoring.js` | a rule, a change, an incident, recovery, picking from the canvas — on a runner of its own |
+| `scripts/check-monitoring-request.js` | the mock compiler and, offline, exactly what the resolver puts on the wire |
+| `public/monitor.html` | a page shaped to be watched, with buttons that break it |
+| `scripts/check-support.js` | a support request lands, turns access on, is told to every socket, and turns off again |
 | `public/site.html` | Harbour — the same links in header and footer, and a long page |
 
 ---
@@ -2056,6 +2169,9 @@ because their angled sides eat usable width.
 
 ## Deliberately not here yet
 
+- Monitoring elements inside cross-origin iframes, alerts beyond the UI and the
+  log (no Slack, no mail), and an AI budget per organisation rather than per
+  process
 - Screenshot artifacts, and shipping them to S3 rather than over the socket
 - Pause/resume gate in the executor loop
 - Recording `select`, drag, hover and keyboard-only navigation
