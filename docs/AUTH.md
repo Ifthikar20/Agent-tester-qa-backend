@@ -466,9 +466,12 @@ Verification on the runner (`auth.js`), for every `/api` call:
    `mfa_required` routes to `/app/security/mfa`. Reconnects back off
    exponentially to 30 s `[session-4]`.
 
-Step-up: allowing an origin — `POST /api/origins` and the `origin.add` message —
-requires `now < claims.su`. Otherwise 403 `{error:'step_up_required'}`; the UI
-reauthenticates (strong factor if the account has one), re-mints, retries.
+Allowing an origin — `POST /api/origins` and the `origin.add` message — needs
+an owner or admin and room on the plan, and no step-up: the runner does not
+check `claims.su` for it, so the UI never asks for the password again to allow
+a site. Saving a sign-in (`POST /api/session`) still requires `now < claims.su`,
+and answers 403 `{error:'step_up_required'}` otherwise; the UI reauthenticates
+(strong factor if the account has one), re-mints, retries.
 
 ---
 

@@ -16,10 +16,32 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stateDir } from './org.js';
+import { showAction, showTarget } from './vocabulary.js';
 
 const CAP = 500;                       // enough for a fortnight of honest use
 const DAY_MS = 86_400_000;
 const startOfDay = (t) => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
+
+/**
+ * What a step was doing, as a line of the case language — without the value
+ * it typed or compared, which may have come from the vault.
+ *
+ * Kept with a failed run because the sentence a failure leaves is not always
+ * about anything: Playwright says "locator.waitFor: Timeout 8000ms exceeded."
+ * of every wait that runs out, and a defect filed by the sentence alone would
+ * put a missing receipt and a missing price under one number (defects.js).
+ */
+export function doing(step) {
+  if (!step) return null;
+  switch (step.assert ?? step.op) {
+    case 'goto': return `open ${step.url}`;
+    case 'urlContains': return `arrive at '${step.value}'`;
+    case 'fill': return `fill ${showTarget(step.target)}`;
+    case 'valueEquals': return `check ${showTarget(step.target)}`;
+    default:
+      try { return showAction(step); } catch { return step.op ?? null; }
+  }
+}
 
 const histories = new Map();
 
@@ -42,8 +64,8 @@ export function forOrg(org) {
   const store = {
     org,
 
-    /** @param {{suite:string, suiteId?:string, caseId?:string, caseName?:string, url:string, ms:number, results:Array}} run */
-    record({ suite, suiteId, caseId, caseName, url, ms, results }) {
+    /** @param {{suite:string, suiteId?:string, caseId?:string, caseName?:string, url:string, ms:number, results:Array, steps?:Array}} run */
+    record({ suite, suiteId, caseId, caseName, url, ms, results, steps }) {
       const failed = results.filter((r) => !r.ok);
       const entry = {
         at: Date.now(),
@@ -63,6 +85,8 @@ export function forOrg(org) {
         // Just the first failure. A run stops at the first one anyway.
         error: failed[0]?.error?.split('\n')[0]?.slice(0, 240) ?? null,
         step: failed[0] ? failed[0].i : null,
+        // And what that step was doing, since the sentence does not always say.
+        target: failed[0] ? doing(steps?.[failed[0].i])?.slice(0, 240) ?? null : null,
       };
       all.push(entry);
       if (all.length > CAP) all = all.slice(-CAP);
@@ -91,62 +115,6 @@ export function forOrg(org) {
       const dropped = all.length - kept.length;
       if (dropped) { all = kept; persist(); }
       return dropped;
-    },
-
-    /**
-     * The same failure, however many runs hit it.
-     *
-     * A run records only its FIRST failure, because a run stops there — so a
-     * defect is that sentence, and the interesting questions are how often it
-     * has happened and whether it is still happening. Grouping by the message
-     * rather than by the case is deliberate: one broken selector usually
-     * breaks several cases, and seeing that as one defect with four cases
-     * attached is the whole point of the page.
-     *
-     * `open` means the affected case has not passed since it last failed. It
-     * is a cheap signal and an honest one — nobody has to remember to close
-     * anything.
-     */
-    defects(days = 14) {
-      const since = Date.now() - days * DAY_MS;
-      const runs = all.filter((r) => r.at >= since);
-
-      // When each case last passed, so a defect can say whether it is still live.
-      const lastPass = new Map();
-      for (const r of runs) {
-        if (!r.ok) continue;
-        const k = r.caseId ?? `${r.suite}:${r.caseName ?? r.url}`;
-        if (!lastPass.has(k) || r.at > lastPass.get(k)) lastPass.set(k, r.at);
-      }
-
-      const by = new Map();
-      for (const r of runs) {
-        if (r.ok || !r.error) continue;
-        const d = by.get(r.error) ?? {
-          error: r.error, hits: 0, first: r.at, last: r.at, step: r.step, cases: [], suites: [],
-        };
-        d.hits++;
-        d.first = Math.min(d.first, r.at);
-        if (r.at >= d.last) { d.last = r.at; d.step = r.step; }
-        const name = r.caseName ?? '(ad-hoc script)';
-        if (!d.cases.some((c) => c.name === name)) {
-          d.cases.push({ name, id: r.caseId ?? null, key: r.caseId ?? `${r.suite}:${name}` });
-        }
-        if (!d.suites.includes(r.suite)) d.suites.push(r.suite);
-        by.set(r.error, d);
-      }
-
-      const list = [...by.values()].map((d) => ({
-        ...d,
-        // Still open if NO affected case has passed since this last failed.
-        open: !d.cases.some((c) => (lastPass.get(c.key) ?? 0) > d.last),
-      }));
-
-      list.sort((a, b) => Number(b.open) - Number(a.open) || b.last - a.last);
-      return {
-        defects: list,
-        totals: { all: list.length, open: list.filter((d) => d.open).length, days },
-      };
     },
 
     /**

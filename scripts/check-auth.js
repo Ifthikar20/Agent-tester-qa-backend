@@ -687,26 +687,28 @@ try {
       else bad('a 2 MiB message closes the socket', String(code));
     } else bad('a 2 MiB message closes the socket', openedBig);
 
-    // Step-up: allowing an origin needs a recent authentication, on both paths.
+    // No step-up for origins: an owner or admin allows one without a recent
+    // sign-in, on both paths, so a token past its `su` is not refused.
     const staleSu = sign(claimsFor({ su: nowS() - 1 }));
-    const refused = await fetch(`${BASE}/api/origins`, { method: 'POST', headers: { ...auth, authorization: `Bearer ${staleSu}`, 'content-type': 'application/json' }, body: JSON.stringify({ origin: 'https://example.com' }) });
-    if (refused.status === 403 && (await refused.json()).error === 'step_up_required') ok('POST /api/origins past su is 403 step_up_required');
-    else bad('POST /api/origins past su is 403 step_up_required', String(refused.status));
-    const fresh = await fetch(`${BASE}/api/origins`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ origin: 'https://example.com' }) });
-    if (fresh.ok) ok('and within su it is allowed', '200');
-    else bad('and within su it is allowed', String(fresh.status));
+    const pastSu = await fetch(`${BASE}/api/origins`, { method: 'POST', headers: { ...auth, authorization: `Bearer ${staleSu}`, 'content-type': 'application/json' }, body: JSON.stringify({ origin: 'https://example.com' }) });
+    if (pastSu.ok) ok('POST /api/origins past su is allowed', '200, no step_up_required');
+    else bad('POST /api/origins past su is allowed', String(pastSu.status));
     const sT = await ticketFor(staleSu);
     const { r: openedStale, ws: staleWs } = await socket(`?ticket=${sT.ticket}`);
     if (openedStale === 'open') {
       const got = await new Promise((res) => {
-        staleWs.on('message', (d, bin) => { if (!bin) { const ev = JSON.parse(d); if (ev.t === 'refused') res(ev); } });
+        staleWs.on('message', (d, bin) => {
+          if (bin) return;
+          const ev = JSON.parse(d);
+          if ((ev.t === 'refused' && ev.of === 'origin.add') || (ev.t === 'origins' && ev.origins?.includes('https://another.example'))) res(ev);
+        });
         staleWs.send(JSON.stringify({ t: 'origin.add', origin: 'https://another.example' }));
         setTimeout(() => res(null), 4000);
       });
-      if (got?.error === 'step_up_required' && got.of === 'origin.add') ok('and origin.add over the socket says the same', 'refused: step_up_required');
-      else bad('and origin.add over the socket says the same', JSON.stringify(got));
+      if (got?.t === 'origins') ok('and origin.add over the socket is allowed too', 'no step_up_required');
+      else bad('and origin.add over the socket is allowed too', JSON.stringify(got));
       staleWs.close();
-    } else bad('and origin.add over the socket says the same', openedStale);
+    } else bad('and origin.add over the socket is allowed too', openedStale);
 
     // The driven page's reach, on the real browser: this runner's own
     // loopback is the nearest private address there is.

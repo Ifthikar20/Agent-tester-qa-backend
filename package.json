@@ -32,12 +32,13 @@
     "check:hardening": "node scripts/check-hardening.js",
     "check:turnstile": "node scripts/check-turnstile.js",
     "check:sessions": "node scripts/check-sessions.js",
-    "check:all": "npm run check && npm run check:app && npm run check:hardening && npm run check:freshness && npm run check:runner && npm run check:suites && npm run check:recording && npm run check:longnames && npm run check:naming && npm run check:redirects && npm run check:patience && npm run check:pace && npm run check:console && npm run check:vocabulary && npm run check:startup && npm run check:deploy && npm run check:icons && npm run check:auth && npm run check:tenancy && npm run check:teach && npm run check:shared && npm run check:boundary && npm run check:diagram && npm run check:fidelity && npm run check:turnstile && npm run check:sessions",
+    "check:all": "npm run check && npm run check:app && npm run check:hardening && npm run check:freshness && npm run check:runner && npm run check:suites && npm run check:recording && npm run check:longnames && npm run check:naming && npm run check:redirects && npm run check:patience && npm run check:pace && npm run check:console && npm run check:vocabulary && npm run check:startup && npm run check:deploy && npm run check:icons && npm run check:auth && npm run check:tenancy && npm run check:teach && npm run check:shared && npm run check:boundary && npm run check:diagram && npm run check:fidelity && npm run check:turnstile && npm run check:sessions && npm run check:defects",
     "check:auth": "node scripts/check-auth.js",
     "check:tenancy": "node scripts/check-tenancy.js",
     "check:naming": "node scripts/check-naming.js",
     "check:pace": "node scripts/check-pace.js",
-    "check:app": "node scripts/check-app.js"
+    "check:app": "node scripts/check-app.js",
+    "check:defects": "node scripts/check-defects.js"
   },
   "dependencies": {
     "express": "^4.19.2",
