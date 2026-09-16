@@ -30,6 +30,11 @@ KEYS = {
 }
 
 RUNNER_ENFORCED = ('suites.max', 'runs.per_day', 'origins.max', 'vault.enabled', 'history.retention_days')
+# Not yet a plan's to say: the chat (runner chat.js). Today it is on for every
+# plan and the operator's runner.chat switch is the one way to turn it off,
+# like monitors — a `chat.enabled` BOOL here, in RUNNER_ENFORCED and in every
+# plan's row, is the follow-up when a plan should differ. (A switch fails
+# closed on a token minted before it existed; an entitlement does not.)
 
 PLANS = {
     'free': {

@@ -32,7 +32,7 @@ const throws = (fn) => { try { fn(); return null; } catch (err) { return err; } 
 console.log('\n— the rules ————————————————————————————————————————————————');
 
 // Six: recording, runs, onboarding, origins, driving, and heal (the fixes layer).
-expect('a service name is every switch of that service', parseOff('runner').size === 6, [...parseOff('runner')].join(','));
+expect('a service name is every switch of that service', parseOff('runner').size === 7, [...parseOff('runner')].join(','));
 expect('* is every switch there is', parseOff('*').size === Object.keys(SWITCHES).length);
 const typo = throws(() => parseOff('runner.recordin'));
 expect('a switch nobody knows is refused, not ignored', typo && /runner\.recordin/.test(typo.message), typo?.message);
@@ -108,7 +108,7 @@ const children = [];
 try {
   console.log('\n— an open runner, limits named ———————————————————————————————');
   const runner = await start(PORT, {
-    GC_SWITCHES_OFF: 'runner.recording',
+    GC_SWITCHES_OFF: 'runner.recording,runner.chat',
     GC_API_RATE: '60/m', GC_WS_CONNECT_RATE: '6/m', GC_WS_MESSAGE_RATE: '40/10s',
     GC_REQUEST_LOG: 'sampled', GC_LOG_FORMAT: 'json',
   });
@@ -137,6 +137,14 @@ try {
   const rec = await fetch(`${BASE}/api/recording`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"flow":""}' });
   const recBody = await rec.json().catch(() => ({}));
   expect('a switched-off route is refused, naming the switch', rec.status === 403 && recBody.error === 'switched_off' && recBody.switch === 'runner.recording', `${rec.status} ${JSON.stringify(recBody)}`);
+  // The chat: its page is told the switch is off before anyone types, and a
+  // question sent anyway is refused by name like any other switched-off route.
+  const chatOff = await fetch(`${BASE}/api/chat`);
+  const chatOffBody = await chatOff.json().catch(() => ({}));
+  expect('the chat page is told its switch is off', chatOff.status === 200 && chatOffBody.on === false, `${chatOff.status} ${JSON.stringify(chatOffBody).slice(0, 80)}`);
+  const ask = await fetch(`${BASE}/api/chat/turns`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"text":"how many defects do we have"}' });
+  const askBody = await ask.json().catch(() => ({}));
+  expect('and a question is refused, naming the switch', ask.status === 403 && askBody.error === 'switched_off' && askBody.switch === 'runner.chat', `${ask.status} ${JSON.stringify(askBody)}`);
 
   const huge = await fetch(`${BASE}/api/suites`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'x'.repeat(600_000) }) });
   expect('a body past the limit is a 413 in the API\'s shape', huge.status === 413 && (await huge.json().catch(() => ({}))).ok === false, String(huge.status));

@@ -27,6 +27,7 @@ unchanged: they say what a *customer* bought. A switch says what the
 | `runner.origins` | allowing or removing origins | runner |
 | `runner.driving` | opening pages and driving them from the console | runner |
 | `runner.heal` | fixing broken steps automatically: every run is `GC_HEAL=off`, and suggested fixes cannot be accepted or the organisation's AI setting changed | runner |
+| `runner.chat` | the chat assistant: asking about defects, runs, suites and cases, and running a saved case from the Chat page | runner |
 | `control.signup` | self-service sign-up, including through Google | control plane |
 | `control.invitations` | issuing and accepting invitations | control plane |
 | `control.google` | signing in with Google | control plane |

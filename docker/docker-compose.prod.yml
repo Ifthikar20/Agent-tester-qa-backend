@@ -140,6 +140,11 @@ services:
       # is the mock compiler and judge.
       GC_MONITOR_LLM: ${GC_MONITOR_LLM:-auto}
       GC_MONITOR_AI_MAX_PER_DAY: ${GC_MONITOR_AI_MAX_PER_DAY:-200}
+      # The chat's mind and its budget (.env.prod.example): the same key,
+      # read at boot before it is taken out of the environment; an empty
+      # value is the mock mind, rules over the same tools.
+      GC_CHAT: ${GC_CHAT:-auto}
+      GC_CHAT_AI_MAX_PER_DAY: ${GC_CHAT_AI_MAX_PER_DAY:-200}
       # The same public site key the control plane hands the UI. The runner
       # never uses its value; its presence widens the UI's CSP to admit the
       # Turnstile widget's host, and one line feeding both services is how

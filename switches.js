@@ -34,6 +34,9 @@ export const SWITCHES = {
   // Off forces every run to GC_HEAL=off, whatever the deployment and the
   // organisation chose (heal.js, fixes.js), and refuses accepting a fix.
   'runner.heal':         'fixing broken steps automatically',
+  // Off refuses every question and every run asked for from the Chat page;
+  // the page says so instead of answering.
+  'runner.chat':         'the chat assistant',
   'control.signup':      'self-service sign-up',
   'control.invitations': 'issuing and accepting invitations',
   'control.google':      'signing in with Google',

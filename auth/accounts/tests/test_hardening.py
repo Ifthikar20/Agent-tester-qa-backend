@@ -363,8 +363,8 @@ class SettingsTests(SimpleTestCase):
                           'GC_LOG_LEVEL')
         # `warn` is the runner's spelling as well, and the two read one line.
         self.assertEqual((got['GC_LOG_LEVEL'], got['LOGGING']['loggers']['ghostclick']['level']), ('warning', 'WARNING'))
-        self.assertEqual(got['GC_SWITCHES_OFF'], ['control.google', 'runner.driving', 'runner.heal', 'runner.onboarding',
-                                                  'runner.origins', 'runner.recording', 'runner.runs'])
+        self.assertEqual(got['GC_SWITCHES_OFF'], ['control.google', 'runner.chat', 'runner.driving', 'runner.heal',
+                                                  'runner.onboarding', 'runner.origins', 'runner.recording', 'runner.runs'])
         self.assertEqual((got['GC_REQUEST_RATE'], got['GC_PASSKEY_LOGIN_RATE']), ('100/m/ip', '5/m/ip'))
         self.assertEqual(got['GC_REQUEST_LOG'], 'all')
         self.assertEqual(got['LOGGING']['handlers']['console']['formatter'], 'json')
