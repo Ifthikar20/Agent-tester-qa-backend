@@ -103,7 +103,7 @@ const hello = await first.until((m) => m.t === 'ready');
 if (!hello) {
   bad('the socket says hello', 'no ready message in 8s');
 } else {
-  const want = ['url', 'running', 'recording', 'origins', 'org', 'driving'];
+  const want = ['url', 'running', 'recording', 'origins', 'org', 'driving', 'back'];
   const missing = want.filter((k) => !(k in hello));
   if (!missing.length) ok('the greeting carries what a console needs', want.join(', '));
   else bad('the greeting carries what a console needs', `missing ${missing.join(', ')}`);

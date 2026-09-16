@@ -26,7 +26,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { compileMock, judgeMock, llmModeFrom, checkSpec, checkVerdict } from '../monitor-rules.js';
+import { compileMock, judgeMock, llmModeFrom, checkSpec, checkVerdict, previewSpec } from '../monitor-rules.js';
 import { evaluate, diff, summarize } from '../monitor-evaluate.js';
 import {
   CHECK_SPEC_SCHEMA, VERDICT_SCHEMA, COMPILE_SYSTEM, JUDGE_SYSTEM, MODEL, FALLBACK_BETA,
@@ -83,6 +83,23 @@ check('a rule it cannot read keeps things still and asks for judgment', () => {
   const spec = compileMock({ ruleText: 'looks nice', element, baseline });
   assert.equal(spec.needsLlmJudgment, true);
   assert.ok(spec.checks.every((c) => c.op === 'unchanged'));
+});
+// The panel's default script — what a pick starts with — is the README's
+// phrasing, so it must compile to exactly the checks a person would expect.
+check('the default script compiles to presence, size and text', () => {
+  const spec = previewSpec({ ruleText: 'Must exist and always be visible; width and height must not change; text must not change', tag: 'p', selector: element.selector, baseline });
+  assert.equal(summary(spec), 'exists exists true, visible visible true, height unchanged, width unchanged, text unchanged');
+});
+check('and for a table, its rows', () => {
+  const spec = previewSpec({ ruleText: 'Must exist and always be visible; must keep exactly 5 rows', tag: 'table', selector: '#orders', baseline: table });
+  assert.equal(summary(spec), 'exists exists true, visible visible true, rowCount eq 5');
+});
+check('a preview needs a rule and nothing else', () => {
+  assert.equal(previewSpec({ ruleText: '' }), null);
+  assert.equal(previewSpec({}), null);
+  const spec = previewSpec({ ruleText: 'must always be visible' });
+  assert.equal(summary(spec), 'exists exists true, visible visible true');
+  assert.equal(spec.source, 'mock');
 });
 
 // ---------------------------------------------------------------------------

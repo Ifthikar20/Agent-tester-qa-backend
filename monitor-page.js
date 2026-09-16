@@ -34,11 +34,13 @@ export class MonitorAgent {
    * @param page the driven Playwright page
    * @param owner the organisation whose page it is (driver.org when the session was made)
    * @param onReport a change the watcher measured: { monitorId, snapshot, reason, selectorNew, … }
-   * @param onSelected the picker's answer: { selector, fingerprint, snapshot, label, url } or { cancelled: true }
+   * @param onSelected the picker's answer: { selector, fingerprint, snapshot, label, url, readError } or { cancelled: true }
+   * @param onHover what the picker is over right now: { describe, tag, text, w, h, fontSize }
    * @param listFor (href) => the monitors to arm in that document, [{ id, selector, fingerprint, label }]
+   * @param onVisit (href, list) => a new document just asked for its monitors — a visit to their page
    * @param onError a sentence for the log
    */
-  constructor(page, { owner = null, onReport, onSelected, listFor, onError } = {}) {
+  constructor(page, { owner = null, onReport, onSelected, onHover, listFor, onVisit, onError } = {}) {
     this.page = page;
     this.owner = owner;
     this.picking = false;
@@ -46,7 +48,9 @@ export class MonitorAgent {
     this.armed = new Set();
     this.onReport = onReport ?? (() => {});
     this.onSelected = onSelected ?? (() => {});
+    this.onHover = onHover ?? (() => {});
     this.listFor = listFor ?? (() => []);
+    this.onVisit = onVisit ?? (() => {});
     this.onError = onError ?? (() => {});
   }
 
@@ -64,16 +68,28 @@ export class MonitorAgent {
     await this.page.exposeBinding('__gcMonitorReport', (_src, payload) => {
       try { this.onReport(payload); } catch (err) { this.onError(err.message); }
     });
+    // A selection is the answer to a question somebody is waiting on, so a
+    // handler that throws — or a promise that rejects, the handler takes a
+    // screenshot — is reported rather than lost.
     await this.page.exposeBinding('__gcMonitorSelected', (_src, info) => {
       this.picking = false;
-      try { this.onSelected(info); } catch (err) { this.onError(err.message); }
+      let r;
+      try { r = this.onSelected(info); } catch (err) { this.onError(err.message); return; }
+      if (r && typeof r.then === 'function') r.catch((err) => this.onError(err?.message ?? String(err)));
+    });
+    await this.page.exposeBinding('__gcMonitorHover', (_src, info) => {
+      if (!this.picking) return;
+      try { this.onHover(info); } catch (err) { this.onError(err.message); }
     });
     // The boot handshake: a new document asks which monitors are its own. The
-    // answer is what the page arms, so it is also what the runner remembers.
+    // answer is what the page arms, so it is also what the runner remembers —
+    // and, for each of them, a visit to its page: the moment "does it still
+    // hold?" gets asked again.
     await this.page.exposeBinding('__gcMonitorList', async (_src, href) => {
       let list = [];
       try { list = (await this.listFor(href)) || []; } catch (err) { this.onError(err.message); }
       this.armed = new Set(list.map((m) => m.id));
+      try { this.onVisit(href, list); } catch (err) { this.onError(err.message); }
       return list;
     });
     await this.page.addInitScript({ content: BUNDLE });

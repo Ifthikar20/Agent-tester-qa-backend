@@ -11,10 +11,16 @@
 // button or a link from firing while it is being chosen.
 //
 // Ported from the monitoring proof of concept's injected/picker.js, minus its
-// in-page drawer and toasts — the ghostclick UI is the panel.
+// in-page drawer and toasts — the ghostclick UI is the panel. What the pointer
+// is over is also told to the runner in words (`__gcMonitorHover`), because a
+// label inside a JPEG frame is not something a person can rely on reading.
 // ---------------------------------------------------------------------------
 let hoverEl = null;
 let hoverRaf = 0;
+let hoverSentAt = 0;
+let hoverTrail = 0;
+/** At most one hover report per this many ms; the last one always goes. */
+const HOVER_EVERY_MS = 80;
 
 // ---- geometry helpers
 function place(box, el) {
@@ -43,6 +49,32 @@ function paintHover() {
   if (top < 4) top = Math.min(r.bottom + 4, window.innerHeight - lh - 4);
   hlLabel.style.top = top + 'px';
   hlLabel.style.left = Math.max(4, Math.min(r.left, window.innerWidth - hlLabel.offsetWidth - 8)) + 'px';
+  reportHover();
+}
+/**
+ * What is under the pointer, told to the runner as words — the label drawn
+ * above is inside a JPEG frame a person may not be able to read. Throttled,
+ * with a trailing report, so a sweep across a page is a few reports and the
+ * element the pointer settled on is always the last one said.
+ */
+function reportHover() {
+  if (!GM.picking || !hoverEl) return;
+  const now = Date.now();
+  const wait = hoverSentAt + HOVER_EVERY_MS - now;
+  if (wait > 0) {
+    if (!hoverTrail) hoverTrail = setTimeout(function () { hoverTrail = 0; reportHover(); }, wait);
+    return;
+  }
+  hoverSentAt = now;
+  try {
+    const r = hoverEl.getBoundingClientRect();
+    const cs = getComputedStyle(hoverEl);
+    send('__gcMonitorHover', {
+      describe: describe(hoverEl), tag: tagOf(hoverEl),
+      text: collapse(hoverEl.innerText != null ? hoverEl.innerText : hoverEl.textContent).slice(0, 60),
+      w: Math.round(r.width), h: Math.round(r.height), fontSize: cs.fontSize,
+    });
+  } catch (_) { /* an element that went away between the paint and the report */ }
 }
 function paintSel() {
   if (!GM.shadow) return;
@@ -108,15 +140,28 @@ function startPicker() {
 function stopPicker() {
   GM.picking = false;
   hoverEl = null;
+  if (hoverTrail) { clearTimeout(hoverTrail); hoverTrail = 0; }
   if (GM.ui.hl) { GM.ui.hl.style.display = 'none'; GM.ui.hlLabel.style.display = 'none'; }
   return true;
 }
+/**
+ * The click chose `el`. Every part of the answer is worked out on its own,
+ * because a page can make any one of them throw — a selector that CSS.escape
+ * refuses, a measurement on something the page tore down as it was clicked —
+ * and a pick that throws halfway is a pick nobody hears about: the runner
+ * still says "picking" and the person is left wondering what they clicked.
+ * Whatever could be read is sent, and `readError` says what could not.
+ */
 function select(el) {
   stopPicker();
-  const snapshot = measure(el);
-  GM.selected = { el, selector: buildSelector(el), fingerprint: fingerprint(el), snapshot, label: defaultLabel(el) };
-  paintSel();
-  send('__gcMonitorSelected', { selector: GM.selected.selector, fingerprint: GM.selected.fingerprint, snapshot, label: GM.selected.label, url: location.href });
+  let snapshot, selector, fp, label, readError = null;
+  try { snapshot = measure(el); } catch (err) { snapshot = missingSnapshot(); readError = 'measure: ' + (err && err.message ? err.message : String(err)); }
+  try { selector = buildSelector(el); } catch (err) { selector = tagOf(el) || '*'; readError = readError || 'selector: ' + (err && err.message ? err.message : String(err)); }
+  try { fp = fingerprint(el); } catch (_) { fp = null; }
+  try { label = defaultLabel(el); } catch (_) { label = selector; }
+  GM.selected = { el, selector, fingerprint: fp, snapshot, label };
+  try { paintSel(); } catch (_) { /* the outline is a courtesy */ }
+  send('__gcMonitorSelected', { selector, fingerprint: fp, snapshot, label, url: location.href, readError });
 }
 function clearSelection() {
   GM.selected = null;

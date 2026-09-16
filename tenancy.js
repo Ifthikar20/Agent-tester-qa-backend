@@ -40,6 +40,7 @@ import * as suites from './suites.js';
 import * as fixes from './fixes.js';
 import * as monitors from './monitor.js';
 import * as support from './support.js';
+import * as chat from './chat.js';
 
 export { LOCAL, isOrg };
 
@@ -71,6 +72,7 @@ export function workspace(org) {
       healSetting: fixes.settingFor(org),
       monitors: monitors.forOrg(org),
       support: support.forOrg(org),
+      chat: chat.forOrg(org),
     };
     spaces.set(org, space);
   }

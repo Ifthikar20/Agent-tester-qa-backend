@@ -126,6 +126,30 @@ export function llmModeFrom({ env = process.env, haveKey = false } = {}) {
 }
 
 // ---- small helpers the engine and the checks share ----------------------------------
+/** How much of a rule, a label and a selector is kept — here, where the preview and the engine both read them. */
+export const RULE_MAX = 500;
+export const LABEL_MAX = 80;
+export const SELECTOR_MAX = 1000;
+
+/**
+ * The checks a rule would compile to, for a panel to show BEFORE the monitor
+ * exists: "this is the script that will run on every visit". The mock
+ * compiler's answer, from the snapshot the pick carried — pure, so no page,
+ * no lock and no model are needed to preview a sentence. Null for no rule.
+ */
+export function previewSpec({ ruleText, tag, selector, label, baseline } = {}) {
+  const rule = String(ruleText ?? '').trim().slice(0, RULE_MAX);
+  if (!rule) return null;
+  const base = baseline && typeof baseline === 'object' && !Array.isArray(baseline) ? baseline : null;
+  const element = {
+    tag: String(tag ?? base?.tag ?? '').slice(0, 40),
+    selector: String(selector ?? '').slice(0, SELECTOR_MAX),
+    label: String(label ?? '').slice(0, LABEL_MAX),
+    textPreview: String(base?.text ?? '').slice(0, 120),
+  };
+  return compileMock({ ruleText: rule, element, baseline: base });
+}
+
 /** The same document: origin and path, ignoring query, hash and a trailing slash. */
 export function sameDoc(a, b) {
   if (!a || !b) return false;

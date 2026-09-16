@@ -35,17 +35,23 @@ import { stateDir } from './org.js';
 import * as secrets from './secrets.js';
 import { redactWith } from './redact.js';
 import { evaluate, diff, summarize } from './monitor-evaluate.js';
-import { compileMock, judgeMock, compactSnapshot, sameDoc, violationKey } from './monitor-rules.js';
+import { compileMock, judgeMock, compactSnapshot, sameDoc, violationKey, RULE_MAX, LABEL_MAX, SELECTOR_MAX } from './monitor-rules.js';
 
+export { RULE_MAX, LABEL_MAX, SELECTOR_MAX };
 export const MONITORS_MAX = 50;
 export const INCIDENTS_MAX = 200;
-export const RULE_MAX = 500;
-export const LABEL_MAX = 80;
-export const SELECTOR_MAX = 1000;
 const FINGERPRINT_MAX = 4096;
 const SPEC_ERROR_MAX = 300;
 const JUDGE_MIN_INTERVAL_MS = 60000;
 const HEARTBEAT_MS = 2500;
+/**
+ * How long a freshly (re)armed monitor waits before "missing" is believed.
+ * The page arms its monitors at DOMContentLoaded, and a hero that a framework
+ * renders a second later is not missing, it is late — so right after a visit
+ * the element gets this long to turn up before an incident opens, where a
+ * change on a page that was already open is confirmed in half a second.
+ */
+export const ARM_GRACE_MS = 6000;
 /** A shot's name, as the gated route accepts it — and nothing with a slash or a dot in it. */
 export const SHOT_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,120}\.png$/;
 
@@ -77,7 +83,7 @@ export class NoSuchIncident extends Error {
 const refuse = (msg, status) => { const e = new Error(msg); e.status = status; return e; };
 const newId = (prefix) => prefix + '_' + crypto.randomUUID().replace(/-/g, '').slice(0, 8);
 const now = () => Date.now();
-const newRuntime = () => ({ debounce: null, pending: null, candidate: null, confirm: null, confirming: false, lastJudgeAt: 0, judgeTimer: null, judgeInFlight: false, tickTimer: null, tickPending: null });
+const newRuntime = () => ({ debounce: null, pending: null, candidate: null, confirm: null, confirming: false, lastJudgeAt: 0, judgeTimer: null, judgeInFlight: false, tickTimer: null, tickPending: null, armedAt: 0 });
 const clearRuntime = (rt) => { if (!rt) return; clearTimeout(rt.debounce); clearTimeout(rt.confirm); clearTimeout(rt.judgeTimer); clearTimeout(rt.tickTimer); rt.debounce = rt.confirm = rt.judgeTimer = rt.tickTimer = null; rt.candidate = null; rt.pending = null; rt.tickPending = null; };
 const str = (v, max) => String(v ?? '').trim().slice(0, max);
 
@@ -104,7 +110,10 @@ class MonitorEngine {
       const s = JSON.parse(readFileSync(this.file, 'utf8'));
       for (const m of Array.isArray(s.monitors) ? s.monitors : []) {
         if (!m || !m.id) continue;
-        if (!m.stats) m.stats = { ticks: 0, reports: 0, incidents: 0, judgeCalls: 0 };
+        if (!m.stats) m.stats = { ticks: 0, reports: 0, incidents: 0, judgeCalls: 0, visits: 0 };
+        // Written before visits were counted: they start now.
+        if (typeof m.stats.visits !== 'number') m.stats.visits = 0;
+        if (!('lastVisitAt' in m)) m.lastVisitAt = null;
         this.monitors.set(m.id, m);
         this.rt.set(m.id, newRuntime());
       }
@@ -247,6 +256,31 @@ class MonitorEngine {
       .filter((m) => m.state !== 'paused' && sameDoc(m.url, href))
       .map((m) => ({ id: m.id, selector: m.selector, fingerprint: m.fingerprint || null, label: m.label }));
   }
+  /**
+   * A new document of `href` just armed these monitors: the page was hit
+   * again — by a run's `goto`, by Open, by a reload — and each of them is
+   * about to be measured against its rule. Counted, so a card can say how
+   * many times its check has run and when it last did; the verdict follows
+   * as the tick the arming report produces.
+   */
+  visited(href, ids) {
+    const at = now();
+    const seen = [];
+    for (const id of ids || []) {
+      const m = this.monitors.get(id);
+      if (!m) continue;
+      if (!m.stats) m.stats = { ticks: 0, reports: 0, incidents: 0, judgeCalls: 0, visits: 0 };
+      m.stats.visits = (m.stats.visits || 0) + 1;
+      m.lastVisitAt = at;
+      seen.push(m);
+    }
+    if (!seen.length) return;
+    this.persist();
+    for (const m of seen) this.emit({ t: 'monitor.changed', monitor: this.publicMonitor(m) });
+    let where = href;
+    try { where = new URL(href).pathname || href; } catch { /* not a URL */ }
+    this.say('info', `${where} opened: checking ${seen.length === 1 ? seen[0].label : `${seen.length} monitors`}`);
+  }
 
   // ---- monitors ------------------------------------------------------------------------
   async create({ selector, fingerprint, label, ruleText, tag, suiteId } = {}) {
@@ -269,8 +303,8 @@ class MonitorEngine {
       id: newId('m'), label: this.redact(str(label, LABEL_MAX) || selector).slice(0, LABEL_MAX), url, suiteId,
       selector, fingerprint: fingerprint || null, tag: str(tag, 40) || base.tag || null, ruleText,
       spec: null, specSource: null, specError: null, baseline: base, baselineShot: null, last: base,
-      state: 'ok', openIncidentId: null, createdAt: now(), lastTickAt: null,
-      stats: { ticks: 0, reports: 0, incidents: 0, judgeCalls: 0 },
+      state: 'ok', openIncidentId: null, createdAt: now(), lastTickAt: null, lastVisitAt: null,
+      stats: { ticks: 0, reports: 0, incidents: 0, judgeCalls: 0, visits: 0 },
     };
     const element = { tag: m.tag, selector, label: m.label, textPreview: (base.text || '').slice(0, 120) };
     m.spec = compileMock({ ruleText: m.ruleText, element, baseline: base });
@@ -371,6 +405,9 @@ class MonitorEngine {
     if (!rt) { rt = newRuntime(); this.rt.set(m.id, rt); }
     m.stats.reports++;
     this.cleanSnapshot(r.snapshot);
+    // The page (re)armed this monitor: a new document, a route change, a
+    // resume. What is missing right now may only be late (ARM_GRACE_MS).
+    if (r.reason === 'rearmed') rt.armedAt = now();
     if (r.selectorNew && r.selectorNew !== m.selector && String(r.selectorNew).length <= SELECTOR_MAX) {
       // The selector stopped matching and the fingerprint found the element
       // again: the monitor heals its selector rather than reporting it missing.
@@ -397,7 +434,16 @@ class MonitorEngine {
     if (desired === m.state) { rt.candidate = null; clearTimeout(rt.confirm); rt.confirm = null; return; }
     // Acknowledged (manually resolved) monitors stay quiet while the same checks keep failing.
     if (m.state === 'acknowledged' && desired !== 'ok' && violationKey(res) === m.ackKey) { rt.candidate = null; clearTimeout(rt.confirm); rt.confirm = null; return; }
-    if (rt.candidate && rt.candidate.desired === desired && reason !== 'recompiled') { this.confirm(m, desired, res, snap); return; }
+    // Missing just after arming is "not yet", and neither a second report
+    // that agrees nor the half-second re-measure gets to decide it; only the
+    // measurement at the end of the grace does. Anything else — a violation,
+    // or missing on a page that has been open a while — is confirmed as fast
+    // as it always was.
+    const late = desired === 'missing' && rt.armedAt && now() - rt.armedAt < ARM_GRACE_MS;
+    if (rt.candidate && rt.candidate.desired === desired && reason !== 'recompiled') {
+      if (!late) { this.confirm(m, desired, res, snap); return; }
+      if (rt.confirm) return;
+    }
     rt.candidate = { desired, at: now() };
     clearTimeout(rt.confirm);
     rt.confirm = setTimeout(async () => {
@@ -410,7 +456,7 @@ class MonitorEngine {
       const d2 = r2.missing ? 'missing' : r2.ok ? 'ok' : 'violated';
       if (d2 === desired) this.confirm(m, desired, r2, s2);
       else rt.candidate = null;
-    }, 500);
+    }, late ? Math.max(500, rt.armedAt + ARM_GRACE_MS - now()) : 500);
   }
   /** At most one tick event per monitor per 400 ms: a card's numbers, not a firehose. */
   emitTick(m, res) {

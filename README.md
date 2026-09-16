@@ -893,6 +893,15 @@ text must not change
 width and height must not change
 ```
 
+While you pick, the panel names what the crosshair is over — the outline is
+drawn inside a JPEG frame, the words are beside it — and a click inside an
+embedded frame, which the picker cannot see, says so rather than nothing. A
+pick shows what was chosen: a clip of it, its words, its measurements, and
+the script already written — `Must exist and always be visible; width and
+height must not change; text must not change` (a table keeps its rows instead
+of its size) — with the checks that sentence compiles to shown under it as you
+edit it (`POST /api/monitors/preview`: the mock compiler, nothing kept).
+
 The rule is compiled ONCE into checks (`monitor-rules.js`): the mock compiler
 instantly, from the phrasing above, and Claude — when `ANTHROPIC_API_KEY` is
 set — asynchronously, replacing the mock's checks when its answer lands. From
@@ -936,6 +945,15 @@ the browser is "not on this page", never "missing". Picking is refused while a
 run or a recording holds the page, because the picker swallows clicks;
 monitoring itself keeps watching during a run, which is rather the point.
 
+Every time the page is opened again — a run's `goto`, Open, a reload, **Check
+now** on the card — the new document arms its monitors and each is measured
+against its rule at once. The card counts those visits and says when the last
+was, and the log says `/pricing opened: checking Hero copy`. An element that
+is not there when the document arms is late before it is missing: a freshly
+armed monitor gives it six seconds (`ARM_GRACE_MS`) to arrive before a missing
+incident opens, where a change on a page that has been open a while is
+confirmed in half a second, as before.
+
 Two things worth knowing about the security model. A monitor's selector is data
 handed to `querySelector` inside a script the RUNNER installs; the flow
 language still has no evaluate and no selector, and the page never gets a way
@@ -974,6 +992,66 @@ setting, so it lives on *Origins & vault → Appearance* rather than in the
 sidebar; the sidebar's collapse control is at the top, where a hand goes
 looking for it, and Sign out is at the foot; and Run history's suite filter sits
 with the tables it narrows instead of in the top bar.
+
+## Chat: ask the runner what it knows
+
+Under *General* in the sidebar there is **Chat**. It answers from the
+organisation's own records — how many defects are open and which, what the
+latest runs and scans were, which suites, pages and cases are saved, what the
+monitors are watching, whether the runner is busy — and it can act on them:
+"can you test the contact us page" finds the saved case that best matches,
+runs it, and reports the result with a run card, the failing step and the
+defect number if one was filed. When no case matches it says so and offers
+what the runner can do instead — run the page's expectations as a one-off
+check, or quickstart a suite from a URL.
+
+It is not a vector index. Everything it can say is already a small,
+structured, live store this process keeps per organisation (`runs.js`,
+`defects.js`, `suites.js`, `monitor.js`), sized in hundreds of rows and
+changed by every run, so retrieval is a function call into those stores plus a
+keyword match over suite, page and case names, paths and flow text
+(`chat-tools.js` `findMatches`); an embedding index would be a second copy
+of the same data, stale the moment a run finished. A **mind** drives a fixed
+set of fourteen **tools**, and every number in a reply comes back from one of
+them. Two minds drive the same tools: Claude (`chat-resolver.js`, through the
+SDK's tool runner, at most `GC_CHAT_AI_MAX_PER_DAY` requests a day for the
+process) when a key is set, and the **mock mind** (`chat-mock.js`, about
+fifteen intents as regular expressions over the same tools) when there is no
+key, when the day's budget is spent, when the model is unavailable — the reply
+then starts with a note saying so — and in the end-to-end check. `GC_CHAT` is
+`auto` (the default), `mock` or `claude`; a word the runner does not know
+stops it at boot. The key is the same `ANTHROPIC_API_KEY` the fixes read, and
+the chat reads it before they take it out of the environment.
+
+What the model reads is split down the middle. Counts, ids, times and verdicts
+are the runner's own facts and are stated plainly; names, titles, flows, rule
+text and the sentences a failure leaves came from sites under test, so they
+ride inside a marked UNTRUSTED block the system prompt says to report and
+never obey, redacted through the organisation's vault and saved session on the
+way out, with their own markers defanged. Two tools only **propose**: scanning
+a page and quickstart drive the browser and change what the organisation
+keeps, so they come back as a proposal a person confirms with a button (or the
+word yes) within ten minutes; the engine (`chat.js`) then executes it through
+the same functions the routes call, with the routes' gates, and hands the
+outcome to the mind as a runner-authored note. Nothing a model says executes
+anything by itself, and every refusal the runner makes — the plan, another
+organisation driving, an operator's switch, an origin nobody allowed, a run in
+progress — reaches the reply as the runner's decision, in its words.
+
+A turn is `POST /api/chat/turns` (a 202) and is answered on the
+organisation's sockets — `chat.turn`, `chat.delta`, `chat.tool`,
+`chat.proposal`, `chat.done` — because a reply that runs a case takes as
+long as the case does; one reply at a time per organisation (a 409
+`chat_busy`). Transcripts live in `.ghostclick/<org>/chat.json`, twenty
+conversations of two hundred messages, listed by `GET /api/chat` and read by
+`GET /api/chat/:id`; what the model itself saw — its tool calls and results —
+is kept in memory only, and after a restart a conversation is rebuilt from the
+words. The `runner.chat` switch turns the chat off for everybody
+(docs/HARDENING.md). `npm run check:chat-request` is the offline check — the
+matcher, the mock mind and, through a fetch of its own, exactly what goes on
+the wire — and `npm run check:chat` drives the whole thing on a runner of its
+own: a count that equals `/api/defects`, a case run from a sentence, a
+proposal confirmed, the transcript kept and deleted.
 
 ## Summarised, not tipped out
 
@@ -1215,8 +1293,9 @@ case that was broken — and the virgin one has to say `Nothing has run yet`.
 
 ## Scrolling with the wheel
 
-Point at the canvas and use your wheel or trackpad. It is the primary way; the
-↑ Top / ↓ Bottom buttons are for a page too long to roll through.
+Point at the canvas and use your wheel or trackpad. It is the way you scroll a
+page now; the ↑ Top / ↓ Bottom buttons are gone, and `scroll to top` and
+`scroll to bottom` are steps for a page too long to roll through.
 
 Wheel events are coalesced into **one socket message per animation frame**. A
 trackpad emits well over a hundred a second, and the first version sent two
@@ -1229,6 +1308,37 @@ and hope; the server clamped it, so they moved by exactly the clamp and never
 reached either end — and the check that was supposed to catch that passed three
 times before it was written honestly. Testing a scroll button with the scroll
 button is how.
+
+---
+
+## Back, and home
+
+A sign-in that bounces the driven page to another origin used to leave no way
+back. **Open** reopens whatever is in the box, and the box follows the address
+only on arrival — so once the runner sat on a login page there was nothing to
+press. The address row has two more buttons now, before the box.
+
+**Back** is the browser's own history, one page back, a hash change or a
+pushState included. It is offered only when the runner says there is a page
+behind this one, and the runner decides that from Chrome's history
+(`Page.getNavigationHistory`) rather than from `page.goBack()`'s answer, which
+is null both when there is nothing to go back to and after a same-document
+step that did go back. The blank page a fresh context starts on is never a
+destination: Back to "nothing open" is not a place. Every navigation re-asks and
+sends the answer as a `history` event; the greeting carries it too, so a
+console that reconnects mid-session is right from its first frame. No new gate:
+a history step is one the page's own link could have produced, and the reach
+rule still blocks private addresses on the way.
+
+**Home** reopens the page you last opened on purpose — from this console or
+from monitoring — else the `?url=` the console was opened with, else the
+suite's own address. It goes through the same origin gate as Open.
+
+In attach mode (`GC_CDP_URL`) the page is a person's real tab and its history
+predates the runner; Back steps into that history, which is that mode's
+single-user shape. `npm run check:history` starts a fresh runner and proves the
+floor, the two-page case and the hash change; `npm run check:console` presses
+the two buttons in the built UI.
 
 ---
 
@@ -2064,6 +2174,10 @@ silently inside someone else's docs.
 | `monitor/page/` | that agent's source — the runtime, the picker, the watcher — read off disk and bundled |
 | `redact.js` | vault values out of text on its way out, for the console and the monitors alike |
 | `support.js` | help & support — a request from the top bar, and the per-organisation access switch it turns on |
+| `chat.js` | the chat — one transcript store and engine per organisation: a turn, the proposal it confirms, which mind answers, the reply kept |
+| `chat-tools.js` | the fourteen tools a mind drives, the keyword matcher, the untrusted block and the redaction on the way out |
+| `chat-mock.js` | the mock mind: intents as regular expressions over the same tools, for a runner with no key |
+| `chat-resolver.js` | Claude for the chat: the request, its frozen cached prompt, the tool runner, which mind is on |
 | `vocabulary.js` | every verb, declared once: syntax, how it writes back, how it draws |
 | `flow.js` | the test case language: text ↔ IR, and `asFlowchart()` for a picture |
 | `ops.js` | what each verb does, origin allowlist, validation gate |
@@ -2121,6 +2235,8 @@ silently inside someone else's docs.
 | `scripts/check-monitoring-request.js` | the mock compiler and, offline, exactly what the resolver puts on the wire |
 | `public/monitor.html` | a page shaped to be watched, with buttons that break it |
 | `scripts/check-support.js` | a support request lands, turns access on, is told to every socket, and turns off again |
+| `scripts/check-chat-request.js` | the matcher, the mock mind and, offline, exactly what the chat's resolver puts on the wire |
+| `scripts/check-chat.js` | the chat on a runner of its own: a count that equals /api/defects, a case run from a sentence, a proposal confirmed, the transcript kept |
 | `public/site.html` | Harbour — the same links in header and footer, and a long page |
 
 ---

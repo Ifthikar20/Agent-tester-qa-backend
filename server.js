@@ -40,8 +40,11 @@ import { MonitorAgent } from './monitor-page.js';
 // Aliased: resolver.js (automatic fixes) exports the same two names, and each
 // layer keeps its own copy of the key lookup and its own client.
 import { findApiKey as findMonitorApiKey, createResolver as createMonitorResolver, createBudget, MODEL as MONITOR_MODEL } from './monitor-resolver.js';
-import { llmModeFrom, compactSnapshot } from './monitor-rules.js';
+import { llmModeFrom, compactSnapshot, previewSpec } from './monitor-rules.js';
 import { redactWith } from './redact.js';
+import * as chat from './chat.js';
+import { findApiKey as findChatApiKey, createResolver as createChatResolver, chatModeFrom, MODEL as CHAT_MODEL } from './chat-resolver.js';
+import { redactSecrets } from './heal.js';
 
 const require = createRequire(import.meta.url);
 const PORT = Number(process.env.PORT) || 3000;
@@ -128,6 +131,13 @@ if (SWITCH_ERROR || LIMIT_ERROR || LOG_ERROR || HEAL_ENV.error) {
  * and the browser is the part of the runner that renders pages other people
  * choose. Nothing prints it — the banner says "key found" and where.
  */
+/**
+ * The chat's key (chat-resolver.js), read HERE — before the fixes layer just
+ * below takes ANTHROPIC_API_KEY out of the environment — and only read: the
+ * delete stays where it is, so the browser is started without the key as
+ * before. Held inside the resolver alone; the banner says where it came from.
+ */
+const CHAT_KEY = findChatApiKey({ env: process.env, root: fileURLToPath(new URL('./', import.meta.url)) });
 const AI = (() => {
   const { key, source } = findApiKey({ env: process.env, root: fileURLToPath(new URL('./', import.meta.url)) });
   delete process.env.ANTHROPIC_API_KEY;
@@ -183,6 +193,26 @@ if (!Number.isInteger(MONITOR_AI_PER_DAY) || MONITOR_AI_PER_DAY < 0) {
 }
 const monitorResolver = MONITOR_LLM.mode === 'claude' ? createMonitorResolver({ apiKey: MONITOR_KEY.key }) : null;
 const monitorBudget = createBudget({ max: MONITOR_AI_PER_DAY });
+
+/**
+ * The chat's mind (chat.js, chat-resolver.js): Claude when a key is here,
+ * the mock mind — rules over the same tools — otherwise, and GC_CHAT to say
+ * so explicitly. A word the runner does not know stops it here, never read as
+ * off. The budget is the process's, in memory: a ceiling against a runaway
+ * conversation, not billing.
+ */
+const CHAT = chatModeFrom({ env: process.env, haveKey: Boolean(CHAT_KEY.key) });
+if (CHAT.error) {
+  console.error(`\n  ${CHAT.error}\n`);
+  process.exit(1);
+}
+const CHAT_AI_PER_DAY = process.env.GC_CHAT_AI_MAX_PER_DAY?.trim() ? Number(process.env.GC_CHAT_AI_MAX_PER_DAY) : 200;
+if (!Number.isInteger(CHAT_AI_PER_DAY) || CHAT_AI_PER_DAY < 0) {
+  console.error(`\n  GC_CHAT_AI_MAX_PER_DAY is "${process.env.GC_CHAT_AI_MAX_PER_DAY}"; it takes a whole number of calls a day.\n`);
+  process.exit(1);
+}
+const chatResolver = CHAT.mode === 'claude' ? createChatResolver({ apiKey: CHAT_KEY.key }) : null;
+const chatBudget = createBudget({ max: CHAT_AI_PER_DAY });
 
 /**
  * Every store is keyed by organisation (tenancy.js, docs/AUTH.md §10). The
@@ -244,6 +274,16 @@ let running = false;
  * caller reads them at request time, which is why rebinding them is enough.
  */
 let cdp = null;
+/**
+ * Whether Back would land on a page. Decided from Chrome's own history, never
+ * from page.goBack()'s answer: that is null both when there is nothing to go
+ * back to and after a same-document step (a hash change, a pushState) that
+ * did go back — and it will happily go back to the blank page a fresh context
+ * starts on, which is "nothing open", not somewhere to offer. `historySeq`
+ * drops an answer a newer navigation has overtaken.
+ */
+let canGoBack = false;
+let historySeq = 0;
 let cursor = null;
 let nav = null;
 // The CURRENT device's CSS viewport (devices.js). The screencast, the cursor
@@ -256,6 +296,8 @@ let originalUA = null;   // the browser's own user-agent, captured per session, 
 /** The monitoring agent inside the driven page (monitor-page.js); remade with the session. */
 let monitorAgent = null;
 let monitorSync = null;
+/** The largest clip of a picked element that goes to the panel over the socket. */
+const PICK_SHOT_MAX_BYTES = 600_000;
 // Set once the browser is actually up. The port opens ~100 lines before
 // chromium.launch, so "the server answers" and "the app works" are two
 // different facts. /healthz reports this one, and a deploy waits on it.
@@ -568,6 +610,10 @@ const fail = (res, err, code = 400) => {
   if (err instanceof NoSuchSuite) return res.status(404).json({ ok: false, error: err.message });
   // A monitor or an incident this organisation does not have, likewise.
   if (err instanceof monitoring.NoSuchMonitor || err instanceof monitoring.NoSuchIncident) return res.status(404).json({ ok: false, error: err.message });
+  // The chat writes one reply at a time per organisation (chat.js): a 409
+  // naming the turn in flight, so the UI waits for it rather than retrying.
+  if (err instanceof chat.ChatBusy) return res.status(409).json({ ok: false, error: 'chat_busy', turnId: err.turnId, conversationId: err.conversationId });
+  if (err instanceof chat.NoSuchConversation) return res.status(404).json({ ok: false, error: err.message });
   // The monitoring engine names the status of its own refusals: 409 for
   // nothing open or too many monitors, 422 for an element that is not there.
   return res.status(err.status ?? code).json({ ok: false, error: err.message ?? String(err) });
@@ -722,6 +768,7 @@ app.post('/api/origins', switched('runner.origins'));
 app.delete('/api/origins', switched('runner.origins'));
 app.post(['/api/fixes/:id/accept', '/api/fixes/:id/reject'], switched('runner.heal'));
 app.put('/api/settings/heal', switched('runner.heal'));
+app.post('/api/chat/turns', switched('runner.chat'));
 
 /**
  * Step-up: is this token fresh enough for the one action that demands it?
@@ -741,10 +788,11 @@ const steppedUp = (claims) => !AUTH_ON || (typeof claims?.su === 'number' && Dat
  * than on a timer means the number a plan says is the number a page shows,
  * and there is no job to forget to run.
  */
-const historyOf = (req) => {
-  req.space.history.prune(req.ent.limit('history.retention_days'));
-  return req.space.history;
+const historyFor = (space, ent) => {
+  space.history.prune(ent.limit('history.retention_days'));
+  return space.history;
 };
+const historyOf = (req) => historyFor(req.space, req.ent);
 
 /**
  * The organisation's defects (defects.js), brought up to date with its
@@ -752,11 +800,30 @@ const historyOf = (req) => {
  * ones, that is: an open defect is kept however old it is, because it is
  * still true.
  */
-const defectsOf = (req) => {
-  const { defects } = req.space;
-  defects.sync(historyOf(req).list());
-  defects.prune(req.ent.limit('history.retention_days'));
+const defectsFor = (space, ent) => {
+  const { defects } = space;
+  defects.sync(historyFor(space, ent).list());
+  defects.prune(ent.limit('history.retention_days'));
   return defects;
+};
+const defectsOf = (req) => defectsFor(req.space, req.ent);
+
+/**
+ * The defects as the chat's tools read them (chat-tools.js): the store, with
+ * the two questions its routes answer out of history folded in — one status
+ * at a time, and the failed runs behind one number. `byId` says this runner
+ * numbers its defects, so the tool that reads one by number is offered.
+ */
+const chatDefectsFor = (space, ent) => {
+  const defects = defectsFor(space, ent);
+  return {
+    byId: true,
+    list: (status = 'open') => defects.list().filter((d) => status === 'all' || d.status === status),
+    totals: () => defects.totals(),
+    get: (id) => defects.get(id),
+    idFor: (run) => defects.idFor(run),
+    runsOf: (id, limit = 5) => defects.runsOf(id, space.history.list(), limit),
+  };
 };
 
 app.get('/api/runs', (req, res) => {
@@ -991,13 +1058,33 @@ app.get('/api/version', (_req, res) => res.json({ ...identity, built: buildTime(
  * from its own stores — the same numbers the refusals are made from, so the
  * page that shows them cannot disagree with the 402 that follows.
  */
-const usage = (req) => ({
-  suites: { used: req.space.suites.list().length, max: req.ent.limit('suites.max') },
-  runs: { used: req.space.history.today(), max: req.ent.limit('runs.per_day') },
-  origins: { used: req.space.origins.list().length, max: req.ent.limit('origins.max') },
-  vault: req.ent.enabled('vault.enabled'),
-  retentionDays: req.ent.limit('history.retention_days'),
+const usageOf = (space, ent) => ({
+  suites: { used: space.suites.list().length, max: ent.limit('suites.max') },
+  runs: { used: space.history.today(), max: ent.limit('runs.per_day') },
+  origins: { used: space.origins.list().length, max: ent.limit('origins.max') },
+  vault: ent.enabled('vault.enabled'),
+  retentionDays: ent.limit('history.retention_days'),
 });
+const usage = (req) => usageOf(req.space, req.ent);
+
+/**
+ * The runner as the chat describes it (chat-tools.js runner_state): the
+ * console's state, less what a person has a page for. The address is the
+ * driving organisation's alone, as on /api/state.
+ */
+const stateFor = (space, ent, switches) => {
+  const mine = driver.sees(space.org);
+  return {
+    url: mine ? currentUrl() : null,
+    running: mine && running,
+    recording: mine && (recorder?.recording ?? false),
+    driving: driver.describe(space.org),
+    origins: space.origins.list(),
+    plan: ent.plan,
+    usage: usageOf(space, ent),
+    switches: switches?.runner ? switches.runner() : null,
+  };
+};
 
 /**
  * Automatic fixes, as they stand for one organisation (heal.js, fixes.js).
@@ -1202,11 +1289,20 @@ app.post('/api/suites/:id/pages/:pageId/scan', async (req, res) => {
   } catch (err) { return fail(res, err, 404); }
 
   if (gate(res, originOf(suite), space)) return;
-  // The lock before the run lock: an organisation that cannot have the
-  // browser is told it is busy, not that "a run is in progress" — which is
-  // someone else's run, and none of its business.
-  try { await take(space.org); } catch (err) { return fail(res, err); }
-  if (running) return fail(res, new Error('A run is in progress'), 409);
+  try { sendOk(res, await scanPageOf({ suite, pg, space })); }
+  catch (err) { fail(res, err); }
+});
+
+/**
+ * The scan itself, for the route above and for the chat (chat.js) once a
+ * person has confirmed it. The caller has passed the origin gate; the locks
+ * are taken here — the browser's before the run's, so an organisation that
+ * cannot have the browser is told it is busy (RunnerBusy), not that "a run
+ * is in progress", which is someone else's run and none of its business.
+ */
+async function scanPageOf({ suite, pg, space }) {
+  await take(space.org);
+  if (running) throw Object.assign(new Error('A run is in progress'), { status: 409 });
 
   running = true;
   try {
@@ -1216,15 +1312,13 @@ app.post('/api/suites/:id/pages/:pageId/scan', async (req, res) => {
     const saved = space.suites.updatePage(suite.id, pg.id, { targets: items, linked });
     emit({ t: 'log', level: 'info',
            msg: `scanned ${pg.url} — ${items.length} targets, ${linked.length} links` });
-    sendOk(res, { page: saved, url: page.url() });
-  } catch (err) {
-    fail(res, err);
+    return { page: saved, url: page.url() };
   } finally {
     running = false;
     armRelease();
     await publishTargets();
   }
-});
+}
 
 app.post('/api/suites/:id/cases', (req, res) => {
   try { sendOk(res, { case: req.space.suites.addCase(req.params.id, req.body ?? {}, checkFlowFor(req.space)) }); }
@@ -1310,19 +1404,27 @@ app.post('/api/suites/:id/run', async (req, res) => {
   const wanted = req.query.case
     ? suite.cases.filter((c) => c.id === req.query.case)
     : suite.cases;
-  if (!wanted.length) return fail(res, new Error('This suite has no cases to run'));
-  // The whole suite, counted up front: a run that would stop at case three
-  // of five is refused before case one, not discovered halfway. And the
-  // plan before the lock: a run the plan refuses never takes the browser.
-  try {
-    req.ent.check('runs.per_day', space.history.today(), wanted.length);
-    await take(space.org);
-  } catch (err) { return fail(res, err); }
-  if (running) return fail(res, new Error('A run is in progress'), 409);
-
   // How much of this run to perform, for this run only. Absent means the
   // server's default, so a caller that has never heard of pace is unaffected.
   const pace = paceOf(req.query.pace, PACE);
+  try { sendOk(res, await runCasesOf({ suite, wanted, pace, space, ent: req.ent, switches: req.switches })); }
+  catch (err) { fail(res, err); }
+});
+
+/**
+ * The run itself — the cases in order, a failure stopping none of the
+ * others — for the route above and for the chat (chat.js), which runs a
+ * saved case when asked to. The caller has passed the origin gate. The whole
+ * suite is counted up front: a run that would stop at case three of five is
+ * refused before case one, not discovered halfway. And the plan before the
+ * lock: a run the plan refuses never takes the browser.
+ */
+async function runCasesOf({ suite, wanted, pace = PACE, space, ent, switches }) {
+  if (!wanted.length) throw new Error('This suite has no cases to run');
+  ent.check('runs.per_day', space.history.today(), wanted.length);
+  await take(space.org);
+  if (running) throw Object.assign(new Error('A run is in progress'), { status: 409 });
+
   const checkFlow = checkFlowFor(space);
 
   emit({ t: 'suite.start', suite: suite.name, cases: wanted.length });
@@ -1342,14 +1444,14 @@ app.post('/api/suites/:id/run', async (req, res) => {
     // Express 4 does not catch a rejection from an async handler, so an
     // unexpected throw here would take the process with it rather than failing
     // one case. A suite run survives a bad case.
-    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name, pace, space, ent: req.ent, switches: req.switches })
+    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name, pace, space, ent, switches })
       .catch((err) => ({ ok: false, passed: 0, total: 0, error: err.message }));
     outcomes.push({ case: c.id, name: c.name, ...r });
   }
   const passed = outcomes.filter((o) => o.ok).length;
   emit({ t: 'suite.end', suite: suite.name, passed, total: outcomes.length });
-  sendOk(res, { suite: suite.id, passed, total: outcomes.length, outcomes });
-});
+  return { suite: suite.id, passed, total: outcomes.length, outcomes };
+}
 
 /**
  * One URL in, a running test out.
@@ -1375,8 +1477,21 @@ app.post('/api/suites/quickstart', async (req, res) => {
     req.ent.check('runs.per_day', space.history.today());
   } catch (err) { return fail(res, err); }
   if (gate(res, u.origin, space)) return;
-  try { await take(space.org); } catch (err) { return fail(res, err); }
-  if (running) return fail(res, new Error('A run is in progress'), 409);
+  try { sendOk(res, await quickstartOf({ u, name: req.body?.name, space, ent: req.ent, switches: req.switches })); }
+  catch (err) { fail(res, err); }
+});
+
+/**
+ * Quickstart itself, for the route above and for the chat (chat.js) once a
+ * person has confirmed it: the plan's two counts, the locks, the visit, the
+ * suite and its first page, and that page's check, run once. The caller has
+ * passed the origin gate.
+ */
+async function quickstartOf({ u, name, space, ent, switches }) {
+  ent.check('suites.max', space.suites.list().length);
+  ent.check('runs.per_day', space.history.today());
+  await take(space.org);
+  if (running) throw Object.assign(new Error('A run is in progress'), { status: 409 });
 
   let suite, pg, items;
   running = true;
@@ -1390,7 +1505,7 @@ app.post('/api/suites/quickstart', async (req, res) => {
     const path = `${u.pathname}${u.search}${u.hash}`;
 
     suite = space.suites.create({
-      name: String(req.body?.name ?? '').trim() || title || u.host,
+      name: String(name ?? '').trim() || title || u.host,
       baseUrl: u.href,
       description: `Added from ${u.href}`,
     });
@@ -1400,8 +1515,6 @@ app.post('/api/suites/quickstart', async (req, res) => {
       expect: [{ kind: 'url', value: path }],
     });
     space.suites.updatePage(suite.id, pg.id, { targets: items, linked });
-  } catch (err) {
-    return fail(res, err);
   } finally {
     running = false;
     armRelease();
@@ -1410,14 +1523,14 @@ app.post('/api/suites/quickstart', async (req, res) => {
   const checkFlow = checkFlowFor(space);
   const flow = pageCheckFlow(space.suites.get(suite.id), space.suites.get(suite.id).pages[0]);
   const c = space.suites.addCase(suite.id, { name: `${pg.name} loads`, pageId: pg.id, flow }, checkFlow);
-  const outcome = await run(checkFlow(flow), { suiteId: suite.id, caseId: c.id, caseName: c.name, space, ent: req.ent, switches: req.switches });
+  const outcome = await run(checkFlow(flow), { suiteId: suite.id, caseId: c.id, caseName: c.name, space, ent, switches });
 
-  sendOk(res, {
+  return {
     suite: space.suites.get(suite.id),
     targets: items.length,
     run: outcome,
-  });
-});
+  };
+}
 
 /** A page's expectations, as a flow you can read before you run it. */
 app.get('/api/suites/:id/pages/:pageId/check', (req, res) => {
@@ -1501,6 +1614,16 @@ app.get('/api/monitors', (req, res) => {
   try { res.json({ ok: true, monitors: monitorsOf(req).list(projectOf(req)) }); }
   catch (err) { fail(res, err, 404); }
 });
+/**
+ * The checks a rule would compile to, before a monitor exists — the script the
+ * panel shows under the sentence as it is typed, from the snapshot the pick
+ * carried. Pure: no page, no lock, no model, and nothing kept.
+ */
+app.post('/api/monitors/preview', (req, res) => {
+  const spec = previewSpec(req.body ?? {});
+  if (!spec) return res.status(400).json({ ok: false, error: 'ruleText is required' });
+  res.json({ ok: true, spec });
+});
 app.post('/api/monitors', async (req, res) => {
   if (!pageIsOurs(req, res)) return;
   try {
@@ -1569,6 +1692,27 @@ app.delete('/api/support/access', (req, res) => {
   emitTo(req.space.org, { t: 'support', enabled: false, since: null });
   emitTo(req.space.org, { t: 'log', level: 'info', msg: 'support access is off for this organisation' });
   sendOk(res, { enabled: s.enabled, since: s.since });
+});
+
+/**
+ * The chat (chat.js): what this runner knows about the organisation, asked in
+ * words, and its saved cases run from the same box. A turn is accepted with a
+ * 202 and answered on the organisation's sockets (`chat.*` events), because
+ * an answer that runs a case takes as long as the case does. One reply at a
+ * time per organisation; the transcript is kept per organisation.
+ */
+app.get('/api/chat', (req, res) => res.json({ ok: true, on: req.switches.on('runner.chat'), ...chat.describe(req.space) }));
+app.get('/api/chat/:id', (req, res) => {
+  try { sendOk(res, { conversation: req.space.chat.get(req.params.id) }); } catch (err) { fail(res, err); }
+});
+app.delete('/api/chat/:id', (req, res) => {
+  try { sendOk(res, req.space.chat.remove(req.params.id)); } catch (err) { fail(res, err); }
+});
+app.post('/api/chat/turns', (req, res) => {
+  try {
+    const turn = chat.turn({ ...(req.body ?? {}), space: req.space, ent: req.ent, switches: req.switches, by: req.user?.sub ?? LOCAL });
+    res.status(202).json({ ok: true, conversationId: turn.conversationId, turnId: turn.id });
+  } catch (err) { fail(res, err); }
 });
 /**
  * Redirect shapes worth testing, for the bundled demo.
@@ -1765,6 +1909,9 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  monitoring  ->  ${MONITOR_LLM.mode === 'claude'
               ? `Claude (${MONITOR_MODEL}) compiles rules and judges incidents — key from ${MONITOR_KEY.source}, at most ${monitorBudget.max} calls a day (GC_MONITOR_AI_MAX_PER_DAY)`
               : `the mock compiler and judge${MONITOR_KEY.key ? ' (GC_MONITOR_LLM=mock)' : ' — set ANTHROPIC_API_KEY for Claude'}`}` +
+            `\n  chat        ->  ${CHAT.mode === 'claude'
+              ? `Claude (${CHAT_MODEL}) answers from the organisation's own stores and runs its saved cases — key from ${CHAT_KEY.source}, at most ${chatBudget.max} calls a day (GC_CHAT_AI_MAX_PER_DAY)`
+              : `the mock mind — rules over the same tools${CHAT_KEY.key ? ' (GC_CHAT=mock)' : ' — set ANTHROPIC_API_KEY for Claude'}`}` +
             `\n  version     ->  ${identity.commit ?? 'unknown'}` +
             `${buildTime() ? `, ui built ${buildTime().replace('T', ' ').slice(0, 16)}` : ', no ui to date'}\n`);
 
@@ -1845,6 +1992,23 @@ function emitTo(org, ev) {
 }
 function emit(ev) {
   if (driver.org) emitTo(driver.org, ev);
+}
+
+/**
+ * A click while picking that chose nothing. The picker answers a click on
+ * the page's own elements within milliseconds; one that lands inside an
+ * <iframe> never reaches it — the events stay in the frame's document, where
+ * the agent is not installed — and the person is left in "picking" wondering
+ * why nothing happened. Said once per such click, to the one who clicked.
+ */
+function missedPick(org, urlBefore) {
+  setTimeout(() => {
+    if (!monitorAgent?.picking || currentUrl() !== urlBefore) return;
+    emitTo(org, {
+      t: 'monitor.pick.miss',
+      msg: 'That click chose nothing. It probably landed inside an embedded frame, which the picker cannot see — pick an element of the page itself.',
+    });
+  }, 700);
 }
 
 /**
@@ -1950,6 +2114,24 @@ function entryUrl(page) {
 
 
 /** What can the current page be told to do? Emitted whenever it changes. */
+/**
+ * Ask Chrome whether there is a page behind this one, and tell the console.
+ * Called on every navigation, un-awaited: the answer that matters is the
+ * newest one, so an older query that lands late — or one that belongs to a
+ * page an organisation handover has since replaced — is dropped.
+ */
+async function refreshHistory() {
+  const seq = ++historySeq;
+  const session = cdp;
+  try {
+    const { currentIndex, entries } = await cdp.send('Page.getNavigationHistory');
+    if (seq !== historySeq || cdp !== session) return;
+    const prev = entries[currentIndex - 1];
+    canGoBack = !!prev && !/^about:/.test(prev.url ?? '');
+    emit({ t: 'history', back: canGoBack });
+  } catch { /* the page went away mid-navigation; the next one asks again */ }
+}
+
 async function publishTargets() {
   try {
     emit({ t: 'targets', url: currentUrl(), items: await discover(page) });
@@ -1995,6 +2177,8 @@ async function newSession() {
     // An attached page may refuse a resize; the feed still works if it does.
     await page.setViewportSize(VIEW).catch(() => {});
     cdp = await context.newCDPSession(page);
+    // A fresh page has nothing behind it — the next navigation says otherwise.
+    canGoBack = false;
   } else {
     const drivingOrg = driver.org;
     const savedSession = drivingOrg
@@ -2013,6 +2197,7 @@ async function newSession() {
     });
     page = await context.newPage();
     cdp = await page.context().newCDPSession(page);
+    canGoBack = false;
     if (savedSession) {
       emit({ t: 'log', level: 'info',
              msg: `opened with a saved sign-in — ${sessions.describe(savedSession)}. `
@@ -2151,25 +2336,59 @@ async function newSession() {
    * line.
    */
   const owner = driver.org ?? null;
+  /**
+   * Whose pick — or hover — this is: the agent's owner, or, for an agent made
+   * before anyone was driving (attach mode wires its one page at boot and
+   * never again), whoever is driving now. A pick with nobody to tell is said
+   * in the log rather than dropped: from the panel, a dropped pick looks like
+   * a click that did nothing.
+   */
+  const pickerOrg = () => agent.owner ?? driver.org ?? null;
   const agent = new MonitorAgent(page, {
     owner,
     listFor: (href) => (agent.owner ? tenancy.workspace(agent.owner).monitors.monitorsForPage(href) : []),
     onReport: (r) => { if (agent.owner) tenancy.workspace(agent.owner).monitors.ingest(r); },
-    onSelected: (info) => {
-      if (!agent.owner) return;
-      if (info && !info.cancelled && info.selector) {
-        const engine = tenancy.workspace(agent.owner).monitors;
-        const snapshot = engine.cleanSnapshot(compactSnapshot(info.snapshot));
-        emitTo(agent.owner, {
-          t: 'monitor.selected',
-          selector: String(info.selector).slice(0, monitoring.SELECTOR_MAX),
-          fingerprint: info.fingerprint ?? null,
-          snapshot,
-          label: engine.redact(String(info.label ?? '')).slice(0, monitoring.LABEL_MAX),
-          url: info.url ?? currentUrl(),
-        });
+    onVisit: (href, list) => { if (agent.owner && list.length) tenancy.workspace(agent.owner).monitors.visited(href, list.map((m) => m.id)); },
+    // What the pointer is over, in words, so the panel can say it while the
+    // person is still choosing. Page text, so redacted like a snapshot's.
+    onHover: (h) => {
+      const org = pickerOrg();
+      if (!org || !h) return;
+      const engine = tenancy.workspace(org).monitors;
+      emitTo(org, {
+        t: 'monitor.hover',
+        describe: String(h.describe ?? '').slice(0, 120), tag: String(h.tag ?? '').slice(0, 40),
+        text: engine.redact(String(h.text ?? '')).slice(0, 60),
+        w: Number(h.w) || 0, h: Number(h.h) || 0, fontSize: String(h.fontSize ?? '').slice(0, 20),
+      });
+    },
+    onSelected: async (info) => {
+      const org = pickerOrg();
+      if (!org) return void console.error('  monitoring: an element was picked but nobody is driving — the pick was dropped');
+      if (!(info && !info.cancelled && info.selector)) return void emitTo(org, { t: 'monitor.pick', on: false });
+      const engine = tenancy.workspace(org).monitors;
+      const snapshot = engine.cleanSnapshot(compactSnapshot(info.snapshot));
+      const selector = String(info.selector).slice(0, monitoring.SELECTOR_MAX);
+      const fingerprint = info.fingerprint ?? null;
+      emitTo(org, {
+        t: 'monitor.selected',
+        selector,
+        fingerprint,
+        snapshot,
+        label: engine.redact(String(info.label ?? '')).slice(0, monitoring.LABEL_MAX),
+        url: info.url ?? currentUrl(),
+        // What the page could not read about it, if anything (picker.js select).
+        readError: info.readError ? String(info.readError).slice(0, 200) : null,
+      });
+      emitTo(org, { t: 'monitor.pick', on: false });
+      // A clip of what was chosen, after the answer rather than before it: the
+      // panel names the element at once and shows it a moment later. Only a
+      // clip of the element itself — the whole viewport is not "what you
+      // picked" — and only one small enough to ride the socket.
+      const shot = await agent.screenshotElement({ selector, fingerprint }, { mayScroll: false }).catch(() => null);
+      if (shot?.png && shot.kind === 'element' && shot.png.length <= PICK_SHOT_MAX_BYTES) {
+        emitTo(org, { t: 'monitor.shot', selector, shot: `data:image/png;base64,${shot.png.toString('base64')}` });
       }
-      emitTo(agent.owner, { t: 'monitor.pick', on: false });
     },
     onError: (msg) => emit({ t: 'log', level: 'error', msg: `monitoring: ${msg}` }),
   });
@@ -2201,6 +2420,7 @@ async function newSession() {
      * response, so the NavigationLog never sees them.
      */
     emit({ t: 'url', url: currentUrl() });
+    refreshHistory();
     publishTargets();
     // A navigation ends a pick — the element under the pointer is gone — and
     // hands the new document its monitors. A new document arms them through
@@ -2245,7 +2465,21 @@ async function resetSession() {
   // if it closed the context. So this is a no-op: the shared page stays wired,
   // and `emit` already follows whoever is driving. Multi-user hand-off of one
   // shared browser is out of scope for this mode.
-  if (CDP_URL) return;
+  if (CDP_URL) {
+    // The one page stays wired, so its monitoring agent is re-pointed at
+    // whoever drives now rather than left with the organisation it was made
+    // for — at boot, nobody, which would leave every pick and every report
+    // with no engine to go to.
+    if (monitorAgent && monitorAgent.owner !== (driver.org ?? null)) {
+      if (monitorAgent.owner) {
+        if (monitorAgent.picking) emitTo(monitorAgent.owner, { t: 'monitor.pick', on: false });
+        tenancy.workspace(monitorAgent.owner).monitors.detach();
+      }
+      monitorAgent.owner = driver.org ?? null;
+      if (monitorAgent.owner) tenancy.workspace(monitorAgent.owner).monitors.attach(monitorAgent);
+    }
+    return;
+  }
 
   browserReady = false;
   lastFrame = null;
@@ -2276,6 +2510,31 @@ monitoring.configure({
   resolver: monitorResolver,
   budget: monitorBudget,
   isIdle: () => !running && !(recorder?.recording),
+});
+
+/**
+ * The chat's one configuration (chat.js): the sockets, which mind, the
+ * budget, the organisation's secrets to keep out of what a model reads, and
+ * the runner's own actions — the same functions the routes call, so what
+ * the chat runs is what a button would have run.
+ */
+chat.configure({
+  emitTo,
+  log: console,
+  llm: { mode: CHAT.mode, model: CHAT.mode === 'claude' ? CHAT_MODEL : null, key: { have: Boolean(CHAT_KEY.key), from: CHAT_KEY.source } },
+  resolver: chatResolver,
+  budget: chatBudget,
+  extraRedact: (space) => { const values = secretValuesOf(space); return (t) => redactSecrets(t, values); },
+  actions: {
+    state: stateFor,
+    history: historyFor,
+    defects: chatDefectsFor,
+    checkFlow: checkFlowFor,
+    runCases: runCasesOf,
+    runPlan: run,
+    scanPage: scanPageOf,
+    quickstart: quickstartOf,
+  },
 });
 
 await newSession();
@@ -2438,7 +2697,9 @@ async function run(plan, meta = {}) {
       emit({ t: 'log', level: 'error', msg: `could not draw the report: ${err.message}` });
     }
     await publishTargets();
-    return { ok, passed, total: results.length, error: entry.error, fixed: entry.fixed, defect };
+    // The failing step and what it was doing, so a caller can say "stopped at
+    // click 'Login'" without reading the history back (the chat does).
+    return { ok, passed, total: results.length, error: entry.error, fixed: entry.fixed, defect, step: entry.step, target: entry.target };
   } finally {
     // Clear the lock BEFORE announcing the end. run.end means "you may start
     // another run"; emitting it while still locked makes a caller that runs
@@ -2991,7 +3252,13 @@ wss.on('connection', (ws) => {
     // reaches the page as genuine input events the recorder can see.
     if (!running) {
       if (m.t === 'human.move') return void cursor.moveTo(m.x, m.y);
-      if (m.t === 'human.click') return void cursor.click();
+      if (m.t === 'human.click') {
+        // While picking, a click is a choice — and one the picker never
+        // answers is worth a word (missedPick), not a silence.
+        const picking = !!monitorAgent?.picking;
+        const before = currentUrl();
+        return void cursor.click().then(() => { if (picking) missedPick(org, before); }).catch(() => {});
+      }
       if (m.t === 'human.wheel') {
         // A sanity bound, not a speed limit. The client coalesces a frame's
         // worth of wheel events into one message, so a fast flick legitimately
@@ -3009,6 +3276,17 @@ wss.on('connection', (ws) => {
           return void page.keyboard.press(m.key).catch(() => {});
         }
       }
+      // The browser's own back — the console's Back button. Offered from what
+      // the last navigation left in `canGoBack`, so "nothing to go back to" is
+      // said rather than silently doing nothing, and the blank page a fresh
+      // context starts on is never a destination. No new gate: a history step
+      // is one the page's own link could have produced.
+      if (m.t === 'human.back') {
+        if (!canGoBack) return void tell({ t: 'log', level: 'warn', msg: 'Nothing to go back to' });
+        return void page.goBack({ waitUntil: 'commit' })
+          .then(() => emit({ t: 'log', level: 'info', msg: `went back to ${currentUrl() ?? 'nothing'}` }))
+          .catch((err) => emit({ t: 'log', level: 'error', msg: `could not go back: ${err.message}` }));
+      }
     }
   });
 
@@ -3024,6 +3302,8 @@ wss.on('connection', (ws) => {
   ws.send(JSON.stringify({
     t: 'ready',
     url: mine ? currentUrl() : null,
+    // Whether Back has somewhere to go, as the last navigation left it.
+    back: mine && canGoBack,
     // The executor's real state. Without this a socket that reconnected during
     // a run kept a disabled Run button until someone reloaded the page.
     running: mine && running,
