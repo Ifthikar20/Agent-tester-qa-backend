@@ -1,0 +1,32 @@
+{
+  "id": "su-2ce65758c0c8d6c3f9",
+  "name": "linkdn",
+  "description": "",
+  "baseUrl": "https://www.linkedin.com/feed/",
+  "pages": [
+    {
+      "id": "pg_ff68272b0d25",
+      "name": "/",
+      "path": "/",
+      "url": "https://www.linkedin.com/",
+      "expect": [],
+      "targets": [],
+      "linked": [],
+      "scannedAt": null
+    }
+  ],
+  "cases": [
+    {
+      "id": "cs_c71c0ec944cb",
+      "name": "linkdn_login",
+      "pageId": null,
+      "source": "recorded",
+      "flow": "%% suite \"Recorded flow\"\ntestcase TD\n  n0((\"https://www.linkedin.com/\"))\n  n1[\"/gsi/button\"]\n  n2[\"/\"]\n  n3[\"/gsi/button\"]\n  n4[\"/v0.5/signinbutton\"]\n  n5[\"/oauth20_authorize.srf\"]\n\n  n0 --> n1\n    scroll to 'Career' : link\n    scroll to top\n    click 'Dismiss' : button\n  n1 -->|click 'Continue with Google. Opens in new tab' : label; click 'Continue with Google. Opens in new tab' : label| n2\n  n2 -->|click 'sign-in-join-cta' : testid| n3\n  n3 --> n4\n    click 'Continue with Google. Opens in new tab' : label\n    click 'Continue with Google. Opens in new tab' : label\n    click 'Continue with Google. Opens in new tab' : label\n    click 'Continue with Google. Opens in new tab' : label\n    click 'Continue with Google. Opens in new tab' : label\n  n4 --> n5\n  n5 --> n5\n    fill 'Email or phone number' : label = 'test@gmail.com'\n    click 'primaryButton' : testid\n    click 'primaryButton' : testid\n\n%% entry [\"link:Skip to main content\",\"link:Open the app\",\"button:Dismiss\",\"link:LinkedIn\",\"link:Top Content\",\"link:People\",\"link:Learning\",\"link:Jobs\",\"link:Games\",\"link:Get the app\",\"link:Sign in\",\"link:Join now\",\"button:Continue with google\",\"link:Sign in with email\",\"link:User Agreement\",\"link:Privacy Policy\",\"link:Cookie Policy\",\"link:Career\",\"link:Productivity\",\"link:Finance\",\"link:Soft Skills & Emotional Intelligence\",\"link:Project Management\",\"link:Education\",\"link:Technology\",\"link:Leadership\",\"link:Ecommerce\",\"link:Show all top content\",\"link:Engineering\",\"link:Business Development\",\"link:Administrative Assistant\",\"link:Retail Associate\",\"link:Customer Service\",\"link:Operations\",\"link:Information Technology\",\"link:Marketing\",\"link:Human Resources\",\"button:Show more\",\"link:Post a job\",\"link:E-Commerce Platforms\",\"link:CRM Software\",\"link:Human Resources Management Systems\",\"link:Recruiting Software\",\"link:Sales Intelligence Software\",\"link:Project Management Software\",\"link:Help Desk Software\",\"link:Social Networking Software\",\"link:Desktop Publishing Software\",\"link:Show all softwares and platforms\",\"link:Patches\",\"link:Zip\",\"link:Mini Sudoku\",\"link:Queens\",\"link:Tango\",\"link:Pinpoint\",\"link:Crossclimb\",\"button:Next Slide\",\"link:Find people you know\",\"button:Choose a topic to learn about\",\"link:Find a coworker or classmate\",\"link:Find a new job\",\"link:Find a course or training\",\"link:Get started\",\"link:Sign Up\",\"link:Help Center\",\"link:About\",\"link:Press\",\"link:Blog\",\"link:Careers\",\"link:Developers\",\"link:Mobile\",\"link:Services\",\"link:Products\",\"link:Top Companies\",\"link:Top Startups\",\"link:Top Colleges\",\"link:Talent\",\"link:Sales\",\"link:Members\",\"link:Companies\",\"link:Featured\"]\n%% at 1 575,172 95x48 in 1180x760\n%% at 3 1113,596 32x32 in 1180x760\n%% at 5 199,21 400x40 in 420x44\n%% at 6 236,15 400x40 in 420x44\n%% at 8 276,434 65x21 in 1180x760\n%% at 10 101,18 325x40 in 345x44\n%% at 11 80,15 325x40 in 345x44\n%% at 12 80,15 325x40 in 345x44\n%% at 13 80,15 325x40 in 345x44\n%% at 14 185,15 325x40 in 345x44\n%% at 17 590,350 342x38 in 1180x760\n%% at 18 0,0 360x38 in 1180x760\n%% at 19 554,433 360x38 in 1180x760\n%% via 3 200 https://www.linkedin.com/\n%% via 8 200 https://www.linkedin.com/signup\n%% via 12 302 https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?response_type=code&response_mode=form_post&client_id=3fa91358-6f74-4525-b5df-da149652be36&redirect_uri=https%3A%2F%2Fwww.linkedin.com%2Fmicrosoft-login%2Fhandler&scope=openid+profile+User.Read+email+offline_access -> 200 https://login.live.com/oauth20_authorize.srf?client_id=3fa91358-6f74-4525-b5df-da149652be36&scope=openid+profile+User.Read+email+offline_access&redirect_uri=https%3a%2f%2fwww.linkedin.com%2fmicrosoft-login%2fhandler&response_type=code&response_mode=form_post&uaid=9be8a321f8f34010a1649df717e624a3&msproxy=1&issuer=mso&tenant=consumers&ui_locales=en-US&epctrc=01%2fqFV6%2f86Vu3KDdADdNRGrbRl3va9srqOOwh0k4pE8%3d4%3a1%3aCANARY%3aYMCpMoAfWUEneMQF19GnMorDkwBlxFkUnUEo7W77fac%3d&epct=PAQABDgEAAAA9VeaV3ywaSLp1O3c4_Et5RXZvU3RzQXJ0aWZhY3RzCAAAAAAAfpeVmLrGfxGmyAd9uI3m9M9cNKrPsAu8wSdt0k6-ZK0lDM4EcCaKASwtuLESVq4JGEw_HSen1HVdeG0zgLxCP__kFCyrGPpIRdEpYGIxPjQAWb5mXB0LvzL8EHYQ5kWRsaEWzK1XLT3FMyfv84lasLbbMJwPMBR5_DSuVzKTblYhHkA5sSOqy4zfP2-YfWIBSqXJL0WxutBZO2YkTp39diAA&jshs=0",
+      "steps": 20,
+      "createdAt": "2026-09-15T02:34:34.801Z",
+      "updatedAt": "2026-09-15T02:34:34.801Z"
+    }
+  ],
+  "createdAt": "2026-09-15T02:33:19.028Z",
+  "updatedAt": "2026-09-15T02:34:34.801Z"
+}
