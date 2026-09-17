@@ -159,9 +159,11 @@ function select(el) {
   try { selector = buildSelector(el); } catch (err) { selector = tagOf(el) || '*'; readError = readError || 'selector: ' + (err && err.message ? err.message : String(err)); }
   try { fp = fingerprint(el); } catch (_) { fp = null; }
   try { label = defaultLabel(el); } catch (_) { label = selector; }
+  let path = [];
+  try { path = pathOf(el); } catch (_) { path = []; }
   GM.selected = { el, selector, fingerprint: fp, snapshot, label };
   try { paintSel(); } catch (_) { /* the outline is a courtesy */ }
-  send('__gcMonitorSelected', { selector, fingerprint: fp, snapshot, label, url: location.href, readError });
+  send('__gcMonitorSelected', { selector, fingerprint: fp, snapshot, label, path, url: location.href, readError });
 }
 function clearSelection() {
   GM.selected = null;

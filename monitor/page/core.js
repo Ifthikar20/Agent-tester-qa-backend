@@ -297,11 +297,47 @@ function defaultLabel(el) {
   return (base + t).slice(0, 60);
 }
 
+// ---- the excerpt --------------------------------------------------------------
+const EXCERPT_LEVELS = 12;
+const EXCERPT_AROUND = 8;
+/** Where the element sits: its ancestors, outermost first, as `describe` names them. */
+function pathOf(el) {
+  const out = [];
+  let cur = el && el.parentElement;
+  while (cur && cur !== document.documentElement && out.length < EXCERPT_LEVELS) { out.unshift(describe(cur)); cur = cur.parentElement; }
+  return out;
+}
+/**
+ * A bounded, sanitised view of the element and its surroundings, for the
+ * compiler and the judge (monitor-resolver.js): its own markup with the code
+ * taken out (sanitize.js), where it sits, and one line for each sibling and
+ * child. Taken on demand — when a monitor is made and when a change is
+ * confirmed — never on every report, so no markup rides the wire per change.
+ */
+function excerptOf(el) {
+  const one = (e) => { const t = collapse(e.innerText != null ? e.innerText : e.textContent).slice(0, 40); return describe(e) + (t ? ' "' + t + '"' : ''); };
+  const around = (list) => Array.from(list || []).filter((e) => e !== el && !isOurs(e)).slice(0, EXCERPT_AROUND).map(one);
+  return {
+    html: sanitizeHtml(el.outerHTML, EXCERPT_HTML_MAX),
+    path: pathOf(el),
+    siblings: around(el.parentElement ? el.parentElement.children : []),
+    children: around(el.children),
+    childCount: el.childElementCount,
+  };
+}
+function excerptFor(target) {
+  const { el } = resolveTarget(target);
+  return el ? excerptOf(el) : null;
+}
+
 GM.measure = measure;
 GM.measureFor = measureFor;
 GM.resolveTarget = resolveTarget;
 GM.buildSelector = buildSelector;
 GM.fingerprint = fingerprint;
 GM.describe = describe;
+GM.pathOf = pathOf;
+GM.excerptFor = excerptFor;
+GM.sanitizeHtml = sanitizeHtml;
 GM.isOurs = isOurs;
 GM.ensureHost = ensureHost;

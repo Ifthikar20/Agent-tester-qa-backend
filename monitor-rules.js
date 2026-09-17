@@ -7,7 +7,14 @@
  * reports:
  *
  *   { summary, checks: [{ id, metric, op, value, min, max, tolerance,
- *     compareToBaseline, message }], needsLlmJudgment, judgmentHint, source }
+ *     compareToBaseline, message }], clauses: [{ text, outcome, checkIds }],
+ *     needsLlmJudgment, judgmentHint, source }
+ *
+ * `clauses` is the honest half: every clause the engineer wrote, in order,
+ * and what became of it — `checks` (the ids it turned into), `judgment` (it
+ * cannot be a number; a reviewer judges it on each confirmed change, with
+ * proxies meanwhile) or `not_understood` — so a panel can say which words
+ * took, before the monitor exists.
  *
  * Two compilers produce that shape. The mock one below is regular expressions
  * over English: instant, offline, and what every deployment has — it
@@ -26,6 +33,9 @@
 import { METRICS, OPS, METRIC_LABELS, METRIC_UNITS, NUMERIC_METRICS, metric, coerce } from './monitor-evaluate.js';
 
 export const SEVERITIES = ['low', 'medium', 'high'];
+export const CLAUSE_OUTCOMES = ['checks', 'judgment', 'not_understood'];
+const CLAUSES_MAX = 12;
+const CLAUSE_MAX = 200;
 
 // ---- the shapes ---------------------------------------------------------------
 function unitFor(m) { return METRIC_UNITS[m] || ''; }
@@ -83,6 +93,37 @@ export function normalizeSpec(spec, source) {
   }
   if (!out.summary) out.summary = out.checks.map((c) => c.message).join('; ').slice(0, 160);
   if (typeof out.judgmentHint === 'string') out.judgmentHint = out.judgmentHint.slice(0, 500);
+  // The clauses, tied to checks that exist: a clause that names none was not understood.
+  const ids = new Set(out.checks.map((c) => c.id));
+  out.clauses = [];
+  for (const raw of Array.isArray(spec && spec.clauses) ? spec.clauses : []) {
+    if (!raw || typeof raw !== 'object') continue;
+    const text = String(raw.text ?? '').trim().slice(0, CLAUSE_MAX);
+    if (!text) continue;
+    const outcome = CLAUSE_OUTCOMES.includes(raw.outcome) ? raw.outcome : 'checks';
+    const checkIds = (Array.isArray(raw.checkIds) ? raw.checkIds : []).map(String).filter((id) => ids.has(id));
+    out.clauses.push({ text, outcome: outcome === 'checks' && !checkIds.length ? 'not_understood' : outcome, checkIds });
+    if (out.clauses.length >= CLAUSES_MAX) break;
+  }
+  // A judgment clause's checks are proxies: they say the element changed, not
+  // that the rule broke — a reviewer decides that (monitor.js). Marked, so the
+  // engine can tell a failing proxy from a failing rule; and every such spec
+  // watches the markup too, since a change that moves no number is still a
+  // change the clause may be about.
+  const judged = new Set(out.clauses.filter((c) => c.outcome === 'judgment').flatMap((c) => c.checkIds));
+  for (const c of out.checks) c.judgment = judged.has(c.id);
+  if (out.clauses.some((c) => c.outcome === 'judgment')) {
+    out.needsLlmJudgment = true;
+    if (!out.judgmentHint) out.judgmentHint = out.clauses.filter((c) => c.outcome === 'judgment').map((c) => c.text).join('; ').slice(0, 500);
+    if (!out.checks.some((c) => c.metric === 'htmlHash')) {
+      let id = 'html';
+      while (seen.has(id)) id = 'html' + (++n);
+      out.checks.push({ id, metric: 'htmlHash', op: 'unchanged', value: null, min: null, max: null, tolerance: null, compareToBaseline: false, message: 'The markup must not change without being judged', judgment: true });
+      for (const c of out.clauses) if (c.outcome === 'judgment') c.checkIds.push(id);
+    } else {
+      for (const c of out.checks) if (c.metric === 'htmlHash') c.judgment = true;
+    }
+  }
   return out;
 }
 
@@ -218,23 +259,36 @@ export function compileMock({ ruleText, element, baseline }) {
   // engineer wrote it — "Checkout" stays "Checkout" on the card.
   const caseOf = new Map();
   for (const m of String(ruleText || '').matchAll(/["“”']([^"“”']{1,120})["“”']/g)) caseOf.set(m[1].toLowerCase(), m[1]);
-  const rawClauses = text.split(/\s*(?:;|,|\band\b|\balso\b|\bplus\b|\.)\s*/).map((s) => s.trim()).filter(Boolean);
+  const SPLIT = /\s*(?:;|,|\band\b|\balso\b|\bplus\b|\.)\s*/i;
+  const rawClauses = text.split(SPLIT).map((s) => s.trim()).filter(Boolean);
+  // The same clauses as the engineer wrote them, for the record of what became of each.
+  const rawWritten = String(ruleText || '').replace(/\s+/g, ' ').trim().split(SPLIT).map((s) => s.trim()).filter(Boolean);
   // A clause that only names a metric ("width" in "width and height must not change")
   // borrows the intent of the clause that follows it.
   const INTENT = /\b(not|never|no|exceed|change|changes|stay|stays|remain|remains|keep|keeps|must|should|be|is|are|within|under|over|least|most|more|less|than|same|unchanged|visible|hidden|contain|contains|say|says|between|by|grow|shrink|exact|exactly|above|below|max|min|maximum|minimum)\b|\d/;
   const clauses = [];
+  const written = [];
   for (let i = 0; i < rawClauses.length; i++) {
     const c = rawClauses[i];
-    if (!INTENT.test(c) && i + 1 < rawClauses.length) rawClauses[i + 1] = c + ' ' + rawClauses[i + 1];
-    else clauses.push(c);
+    if (!INTENT.test(c) && i + 1 < rawClauses.length) { rawClauses[i + 1] = c + ' ' + rawClauses[i + 1]; rawWritten[i + 1] = (rawWritten[i] ?? c) + ' and ' + (rawWritten[i + 1] ?? rawClauses[i + 1]); }
+    else { clauses.push(c); written.push(rawWritten[i] ?? c); }
   }
   const checks = [];
   let needsLlmJudgment = false;
   let lastMetrics = [];
   const addCheck = (check) => { checks.push(Object.assign({ id: 'c' + (checks.length + 1), value: null, min: null, max: null, tolerance: null, compareToBaseline: false, message: '' }, check)); };
   const baselineVal = (m) => metric(baseline, m);
+  // What became of each clause, in the engineer's words (normalizeSpec ties the ids to the checks that survive).
+  const clauseRows = [];
 
-  for (const clause of clauses) {
+  clauses.forEach((clause, i) => {
+    const before = checks.length;
+    const outcome = compileClause(clause);
+    const checkIds = checks.slice(before).map((c) => c.id);
+    clauseRows.push({ text: written[i] ?? clause, outcome: checkIds.length ? outcome : 'not_understood', checkIds });
+  });
+  /** One clause → its checks; the word says whether they are the rule or proxies for a reviewer. */
+  function compileClause(clause) {
     let metrics = detectMetrics(clause, element);
     if (!metrics.length) metrics = lastMetrics;
     const numberInfo = firstNumber(clause);
@@ -246,7 +300,7 @@ export function compileMock({ ruleText, element, baseline }) {
     if (q && /\b(contain|contains|include|includes|say|says|read|reads|show|shows|mention|mentions|display|displays)\b/.test(clause)) {
       addCheck({ metric: 'text', op: neg ? 'not_contains' : 'contains', value: q });
       lastMetrics = ['text'];
-      continue;
+      return 'checks';
     }
     // presence / visibility
     if (metrics.includes('visible') || metrics.includes('exists')) {
@@ -254,12 +308,12 @@ export function compileMock({ ruleText, element, baseline }) {
       if (wantsHidden) addCheck({ metric: 'visible', op: 'visible', value: 'false' });
       else { addCheck({ metric: 'exists', op: 'exists', value: 'true' }); addCheck({ metric: 'visible', op: 'visible', value: 'true' }); }
       lastMetrics = ['visible'];
-      continue;
+      return 'checks';
     }
     if (!metrics.length) {
       const target = (element && TEXTY_TAGS.has(element.tag)) ? ['fontSize', 'text', 'width', 'height'] : ['width', 'height', 'text'];
       if (numberInfo) metrics = [(element && TEXTY_TAGS.has(element.tag) && numberInfo.n < 100) ? 'fontSize' : 'height'];
-      else { for (const m of target) addCheck({ metric: m, op: 'unchanged' }); needsLlmJudgment = true; lastMetrics = target; continue; }
+      else { for (const m of target) addCheck({ metric: m, op: 'unchanged' }); needsLlmJudgment = true; lastMetrics = target; return 'judgment'; }
     }
     // relative deltas: "not grow by more than 20px", "not change by more than 5px"
     const byMatch = clause.match(/\bby (?:more than |over |at most |up to )?(-?\d+(?:\.\d+)?)/);
@@ -272,7 +326,7 @@ export function compileMock({ ruleText, element, baseline }) {
         else addCheck({ metric: m, op: 'unchanged', tolerance: d });
       }
       lastMetrics = metrics;
-      continue;
+      return 'checks';
     }
     if (numberInfo) {
       const between = clause.match(/between\s+(-?\d+(?:\.\d+)?)\s*(?:px|pixels?)?\s*(?:and|-|–|to)\s*(-?\d+(?:\.\d+)?)/);
@@ -288,33 +342,42 @@ export function compileMock({ ruleText, element, baseline }) {
         else addCheck({ metric: m, op: 'eq', value: String(n), tolerance: m === 'rowCount' || m === 'childElementCount' ? 0 : null });
       }
       lastMetrics = metrics;
-      continue;
+      return 'checks';
     }
     // no number: stability rules
     const wantsUnchanged = neg || /\b(unchanged|same|constant|stable|as is|as-is|stay put|fixed|lock|locked|intact|remain|remains|keep|keeps|maintain|maintains|preserve|preserves)\b/.test(clause);
+    let judged = false;
     for (const m of metrics) {
       if (m === 'x' || m === 'y' || wantsUnchanged || !NUMERIC_METRICS.has(m)) addCheck({ metric: m, op: 'unchanged' });
       else {
         // e.g. "font size should be bigger" — cannot be stated deterministically; keep it stable and flag for judgment
         addCheck({ metric: m, op: 'unchanged' });
         needsLlmJudgment = true;
+        judged = true;
       }
     }
     lastMetrics = metrics;
+    return judged ? 'judgment' : 'checks';
   }
   if (!checks.length) {
     for (const m of ['width', 'height', 'fontSize', 'text']) addCheck({ metric: m, op: 'unchanged' });
     needsLlmJudgment = true;
+    clauseRows.length = 0;
+    clauseRows.push({ text: String(ruleText || '').replace(/\s+/g, ' ').trim().slice(0, CLAUSE_MAX), outcome: 'judgment', checkIds: checks.map((c) => c.id) });
   }
   // Drop duplicates and unchanged checks whose baseline metric is unavailable (e.g. rowCount on a non-table).
-  const seen = new Set();
+  // A clause whose checks were duplicates of an earlier clause's keeps pointing at the ones kept.
+  const seen = new Map();
+  const alias = {};
   const usable = checks.filter((c) => {
     const key = [c.metric, c.op, c.value, c.min, c.max, c.compareToBaseline].join('|');
-    if (seen.has(key)) return false;
-    seen.add(key);
+    if (seen.has(key)) { alias[c.id] = seen.get(key); return false; }
+    seen.set(key, c.id);
     return c.op !== 'unchanged' || baselineVal(c.metric) != null;
   });
-  return normalizeSpec({ summary: '', checks: usable.length ? usable : checks, needsLlmJudgment, judgmentHint: needsLlmJudgment ? ruleText : null }, 'mock');
+  for (const row of clauseRows) row.checkIds = [...new Set(row.checkIds.map((id) => alias[id] ?? id))];
+  const judged = clauseRows.filter((r) => r.outcome === 'judgment').map((r) => r.text);
+  return normalizeSpec({ summary: '', checks: usable.length ? usable : checks, clauses: clauseRows, needsLlmJudgment, judgmentHint: needsLlmJudgment ? (judged.join('; ') || ruleText) : null }, 'mock');
 }
 
 // ---- the mock judge ------------------------------------------------------------------------
@@ -323,7 +386,18 @@ function pct(a, b) {
   return Math.abs((b - a) / a);
 }
 /** The explanation an incident opens with — the numbers, in sentences, at once. */
-export function judgeMock({ label, selector, ruleText, violations, diff }) {
+export function judgeMock({ label, selector, ruleText, violations, diff, judgment = false }) {
+  // Only a judgment clause's proxies failed: the element changed, and whether
+  // the rule still holds is a question the mock cannot answer. Said so.
+  if (judgment) {
+    const changed = Object.entries(diff || {}).filter(([k]) => k !== 'htmlChanged').slice(0, 4).map(([k, val]) => (Array.isArray(val) ? METRIC_LABELS[k] + ' ' + val[0] + ' → ' + val[1] : k));
+    const what = [diff && diff.htmlChanged ? 'its markup changed' : null, changed.length ? changed.join(', ') : null].filter(Boolean).join('; ') || 'it changed';
+    return {
+      violation: true, severity: 'medium',
+      explanation: '"' + label + '" (' + selector + ') changed under the rule "' + ruleText + '": ' + what + '. Whether the rule still holds is a judgment, not a number — set ANTHROPIC_API_KEY and Claude decides from the markup and the clips on each confirmed change; until then every change is reported.',
+      source: 'mock', at: Date.now(),
+    };
+  }
   const v = (violations && violations[0]) || { metric: 'exists', message: 'The element changed', actual: null, expected: null, baseline: null };
   const others = Object.entries(diff || {}).filter(([k]) => k !== v.metric && k !== 'htmlChanged').slice(0, 4).map(([k, val]) => (Array.isArray(val) ? METRIC_LABELS[k] + ' ' + val[0] + ' → ' + val[1] : k));
   let severity = 'low';
@@ -339,6 +413,7 @@ export function judgeMock({ label, selector, ruleText, violations, diff }) {
   let explanation = '"' + label + '" (' + selector + ') broke the rule "' + ruleText + '". ';
   if (v.metric === 'exists') explanation += 'The element can no longer be found on the page.';
   else if (v.metric === 'visible') explanation += 'The element is ' + (v.actual === false ? 'no longer visible' : 'visible although it should be hidden') + '.';
+  else if (v.metric === 'htmlHash') explanation += 'Its markup changed.';
   else explanation += 'Its ' + metricLabel + ' is now ' + v.actual + unit + ' but the rule expects ' + v.expected + (v.baseline != null ? ' (baseline ' + v.baseline + unit + ')' : '') + '.';
   if (others.length) explanation += ' Side effects: ' + others.join(', ') + '.';
   if (violations && violations.length > 1) explanation += ' ' + (violations.length - 1) + ' other check' + (violations.length > 2 ? 's' : '') + ' failed as well.';

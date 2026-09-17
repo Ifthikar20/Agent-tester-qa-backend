@@ -12,11 +12,13 @@
  * would. No model: `GC_MONITOR_LLM=mock`, and the runner says so first.
  *
  *   1  which mind             mock, and nothing armed
- *   2  a monitor needs a page  409 before a page; then a rule, its checks, its baseline shot
+ *   2  a monitor needs a page  409 before a page; then a rule, its checks, its clause, its markup, its baseline shot
+ *   2c what the preview says    clause by clause, and Compile with Claude refused on a mock runner
  *   3  a change opens an incident   the numbers, the after shot, the mock verdict
  *   4  and recovery closes it       resolved by `auto`
  *   5  churn stays quiet            a ticker and a clock are not incidents
  *   6  rows, visibility, accepting  exactly N rows; always visible; manual resolve → acknowledged
+ *   6b a rule the table cannot read  a judgment clause, a markup-only change, a verdict that asks for a key
  *   7  pause, resume, delete        quiet while paused; gone means gone, shot and all
  *   8  reloads and other pages      re-armed after a reload; not on this page, not missing
  *   8b every visit runs the check   the visit is counted; late is not missing; gone is
@@ -192,6 +194,9 @@ let hero = null;
   if (c && c.metric === 'fontSize' && c.op === 'lte' && c.value === '18' && hero.specSource === 'mock') ok('the rule compiled to fontSize ≤ 18', 'by the mock');
   else bad('the rule compiled to fontSize ≤ 18', JSON.stringify(hero.spec));
   if (hero.baseline?.metrics?.fontSizePx === 16 && hero.metrics?.fontSize === 16) ok('the baseline was measured live', '16px'); else bad('the baseline was measured live', JSON.stringify(hero.metrics));
+  if (hero.spec?.clauses?.length === 1 && hero.spec.clauses[0].outcome === 'checks' && hero.spec.clauses[0].checkIds[0] === 'c1') ok('and says the one clause became that check', hero.spec.clauses[0].text); else bad('and says the one clause became that check', JSON.stringify(hero.spec?.clauses));
+  const ex = hero.baselineExcerpt;
+  if (ex?.html?.includes('<p class="hero-copy"') && !/<script|onclick/.test(ex.html) && Array.isArray(ex.path) && ex.path.at(-1) === 'div.hero') ok('the markup excerpt was taken, sanitised, with where it sits', `${ex.path.join(' > ')} · ${ex.html.length} chars`); else bad('the markup excerpt was taken, sanitised, with where it sits', JSON.stringify(ex)?.slice(0, 200));
   if (hero.state === 'ok' && hero.onPage === true) ok('state ok, on this page'); else bad('state ok, on this page', `${hero.state} ${hero.onPage}`);
   if (await v.until((m) => m.t === 'monitor.changed' && m.monitor.id === hero.id, 5000, from)) ok('monitor.changed reached the socket'); else bad('monitor.changed reached the socket');
   if (hero.baselineShot) {
@@ -232,6 +237,16 @@ section('2b · a monitor belongs to a project');
 }
 
 // ---------------------------------------------------------------------------
+section('2c · what the preview says, clause by clause');
+{
+  const p = await api('POST', '/api/monitors/preview', { ruleText: 'font size must not exceed 18px and the badge must look right', tag: 'p', selector: HERO, baseline: hero.baseline });
+  const cl = p.json?.spec?.clauses ?? [];
+  if (p.status === 200 && p.json.spec.source === 'mock' && cl.map((c) => c.outcome).join(',') === 'checks,judgment') ok('the mock names the clause it could not read', `"${cl[1]?.text}" → judgment`); else bad('the mock names the clause it could not read', JSON.stringify(p.json?.spec?.clauses));
+  const c = await api('POST', '/api/monitors/compile', { ruleText: 'font size must not exceed 18px', tag: 'p', selector: HERO, baseline: hero.baseline });
+  if (c.status === 409 && c.json?.error === 'no_model' && c.json.spec?.source === 'mock') ok('Compile with Claude is refused on a mock runner, with the mock’s spec', c.json.message?.slice(0, 60)); else bad('Compile with Claude is refused on a mock runner, with the mock’s spec', `${c.status} ${JSON.stringify(c.json)?.slice(0, 120)}`);
+}
+
+// ---------------------------------------------------------------------------
 section('3 · a change opens an incident');
 let incident = null;
 {
@@ -244,6 +259,7 @@ let incident = null;
   const vio = incident.violations?.[0];
   if (vio && vio.metric === 'fontSize' && Number(vio.actual) > 18) ok('the violation carries the numbers', `actual ${vio.actual}, expected ${vio.expected}`); else bad('the violation carries the numbers', JSON.stringify(vio));
   if (incident.diff?.fontSize?.[1] === 36) ok('the diff says 16 → 36', JSON.stringify(incident.diff.fontSize)); else bad('the diff says 16 → 36', JSON.stringify(incident.diff));
+  if (/f-grow/.test(incident.after?.excerpt?.html ?? '') && !/f-grow/.test(incident.before?.excerpt?.html ?? '') && incident.before?.excerpt?.html) ok('the markup before and after rides with the incident', 'class f-grow appeared'); else bad('the markup before and after rides with the incident', JSON.stringify({ before: incident.before?.excerpt?.html?.slice(0, 60), after: incident.after?.excerpt?.html?.slice(0, 60) }));
   if (incident.verdict?.source === 'mock' && /36px/.test(incident.verdict.explanation)) ok('a mock verdict, at once', incident.verdict.severity); else bad('a mock verdict, at once', JSON.stringify(incident.verdict));
   if (incident.after?.screenshot) {
     const s = await bytes(`/api/monitors/shots/${encodeURIComponent(incident.after.screenshot)}`);
@@ -306,6 +322,28 @@ let submit = null;
   await run(v, 'click button:Reset all');
   if (await v.until((m) => m.t === 'monitor.changed' && m.monitor.id === rows.id && m.monitor.state === 'ok', 10000, from)) ok('five rows again: acknowledged → ok'); else bad('five rows again: acknowledged → ok');
   if (await v.until((m) => m.t === 'incident.resolved' && m.incident.id === subInc?.id && m.incident.resolvedBy === 'auto', 10000, from)) ok('the button is back: resolved by auto'); else bad('the button is back: resolved by auto');
+}
+
+// ---------------------------------------------------------------------------
+section('6b · a rule the table cannot read waits for a key');
+{
+  const from = v.at();
+  const r = await create('check-judge', HERO, 'the call to action must stay the most prominent element');
+  const jm = r.json?.monitor ?? null;
+  const cl = jm?.spec?.clauses?.[0];
+  if (jm && cl?.outcome === 'judgment' && jm.spec.checks.some((c) => c.metric === 'htmlHash' && c.judgment === true)) ok('compiles to a judgment clause with a markup check', `${cl.text} → ${jm.spec.checks.map((c) => c.id).join(',')}`); else { bad('compiles to a judgment clause with a markup check', JSON.stringify(jm?.spec)?.slice(0, 200)); await done(); }
+  const end = await run(v, 'click button:Swap class');
+  if (end?.t === 'run.end' && end.ok) ok('a class with no style was swapped in'); else bad('a class with no style was swapped in', JSON.stringify(end));
+  const opened = await incidentFor(v, jm.id, from);
+  const inc = opened?.incident ?? null;
+  if (inc && inc.status === 'open' && inc.judgment === true && inc.violations.some((x) => x.metric === 'htmlHash')) ok('a markup-only change opens an incident on a mock runner', inc.id); else { bad('a markup-only change opens an incident on a mock runner', JSON.stringify(inc && { status: inc.status, judgment: inc.judgment, v: inc.violations.map((x) => x.metric) })); await done(); }
+  if (inc.verdict?.source === 'mock' && /set ANTHROPIC_API_KEY/.test(inc.verdict.explanation)) ok('whose verdict says a key is needed to judge it', inc.verdict.severity); else bad('whose verdict says a key is needed to judge it', JSON.stringify(inc.verdict));
+  if (/f-swapped/.test(inc.after?.excerpt?.html ?? '') && !/f-swapped/.test(inc.before?.excerpt?.html ?? '')) ok('and carries the swapped class in the after markup'); else bad('and carries the swapped class in the after markup', inc.after?.excerpt?.html?.slice(0, 80));
+  const open = await api('GET', '/api/incidents?status=open');
+  if (open.json?.incidents?.some((i) => i.id === inc.id)) ok('listed as open'); else bad('listed as open');
+  const back = await run(v, 'click button:Reset all');
+  if (back?.ok && await v.until((m) => m.t === 'incident.resolved' && m.incident.id === inc.id, 10000, from)) ok('Reset all resolves it'); else bad('Reset all resolves it');
+  await api('DELETE', `/api/monitors/${jm.id}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -422,6 +460,7 @@ section('9 · picking from the canvas');
   const sel = await v.until((m) => m.t === 'monitor.selected', 5000, from);
   if (sel?.selector === HERO && sel.snapshot?.metrics?.fontSizePx === 16 && /Every order/.test(sel.snapshot?.text ?? '')) ok('the click chose the paragraph', sel.selector); else bad('the click chose the paragraph', JSON.stringify(sel && { selector: sel.selector }));
   if (sel?.label && sel.fingerprint?.tag === 'p') ok('with a label and a fingerprint', sel.label); else bad('with a label and a fingerprint');
+  if (Array.isArray(sel?.path) && sel.path.at(-1) === 'div.hero') ok('and where it sits', sel.path.join(' > ')); else bad('and where it sits', JSON.stringify(sel?.path));
   if (sel && sel.readError === null) ok('and nothing it could not read'); else bad('and nothing it could not read', JSON.stringify(sel?.readError));
   if (await v.until((m) => m.t === 'monitor.pick' && m.on === false, 5000, from)) ok('and picking ended'); else bad('and picking ended');
   const shot = await v.until((m) => m.t === 'monitor.shot' && m.selector === HERO, 8000, from);
@@ -486,6 +525,8 @@ section('10 · secrets never reach a snapshot');
   const m = r.json?.monitor;
   const txt = m?.baseline?.text ?? '';
   if (m && /\$QA_PASS/.test(txt) && !/hunter2/.test(txt)) ok('the vault value is its name in the baseline', txt); else bad('the vault value is its name in the baseline', txt);
+  const ex = m?.baselineExcerpt?.html ?? '';
+  if (/\$QA_PASS/.test(ex) && !/hunter2/.test(ex)) ok('and in the markup excerpt', ex.slice(0, 70)); else bad('and in the markup excerpt', ex.slice(0, 120));
   if (EXTERNAL) ok('(monitors.json — skipped against an external runner)');
   else {
     await wait(1200);   // the store is debounced half a second

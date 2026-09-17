@@ -900,12 +900,30 @@ pick shows what was chosen: a clip of it, its words, its measurements, and
 the script already written — `Must exist and always be visible; width and
 height must not change; text must not change` (a table keeps its rows instead
 of its size) — with the checks that sentence compiles to shown under it as you
-edit it (`POST /api/monitors/preview`: the mock compiler, nothing kept).
+edit it (`POST /api/monitors/preview`: the mock compiler, nothing kept) and,
+under those, one chip per clause saying what became of it: understood (the
+checks it turned into), **judged on change** (it cannot be a number; see
+below) or **not understood**. Where the element sits is shown too
+(`body › main › div.hero`). When the runner has a key, **Compile with Claude**
+asks the model for its reading of the same sentence before you save
+(`POST /api/monitors/compile`: one call from the daily budget, nothing kept),
+so what you approve is what will run.
 
 The rule is compiled ONCE into checks (`monitor-rules.js`): the mock compiler
 instantly, from the phrasing above, and Claude — when `ANTHROPIC_API_KEY` is
-set — asynchronously, replacing the mock's checks when its answer lands. From
-then on the model is never in the loop. An agent inside the page
+set — asynchronously, replacing the mock's checks when its answer lands and
+saying so on the socket (`monitor.compiled`) and on the card. Both compilers
+are handed a bounded excerpt of the element's markup — its own HTML with
+scripts, handlers and long attribute values taken out in the page
+(`monitor/page/sanitize.js`), where it sits, and a line per sibling and child —
+so "rows" binds to table rows or list items as the case is and "the price" to
+the child that carries it; the excerpt is page content, redacted through the
+vault and inside the untrusted block like everything else the model reads.
+Every clause is accounted for: one that cannot be a number ("the call to
+action must stay the most prominent element") becomes a **judgment clause** —
+its proxies, the markup among them, say only that the element changed, and
+Claude decides whether the rule still holds (below). From then on the model is
+out of the loop for checks. An agent inside the page
 (`monitor/page/`, installed the way the recorder is) watches the element with a
 `ResizeObserver` and a `MutationObserver` and reports a snapshot when its
 change signature changes; the runner evaluates every report by arithmetic
@@ -918,7 +936,15 @@ a ticker that never stops.
 An incident carries the evidence: before/after screenshot clips, the metric
 diff (`fontSize: 16 → 36`), the failed checks with their numbers, and a
 verdict — the mock's at once, Claude's a little later when there is a key
-(severity and an explanation, from both clips). When the
+(severity and an explanation, from both clips and the markup before and
+after). A change on a judgment clause opens the incident as **judging**
+instead: Claude is asked, with the clause, both excerpts and both clips,
+whether the rule as the engineer meant it still holds — one question per
+monitor per minute, from the daily budget. A yes makes the incident stand, in
+Claude's words; a no resolves it and the element as it is now becomes the
+baseline, so the same state is not asked about again; no answer, no key or no
+budget leaves it open, saying why — never silence. `npm run
+check:monitoring-judge` drives that with a scripted model. When the
 page recovers, the incident resolves itself. **Resolve & accept current state**
 closes one by hand: relative rules take the element as it is now for their
 new baseline; an absolute rule that still fails puts the monitor into
@@ -1507,8 +1533,12 @@ nothing else):
 The key is `ANTHROPIC_API_KEY`, from the environment or, on a laptop, from
 `.env.local` beside the backend — of which that one line is read and nothing
 else. The banner says `key found` or `no key`; the key itself is never printed,
-never in `/api/state` or an error, and is removed from the runner's environment
-at boot so the browser does not inherit it. The runner then calls
+never in `/api/state` or an error. It is read once at boot for the three layers
+that may call a model — the fixes, monitoring and the chat — and then removed
+from the runner's environment so the browser does not inherit it; `npm run
+check:keys` proves both, because monitoring once read the environment after the
+fixes had emptied it and ran on the mock in production whatever key was set.
+The runner then calls
 `api.anthropic.com` over HTTPS, so a deployment needs that egress
 (docker/docker-compose.prod.yml says why `edge` already allows it).
 
@@ -2171,7 +2201,7 @@ silently inside someone else's docs.
 | `monitor-evaluate.js` | the deterministic evaluator: metric out of a snapshot, compare, tolerance, diff |
 | `monitor-resolver.js` | Claude: the two requests, their closed schemas and frozen cached prompts, the daily budget |
 | `monitor-page.js` | the agent inside the driven page, and the runner's handle on it |
-| `monitor/page/` | that agent's source — the runtime, the picker, the watcher — read off disk and bundled |
+| `monitor/page/` | that agent's source — the sanitiser, the runtime, the picker, the watcher — read off disk and bundled |
 | `redact.js` | vault values out of text on its way out, for the console and the monitors alike |
 | `support.js` | help & support — a request from the top bar, and the per-organisation access switch it turns on |
 | `chat.js` | the chat — one transcript store and engine per organisation: a turn, the proposal it confirms, which mind answers, the reply kept |
@@ -2232,7 +2262,9 @@ silently inside someone else's docs.
 | `public/results.html` | a sticky header over cards named by a whole paragraph |
 | `scripts/check-console.js` | the canvas paints on arrival, and the wheel reaches the page |
 | `scripts/check-monitoring.js` | a rule, a change, an incident, recovery, picking from the canvas — on a runner of its own |
-| `scripts/check-monitoring-request.js` | the mock compiler and, offline, exactly what the resolver puts on the wire |
+| `scripts/check-monitoring-request.js` | the mock compiler, clause by clause; the sanitiser; and, offline, exactly what the resolver puts on the wire |
+| `scripts/check-monitoring-judge.js` | a rule that is not a number, judged: the engine with a scripted model — judging, adopted, stood, unjudged |
+| `scripts/check-keys.js` | the one key reaches the fixes, monitoring and the chat, and no Chromium process carries it |
 | `public/monitor.html` | a page shaped to be watched, with buttons that break it |
 | `scripts/check-support.js` | a support request lands, turns access on, is told to every socket, and turns off again |
 | `scripts/check-chat-request.js` | the matcher, the mock mind and, offline, exactly what the chat's resolver puts on the wire |
