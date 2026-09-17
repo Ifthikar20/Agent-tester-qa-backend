@@ -225,7 +225,12 @@ function detectMetrics(clause, element) {
   if (/\b(tall|taller|height|high|higher)\b/.test(c)) push('height');
   if (/\b(wide|wider|width|narrow|narrower)\b/.test(c)) push('width');
   if (/\brows?\b/.test(c)) push('rowCount');
-  if (/\b(children|child|items?|entries|options?|list items?|cards?|columns?)\b/.test(c) && !found.includes('rowCount')) push('childElementCount');
+  if (/\b(characters?|chars?|letters)\b/.test(c)) push('textLength');
+  // "3 cards" / "the items" count children; "the card" names the element itself,
+  // so that phrase is set aside before the count words are looked for — "the
+  // card must keep 3 items" still counts. "the item count" is a count.
+  const counted = c.replace(/\b(the|this|that|my|our) (child|item|entry|option|card|column)\b(?! (count|number|total))/g, ' ');
+  if (/\b(children|child|items?|entries|options?|list items?|cards?|columns?)\b/.test(counted) && !found.includes('rowCount')) push('childElementCount');
   if (/\b(visible|visibility|shown|displayed|display|appear|appears|hidden|invisible|hide|hides)\b/.test(c)) push('visible');
   if (/\b(exist|exists|present|presence|removed|deleted|missing|disappear|disappears|vanish|there)\b/.test(c)) push('exists');
   if (/\b(text|copy|wording|words|label|caption|content|say|says|read|reads|title)\b/.test(c) && !found.includes('fontSize')) push('text');
@@ -239,14 +244,44 @@ function detectMetrics(clause, element) {
 }
 
 function firstNumber(s) {
-  const m = s.match(/(-?\d+(?:\.\d+)?)\s*(px|pixels?|pt|%|rows?|items?|characters?|chars?)?/);
-  return m ? { n: parseFloat(m[1]), unit: m[2] || '' } : null;
+  const m = s.match(/(-?\d+(?:\.\d+)?)\s*(px|pixels?|pt|%|percent|per cent|pct|rows?|items?|characters?|chars?)?/);
+  const unit = m ? (m[2] || '') : '';
+  return m ? { n: parseFloat(m[1]), unit: /^(%|percent|per cent|pct)$/.test(unit) ? '%' : unit } : null;
 }
 function quoted(s) {
   const m = s.match(/["“”']([^"“”']{1,120})["“”']/);
   return m ? m[1] : null;
 }
-function hasNegation(s) { return /\b(not|never|no longer|shouldn'?t|mustn'?t|can'?t|cannot|don'?t|doesn'?t|won'?t)\b/.test(s); }
+const NEGATOR = "(?:not|never|no longer|shouldn'?t|mustn'?t|can'?t|cannot|don'?t|doesn'?t|won'?t|isn'?t|aren'?t)";
+function hasNegation(s) { return new RegExp('\\b' + NEGATOR + '\\b').test(s); }
+// The negated forms first: "not be smaller than" is a minimum although "smaller than" alone is
+// a maximum. Every negator hasNegation knows, and a word or two of filler ("not get ANY bigger
+// than", "must not END UP bigger than") between the negator and the comparison.
+const FILL = '(?:\\w+ ){0,2}?';
+const MORE = '(?:any |much |even |a lot )?';
+const MAX_NEG = new RegExp('\\b' + NEGATOR + ' ' + FILL + '(exceed|go (over|above|beyond|past)|(?:(be|get|become|grow|end up) )?' + MORE + '(more|bigger|larger|taller|wider|higher|greater|longer) than|(be|get|become) (over|above|beyond|past)|grow (beyond|past|over|above|to more than|larger than|bigger than|taller than|wider than)|surpass|pass)\\b');
+const MIN_NEG = new RegExp('\\b' + NEGATOR + ' ' + FILL + '((?:(be|get|become|end up) )?' + MORE + '(less|smaller|lower|shorter|narrower|fewer) than|(be|get|become|go|drop|fall|sink|dip) (under|below)|shrink (below|under|smaller than))\\b');
+const MAX_WORD = /\b(no more than|no (wider|taller|bigger|larger|greater|higher|longer) than|at most|maximum|max|under|below|less than|smaller than|up to|within|capped? at|not more than|cannot exceed|can'?t exceed|shouldn'?t exceed|mustn'?t exceed|not larger than|not bigger than|not taller than|not wider than|or less|or smaller|or lower)\b/;
+const MIN_WORD = /\b(at least|minimum|min|no (less|smaller|narrower|shorter|fewer|lower) than|more than|greater than|over|above|bigger than|larger than|taller than|wider than|or more|or larger|or bigger|not less than|not fewer than)\b/;
+/** lte, gte, or null when the clause names no bound ("stay 16px"). */
+function boundOp(clause) {
+  if (MAX_NEG.test(clause)) return 'lte';
+  if (MIN_NEG.test(clause)) return 'gte';
+  const isMax = MAX_WORD.test(clause), isMin = MIN_WORD.test(clause);
+  if (isMax) return 'lte';
+  return isMin ? 'gte' : null;
+}
+// A clause that is only a measurement ("60px tall" after "under 120px wide") borrows the bound
+// before it — a size bound only, and only from the clause just before: a count ("5 rows") is
+// exactly five, and a bound does not carry across a clause about something else.
+const BORROWS = new Set(['width', 'height']);
+// "not under 12px or over 20px": one clause, two bounds, the negation shared. Not "or less" and
+// not "shrink or grow", which are one bound and one freeze.
+const OR = /\s+or\s+(?!(?:less|smaller|lower|fewer|shorter|narrower|more|larger|bigger|greater|higher|taller|wider|longer|so|grow|grows|shrink|shrinks|expand|expands|increase|increases|decrease|decreases)\b(?! than))/;
+const BOUND_TAIL = /\b(over|above|under|below|beyond|past|more than|less than|bigger than|smaller than|larger than|wider than|taller than|narrower than|shorter than|fewer than|exceed|exceeds)\b/;
+const BOUND_WORDS = /\b(must|should|be|is|are|stay|stays|keep|keeps|remain|remains|exceed|not|never|under|over|at|than|within|exactly|max|min|maximum|minimum|least|most|less|more|below|above|up to|between|by)\b/;
+// "180 by 50", "320x200": width, then height.
+const DIMS = /(-?\d+(?:\.\d+)?)\s*(?:px|pixels?)?\s*(?:by|x|×)\s*(-?\d+(?:\.\d+)?)/;
 
 /**
  * English → checks, by regular expression. The phrasing README's table lists
@@ -259,7 +294,8 @@ export function compileMock({ ruleText, element, baseline }) {
   // engineer wrote it — "Checkout" stays "Checkout" on the card.
   const caseOf = new Map();
   for (const m of String(ruleText || '').matchAll(/["“”']([^"“”']{1,120})["“”']/g)) caseOf.set(m[1].toLowerCase(), m[1]);
-  const SPLIT = /\s*(?:;|,|\band\b|\balso\b|\bplus\b|\.)\s*/i;
+  // "between 300 and 400" is one clause: that "and" joins the bounds, not two rules.
+  const SPLIT = /\s*(?:;|,|\band\b(?<!\bbetween\s+-?\d+(?:\.\d+)?\s*(?:px|pixels?)?\s+and)|\balso\b|\bplus\b|\.)\s*/i;
   const rawClauses = text.split(SPLIT).map((s) => s.trim()).filter(Boolean);
   // The same clauses as the engineer wrote them, for the record of what became of each.
   const rawWritten = String(ruleText || '').replace(/\s+/g, ' ').trim().split(SPLIT).map((s) => s.trim()).filter(Boolean);
@@ -276,6 +312,7 @@ export function compileMock({ ruleText, element, baseline }) {
   const checks = [];
   let needsLlmJudgment = false;
   let lastMetrics = [];
+  let lastOp = null;
   const addCheck = (check) => { checks.push(Object.assign({ id: 'c' + (checks.length + 1), value: null, min: null, max: null, tolerance: null, compareToBaseline: false, message: '' }, check)); };
   const baselineVal = (m) => metric(baseline, m);
   // What became of each clause, in the engineer's words (normalizeSpec ties the ids to the checks that survive).
@@ -287,8 +324,24 @@ export function compileMock({ ruleText, element, baseline }) {
     const checkIds = checks.slice(before).map((c) => c.id);
     clauseRows.push({ text: written[i] ?? clause, outcome: checkIds.length ? outcome : 'not_understood', checkIds });
   });
-  /** One clause → its checks; the word says whether they are the rule or proxies for a reviewer. */
+  /**
+   * One clause → its checks; the word says whether they are the rule or proxies for a reviewer.
+   * "A or B" is compiled as two halves of one clause: the second borrows the first's metrics,
+   * and its negation when it names a bound of its own ("not under 12px or over 20px").
+   */
   function compileClause(clause) {
+    const parts = clause.split(OR);
+    if (parts.length > 1) {
+      const negator = (parts[0].match(new RegExp('\\b' + NEGATOR + '\\b')) || [])[0] || null;
+      const outcomes = parts.map((part, i) => {
+        const carried = i > 0 && negator && !hasNegation(part) && BOUND_TAIL.test(part) ? `${negator} be ${part}` : part;
+        return compilePart(carried);
+      });
+      return outcomes.includes('judgment') ? 'judgment' : 'checks';
+    }
+    return compilePart(clause);
+  }
+  function compilePart(clause) {
     let metrics = detectMetrics(clause, element);
     if (!metrics.length) metrics = lastMetrics;
     const numberInfo = firstNumber(clause);
@@ -299,7 +352,7 @@ export function compileMock({ ruleText, element, baseline }) {
     // "contains / says 'X'"
     if (q && /\b(contain|contains|include|includes|say|says|read|reads|show|shows|mention|mentions|display|displays)\b/.test(clause)) {
       addCheck({ metric: 'text', op: neg ? 'not_contains' : 'contains', value: q });
-      lastMetrics = ['text'];
+      lastMetrics = ['text']; lastOp = null;
       return 'checks';
     }
     // presence / visibility
@@ -307,13 +360,40 @@ export function compileMock({ ruleText, element, baseline }) {
       const wantsHidden = /\b(hidden|invisible|not visible|not shown|not displayed|not appear|gone|absent|not exist|not be present|should disappear|must disappear)\b/.test(clause) && !/\b(never|not) (be )?(hidden|invisible)\b/.test(clause) && !/not (disappear|vanish|go missing|be removed)/.test(clause);
       if (wantsHidden) addCheck({ metric: 'visible', op: 'visible', value: 'false' });
       else { addCheck({ metric: 'exists', op: 'exists', value: 'true' }); addCheck({ metric: 'visible', op: 'visible', value: 'true' }); }
-      lastMetrics = ['visible'];
+      lastMetrics = ['visible']; lastOp = null;
+      return 'checks';
+    }
+    // A percentage is of something the snapshot does not measure: never read as pixels. The
+    // metric it names is held still and a reviewer judges the change, like any other sentence
+    // the numbers cannot carry.
+    if (numberInfo && numberInfo.unit === '%') {
+      const held = metrics.filter((m) => NUMERIC_METRICS.has(m));
+      for (const m of (held.length ? held : ['width', 'height'])) addCheck({ metric: m, op: 'unchanged' });
+      needsLlmJudgment = true; lastMetrics = held.length ? held : ['width', 'height']; lastOp = null;
+      return 'judgment';
+    }
+    // "180 by 50": a width and a height, under one bound — before the delta rule, which would
+    // read "by 50". Not when the clause is about moving ("10px by 10px"), counting, or a grid.
+    const dims = metrics.includes('x') || metrics.includes('rowCount') || metrics.includes('childElementCount') || /\b(grid|matrix|layout|move|moves|shift|shifts)\b/.test(clause) ? null : clause.match(DIMS);
+    if (dims) {
+      const op = boundOp(clause);
+      if (!op && neg) {
+        // "must not get biger than 180 by 50": a bound the table cannot read on a negated
+        // sentence is not "exactly 180 by 50"; the size is held still and a reviewer judges it.
+        addCheck({ metric: 'width', op: 'unchanged' }); addCheck({ metric: 'height', op: 'unchanged' });
+        needsLlmJudgment = true; lastMetrics = ['width', 'height']; lastOp = null;
+        return 'judgment';
+      }
+      addCheck({ metric: 'width', op: op ?? 'eq', value: dims[1] });
+      addCheck({ metric: 'height', op: op ?? 'eq', value: dims[2] });
+      lastMetrics = ['width', 'height'];
+      lastOp = op;
       return 'checks';
     }
     if (!metrics.length) {
       const target = (element && TEXTY_TAGS.has(element.tag)) ? ['fontSize', 'text', 'width', 'height'] : ['width', 'height', 'text'];
       if (numberInfo) metrics = [(element && TEXTY_TAGS.has(element.tag) && numberInfo.n < 100) ? 'fontSize' : 'height'];
-      else { for (const m of target) addCheck({ metric: m, op: 'unchanged' }); needsLlmJudgment = true; lastMetrics = target; return 'judgment'; }
+      else { for (const m of target) addCheck({ metric: m, op: 'unchanged' }); needsLlmJudgment = true; lastMetrics = target; lastOp = null; return 'judgment'; }
     }
     // relative deltas: "not grow by more than 20px", "not change by more than 5px"
     const byMatch = clause.match(/\bby (?:more than |over |at most |up to )?(-?\d+(?:\.\d+)?)/);
@@ -325,26 +405,44 @@ export function compileMock({ ruleText, element, baseline }) {
         else if (/\b(shrink|decrease|smaller|narrower|shorter|go down|drop|fall)\b/.test(clause)) addCheck({ metric: m, op: 'gte', value: String(-d), compareToBaseline: true });
         else addCheck({ metric: m, op: 'unchanged', tolerance: d });
       }
-      lastMetrics = metrics;
+      lastMetrics = metrics; lastOp = null;
       return 'checks';
     }
     if (numberInfo) {
       const between = clause.match(/between\s+(-?\d+(?:\.\d+)?)\s*(?:px|pixels?)?\s*(?:and|-|–|to)\s*(-?\d+(?:\.\d+)?)/);
+      const explicit = boundOp(clause);
+      // "must not be 20px" is a value to avoid; a negated bound the table cannot read ("must
+      // not be ovre 100px tall") is held still for a reviewer rather than read as "exactly".
+      const avoid = !explicit && !between && neg && new RegExp('\\b' + NEGATOR + ' (be|stay|remain|equal) (?:at |exactly |set to )?-?\\d').test(clause);
+      if (!explicit && !between && neg && !avoid) {
+        for (const m of metrics) if (NUMERIC_METRICS.has(m)) addCheck({ metric: m, op: 'unchanged' });
+        needsLlmJudgment = true; lastMetrics = metrics; lastOp = null;
+        return 'judgment';
+      }
+      const borrowed = !explicit && !BOUND_WORDS.test(clause) ? lastOp : null;
       for (const m of metrics) {
         if (!NUMERIC_METRICS.has(m)) continue;
         if (between) { addCheck({ metric: m, op: 'between', min: parseFloat(between[1]), max: parseFloat(between[2]) }); continue; }
         const n = numberInfo.n;
-        const isMax = /\b(not|never|no longer)\s+(exceed|go (over|above|beyond|past)|be (more|bigger|larger|taller|wider|higher|greater|longer) than|grow (beyond|past|over|above|to more than|larger than|bigger than|taller than|wider than)|surpass|pass)\b|\b(no more than|at most|maximum|max|under|below|less than|smaller than|up to|within|capped? at|not more than|cannot exceed|can'?t exceed|shouldn'?t exceed|mustn'?t exceed|not larger than|not bigger than|not taller than|not wider than|or less|or smaller|or lower)\b/.test(clause);
-        const isMin = /\b(not|never)\s+(be (less|smaller|lower|shorter|narrower|fewer) than|go (under|below)|shrink (below|under|smaller than)|drop below|fall below)\b|\b(at least|minimum|min|more than|greater than|over|above|bigger than|larger than|taller than|wider than|or more|or larger|or bigger|not less than|not fewer than)\b/.test(clause);
-        if (isMax && !isMin) addCheck({ metric: m, op: 'lte', value: String(n) });
-        else if (isMin && !isMax) addCheck({ metric: m, op: 'gte', value: String(n) });
-        else if (isMax && isMin) addCheck({ metric: m, op: 'lte', value: String(n) });
-        else addCheck({ metric: m, op: 'eq', value: String(n), tolerance: m === 'rowCount' || m === 'childElementCount' ? 0 : null });
+        const op = explicit ?? (avoid ? 'neq' : (borrowed && BORROWS.has(m) ? borrowed : 'eq'));
+        if (op === 'eq') addCheck({ metric: m, op, value: String(n), tolerance: m === 'rowCount' || m === 'childElementCount' ? 0 : null });
+        else addCheck({ metric: m, op, value: String(n) });
       }
       lastMetrics = metrics;
+      lastOp = explicit ?? borrowed ?? null;
       return 'checks';
     }
-    // no number: stability rules
+    // no number: "must not shrink" / "must not grow" is a delta of zero, not a freeze — growing is
+    // allowed after the first, shrinking after the second. Both named is neither: a freeze.
+    const shrinks = /\b(shrink|shrinks|decrease|smaller|narrower|shorter)\b/.test(clause);
+    const grows = /\b(grow|grows|increase|bigger|larger|taller|wider|expand|expands)\b/.test(clause);
+    const dir = !neg || (shrinks && grows) ? null : shrinks ? 'gte' : grows ? 'lte' : null;
+    if (dir && metrics.some((m) => NUMERIC_METRICS.has(m))) {
+      for (const m of metrics) if (NUMERIC_METRICS.has(m)) addCheck({ metric: m, op: dir, value: '0', compareToBaseline: true, message: (METRIC_LABELS[m] || m).replace(/^./, (ch) => ch.toUpperCase()) + ' must not ' + (dir === 'gte' ? 'shrink' : 'grow') });
+      lastMetrics = metrics; lastOp = null;
+      return 'checks';
+    }
+    // stability rules
     const wantsUnchanged = neg || /\b(unchanged|same|constant|stable|as is|as-is|stay put|fixed|lock|locked|intact|remain|remains|keep|keeps|maintain|maintains|preserve|preserves)\b/.test(clause);
     let judged = false;
     for (const m of metrics) {
@@ -356,7 +454,7 @@ export function compileMock({ ruleText, element, baseline }) {
         judged = true;
       }
     }
-    lastMetrics = metrics;
+    lastMetrics = metrics; lastOp = null;
     return judged ? 'judgment' : 'checks';
   }
   if (!checks.length) {
