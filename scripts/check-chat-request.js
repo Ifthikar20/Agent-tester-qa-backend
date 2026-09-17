@@ -35,6 +35,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { answerMock, unavailableNote } from '../chat-mock.js';
+import * as chat from '../chat.js';
 import {
   MODEL, MAX_TOKENS, FALLBACK_BETA, SYSTEM_PROMPT, chatModeFrom, createBudget, createResolver, findApiKey, requestFor,
 } from '../chat-resolver.js';
@@ -170,6 +171,9 @@ const actions = {
   },
   scanPage: async () => ({ targets: 12, linked: 4 }),
   quickstart: async () => ({ name: 'Acme', url: 'https://acme.example' }),
+  // Drafting is offered: the tool proposes here, and what a confirmed proposal
+  // does is the server's (check-chat.js drives that end to end).
+  plans: () => ({ mind: 'rules' }),
 };
 
 const proposals = [];
@@ -314,6 +318,17 @@ console.log('\n— 2 · the mock mind ——————————————
     assert.equal(r.facts.needsConfirmation, true);
     assert.equal(r.facts.proposal.kind, 'scan_page');
   });
+  await check('drafting tests is proposed, never done here', async () => {
+    const before = proposals.length;
+    const r = await byName.plan_page_tests.run({ suiteId: suite.id, pageId: contact.id, focus: 'the form', count: 9 });
+    assert.equal(r.facts.needsConfirmation, true);
+    assert.equal(r.facts.proposal.kind, 'plan_page');
+    assert.equal(proposals.length, before + 1);
+    assert.deepEqual(proposals.at(-1).args, { suiteId: suite.id, pageId: contact.id, focus: 'the form', count: 4 });
+    assert.equal(proposals.at(-1).label, 'read "Contact us" and draft tests for it');
+    const gone = makeTools({ space, ent, switches: null, org: ORG, actions: { ...actions, plans: () => null }, redact, propose, now });
+    assert.equal(gone.byName.plan_page_tests, undefined, 'not offered where the runner says no');
+  });
   await check('a URL is a quickstart, also only proposed', async () => {
     const before = proposals.length;
     const a = await ask('quickstart https://shop.example/');
@@ -370,6 +385,53 @@ console.log('\n— 2 · the mock mind ——————————————
     assert.ok(labels.includes('proposed a scan of "Contact us"'));
     assert.ok(events.some((e) => e.state === 'start') && events.some((e) => e.state === 'done'));
   });
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n— 2b · a proposal with items, and a draft run —————————');
+{
+  const store = chat.forOrg(ORG);
+  const cv = store.create('draft tests for the contact page');
+  const proposed = [];
+  const { propose, current } = chat.proposerFor({ store, conversationId: cv.id, emit: (ev) => proposed.push(ev) });
+  await check('the wire keeps the items and never the arguments', () => {
+    const long = 'x'.repeat(5000);
+    const p = propose({ kind: 'run_drafts', args: { suiteId: suite.id, pageId: contact.id, cases: [{ id: 'dc1', flow: long }] }, label: 'run 1 drafted check', items: [{ id: 'dc1', name: 'Contact us loads', steps: 3, flow: long, why: 'the page must load' }] });
+    const pub = chat.publicProposal(p);
+    assert.deepEqual(Object.keys(pub).sort(), ['at', 'expiresAt', 'id', 'items', 'kind', 'label']);
+    assert.equal(pub.items.length, 1);
+    assert.equal(pub.items[0].flow.length, chat.FLOW_MAX, 'a drafted flow is cut, never kept whole');
+    assert.equal(p.args.cases[0].flow.length, chat.FLOW_MAX, 'and so is the half that executes');
+    assert.equal(proposed[0].t, 'chat.proposal');
+    assert.equal(proposed[0].proposal.items[0].name, 'Contact us loads');
+    assert.equal(store.proposalOf(cv.id).id, p.id);
+    assert.equal(current().id, p.id);
+  });
+  await check('a second proposal in one turn is refused, not written over', () => {
+    const err = (() => { try { propose({ kind: 'scan_page', args: {}, label: 'scan' }); return null; } catch (e) { return e; } })();
+    assert.equal(err?.refused, 'proposal_taken');
+    assert.equal(refusalOf(err).refused, 'proposal_taken');
+    assert.equal(store.proposalOf(cv.id).kind, 'run_drafts');
+  });
+  await check('only ids a proposal hands out are choices, each once, at most eight', () => {
+    assert.deepEqual(chat.pickChoices(['dc1', 'dc1', 'dc3', 'dc9', 'x', 3, null]), ['dc1', 'dc3']);
+    assert.deepEqual(chat.pickChoices('dc1'), []);
+    assert.deepEqual(chat.pickChoices(['dc1', 'dc2', 'dc3', 'dc4', 'dc5', 'dc6', 'dc7', 'dc8', 'dc8']).length, 8);
+  });
+  await check('a draft run counts against the day and against nothing else', () => {
+    const before = runs.summary();
+    const today = runs.today();
+    const r = runs.record({ suite: 'Acme · Drafted', suiteId: suite.id, caseId: null, caseName: 'Drafted', url: contact.url, ms: 90, results: [{ ok: true }, { ok: false, i: 1, error: 'Nothing on the page says "Brochure"' }], steps: [], draft: true });
+    assert.equal(r.draft, true);
+    const after = runs.summary();
+    assert.equal(after.totals.runs, before.totals.runs);
+    assert.deepEqual(after.days, before.days);
+    assert.equal(after.latest.length, before.latest.length);
+    assert.equal(runs.today(), today + 1);
+    registry?.sync(runs.list());
+    if (registry) assert.deepEqual(registry.list().map((d) => d.id), OUR_DEFECTS);
+  });
+  store.remove(cv.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -509,7 +571,8 @@ const OFFERED = registry ? [...TOOL_NAMES] : TOOL_NAMES.filter((n) => n !== 'def
     assert.equal(content.split('<<<UNTRUSTED RECORDED CONTENT').length, 2, 'one opening marker');
     assert.equal(content.split('<<<END UNTRUSTED RECORDED CONTENT>>>').length, 2, 'one closing marker');
     const facts = JSON.parse(content.slice(0, content.indexOf('\n<<<UNTRUSTED')));
-    assert.equal(facts.totals.runs, runs.list().length);
+    // The drafted attempt recorded in 2b is in the store and out of the totals.
+    assert.equal(facts.totals.runs, runs.list().filter((r) => !r.draft).length);
     assert.equal(facts.latest[0].ok, false);
     if (registry) assert.ok(String(facts.latest[0].defect).startsWith('DEF-'), 'the failed run names its defect');
     else assert.equal(facts.latest[0].defect, null);

@@ -71,7 +71,7 @@ export function canonicalId(input) {
  */
 export const TOOL_NAMES = Object.freeze([
   'run_history', 'defects', 'defect', 'suites', 'suite', 'find', 'pages_scanned', 'monitoring', 'runner_state',
-  'run_case', 'run_suite', 'run_page_check', 'scan_page', 'quickstart',
+  'run_case', 'run_suite', 'run_page_check', 'scan_page', 'plan_page_tests', 'quickstart',
 ]);
 
 // ---- ids ---------------------------------------------------------------------------------
@@ -114,6 +114,8 @@ export function refusalOf(err) {
   if (err instanceof RunnerBusy) return { refused: 'runner_busy', org: err.org };
   if (err?.name === 'SwitchedOff') return { refused: 'switched_off', switch: err.key };
   if (err?.status === 409) return { refused: 'busy', error: String(err.message ?? '') };
+  // A refusal that names itself (chat.js: a second proposal in one turn).
+  if (typeof err?.refused === 'string') return { refused: err.refused, error: String(err.message ?? '').slice(0, 200) };
   return { refused: 'error', error: String(err?.message ?? err).slice(0, 200) };
 }
 
@@ -397,6 +399,19 @@ const SPECS = Object.freeze({
       },
     }),
   }),
+  plan_page_tests: Object.freeze({
+    name: 'plan_page_tests',
+    description: 'PROPOSE drafting test cases for a page: the runner opens the page, reads its controls, writes up to four candidate cases and shows them for the person to tick and run; nothing is run or saved without a press. It answers needsConfirmation: describe what would happen in one sentence and stop. Offered only where this organisation allows it.',
+    inputSchema: Object.freeze({
+      type: 'object', additionalProperties: false, required: ['suiteId', 'pageId'],
+      properties: {
+        suiteId: { type: 'string', description: 'The suite the page belongs to.' },
+        pageId: { type: 'string', description: 'The page to draft tests for, from find or suite.' },
+        focus: { type: 'string', description: 'What the person asked to have tested on it, in their words, when they said.' },
+        count: { type: 'integer', description: 'How many cases they asked for, 1 to 4, when they said.' },
+      },
+    }),
+  }),
   quickstart: Object.freeze({
     name: 'quickstart',
     description: 'PROPOSE making a suite from a URL: it creates the suite, opens the page, records its targets and runs a first check, so it answers needsConfirmation and a person presses the button. Describe what would happen in one sentence and stop.',
@@ -440,6 +455,10 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
   // store: either way, the name is what a person reads.
   const nameOf = (x) => (x == null ? null : typeof x === 'object' ? (x.name ?? x.id ?? null) : x);
   const defectsOf = () => actions.defects(space, ent);
+  // Drafting tests is offered only where the runner says so: the switch that
+  // gates a live page read, and — with a model as the mind — the
+  // organisation's consent to a model reading its pages (server.js plans).
+  const plansOf = () => (typeof actions.plans === 'function' ? actions.plans(space, switches) : null);
 
   // A page or a case, found or named as missing — every run tool starts here.
   const suiteOf = (suiteId) => {
@@ -754,6 +773,23 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
       },
     },
 
+    plan_page_tests: {
+      label: (a) => `proposed drafting tests for "${nameIn(a.suiteId, a.pageId)}"`,
+      validate: (a) => {
+        if (!isSuiteId(a.suiteId)) throw new BadInput(`"${a.suiteId}" is not a suite id — take one from find`);
+        if (!isPageId(a.pageId)) throw new BadInput(`"${a.pageId}" is not a page id — they look like pg_1a2b3c4d5e6f`);
+        const count = a.count == null ? null : Math.max(1, Math.min(4, Math.round(Number(a.count)) || 3));
+        return { suiteId: String(a.suiteId), pageId: String(a.pageId), focus: a.focus == null ? '' : String(a.focus).slice(0, 200), count };
+      },
+      summary: ({ proposal }) => `proposed ${proposal.id}`,
+      execute: ({ suiteId, pageId, focus, count }) => {
+        const suite = suiteOf(suiteId);
+        const page = pageOf(suite, pageId);
+        const proposal = propose({ kind: 'plan_page', args: { suiteId, pageId, focus, count }, label: `read "${clean(page.name, 80)}" and draft tests for it` });
+        return { facts: { needsConfirmation: true, proposal: { id: proposal.id, kind: proposal.kind, label: proposal.label } }, unsafe: null, proposal };
+      },
+    },
+
     scan_page: {
       label: (a) => `proposed a scan of "${nameIn(a.suiteId, a.pageId)}"`,
       validate: (a) => {
@@ -837,7 +873,7 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
     // A runner with no defect store has no defect tools rather than two that
     // answer "not here": the list of names is the product's, the tools are
     // this deployment's.
-    const adapter = name === 'defects' || name === 'defect' ? defectsOf() : true;
+    const adapter = name === 'defects' || name === 'defect' ? defectsOf() : name === 'plan_page_tests' ? plansOf() : true;
     if (!adapter) continue;
     if (name === 'defect' && !adapter.byId) continue;
     const spec = SPECS[name];

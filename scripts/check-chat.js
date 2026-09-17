@@ -17,6 +17,7 @@
  *   7  a page with no case           what the runner offers instead, and the offer runs
  *   8  a scan, proposed then confirmed   nothing runs on the model's say-so
  *   9  the transcript                kept, listed, deleted
+ *  10  drafted tests                 read, tick, run, revise once, report — and stop (chat-plan.js, public/contact.html)
  */
 import { spawn } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
@@ -261,7 +262,79 @@ section('9 · the transcript');
 }
 
 // ---------------------------------------------------------------------------
-section('10 · cleanup');
+section('10 · drafted tests: read, tick, run, revise once, report');
+{
+  // A page of its own with NO saved case (§5's "Contact us" has one, so that
+  // sentence runs the case): Harbour's contact form, whose "Our story" link
+  // shows late and whose brochure link goes nowhere (public/contact.html).
+  const formPage = (await api('POST', `/api/suites/${suiteId}/pages`, { name: 'Contact form', path: '/contact.html', expect: [{ kind: 'url', value: '/contact.html' }, { kind: 'text', value: 'Talk to us' }] })).json?.page ?? null;
+  if (formPage) ok('a contact form page, with no case'); else { bad('a contact form page, with no case'); await done(); }
+  const defectsBefore = JSON.stringify((await api('GET', '/api/defects')).json);
+
+  const first = await ask({ text: 'draft 4 tests for the contact form page' });
+  const cv = first.conversationId;
+  if (first.reply?.t === 'chat.done' && /^Drafting tests for "Contact form" opens the page, reads its controls and writes up to 4 checks/.test(first.reply.message.text)) ok('drafting is proposed, not done', short(first.reply.message.text)); else { bad('drafting is proposed, not done', JSON.stringify(first.reply?.message?.text)); await done(); }
+  const p1 = first.reply.message.proposal;
+  if (p1?.kind === 'plan_page' && first.reply.message.runs.length === 0) ok('a plan_page proposal, and nothing was run', p1.label); else { bad('a plan_page proposal, and nothing was run', JSON.stringify(p1)); await done(); }
+
+  const yes = await ask({ conversationId: cv, text: 'Yes, do it', confirm: p1.id }, 60000);
+  const read = await v.until((m) => m.t === 'chat.tool' && m.call?.name === 'plan_page_tests' && m.call.state === 'done', 30000, yes.from);
+  if (read && /4 drafted/.test(read.call.summary)) ok('the page was read and four checks drafted', read.call.summary); else { bad('the page was read and four checks drafted', JSON.stringify(read)); await done(); }
+  const p2 = yes.reply?.message?.proposal;
+  const items = p2?.items ?? [];
+  const names = items.map((i) => i.name);
+  if (p2?.kind === 'run_drafts' && JSON.stringify(names) === JSON.stringify(['Contact form loads', 'Contact form form is there', 'Contact form → Our story', 'Contact form → Download the brochure'])) ok('a run_drafts proposal carries the four to tick', names.join(' | ')); else { bad('a run_drafts proposal carries the four to tick', JSON.stringify(p2)); await done(); }
+  if (items.every((i) => /^dc\d$/.test(i.id) && i.steps > 0 && /^%% suite "Chat check · /.test(i.flow) && /testcase TD/.test(i.flow))) ok('each with an id, a size and its script'); else bad('each with an id, a size and its script', JSON.stringify(items.map((i) => [i.id, i.steps, i.flow.slice(0, 40)])));
+  if (/drafted 4 checks by the rules/.test(yes.reply.message.text) && /Tick the ones to run/.test(yes.reply.message.text)) ok('the reply lists them', short(yes.reply.message.text)); else bad('the reply lists them', short(yes.reply.message.text));
+  if (yes.reply.message.executed?.kind === 'plan_page' && yes.reply.message.executed.result?.mind === 'rules') ok('drafted by the rules, with no key', JSON.stringify(yes.reply.message.executed.result?.candidates?.length)); else bad('drafted by the rules, with no key', JSON.stringify(yes.reply.message.executed));
+  const listed = (await api('GET', `/api/chat/${cv}`)).json?.conversation;
+  if (listed?.proposal?.id === p2.id && listed.proposal.items?.length === 4 && listed.proposal.args === undefined) ok('the items survive a re-read, the arguments never leave', 'GET /api/chat/:id'); else bad('the items survive a re-read, the arguments never leave', JSON.stringify(listed?.proposal));
+  const scanned = (await api('GET', `/api/suites/${suiteId}`)).json?.suite?.pages.find((x) => x.id === formPage.id);
+  if (scanned?.targets?.some((t) => t.target === 'link:Our story')) ok('the read recorded the page\'s targets, the late link among them', `${scanned.targets.length} targets`); else bad('the read recorded the page\'s targets, the late link among them', JSON.stringify(scanned?.targets));
+
+  // Three of the four: the form check, the late link, the brochure.
+  const picked = [items[1].id, items[2].id, items[3].id];
+  const run = await ask({ conversationId: cv, text: 'Yes, run the ones I ticked', confirm: p2.id, choices: picked }, 150000);
+  if (run.reply?.t === 'chat.done') ok('chat.done', short(run.reply.message.text)); else { bad('chat.done', JSON.stringify(run.reply)); await done(); }
+  const starts = v.msgs.slice(run.from).filter((m) => m.t === 'run.start');
+  const second = starts.find((m) => m.attempt === 2);
+  if (starts.length === 4 && second && /\(attempt 2\)$/.test(second.caseName) && starts.filter((m) => !m.attempt).length === 3) ok('three drafts ran, one of them twice, the second attempt saying so', second.caseName); else bad('three drafts ran, one of them twice, the second attempt saying so', JSON.stringify(starts.map((m) => [m.caseName, m.attempt ?? 1])));
+  const cards = run.reply.message.runs ?? [];
+  const by = Object.fromEntries(cards.map((c) => [c.candidate, c]));
+  if (cards.length === 3 && cards.every((c) => c.draft === true && c.oneOff === true && c.caseId === null)) ok('one card per draft, each a draft, none a saved case'); else bad('one card per draft, each a draft, none a saved case', JSON.stringify(cards.map((c) => [c.candidate, c.draft, c.caseId])));
+  if (by[items[1].id]?.verdict === 'passed' && by[items[1].id].ok === true) ok('the form check passed', `${by[items[1].id].passed}/${by[items[1].id].total}`); else bad('the form check passed', JSON.stringify(by[items[1].id]));
+  const late = by[items[2].id];
+  if (late?.verdict === 'test_script' && late.ok === true && late.attempts === 2 && late.revised === true && /wait \d+ms/.test(late.flow ?? '')) ok('the late link: the test was wrong, given a wait, and passed the second time', late.flow.split('\n').find((l) => /wait/.test(l))?.trim()); else bad('the late link: the test was wrong, given a wait, and passed the second time', JSON.stringify(late));
+  const broken = by[items[3].id];
+  if (broken?.verdict === 'app_bug' && broken.ok === false && broken.attempts === 1 && broken.revised === false && /got 404/.test(broken.error ?? '')) ok('the brochure: the application is broken, and no revision was tried', short(broken.error, 60)); else bad('the brochure: the application is broken, and no revision was tried', JSON.stringify(broken));
+  const said = run.reply.message.text;
+  if (/^2 of 3 drafted checks passed\./.test(said) && /"Contact form → Our story" was wrong: .* — it passed on the second attempt/.test(said) && /"Contact form → Download the brochure" found the application broken/.test(said)) ok('the reply says so, verdict by verdict', short(said, 90)); else bad('the reply says so, verdict by verdict', said);
+  if (JSON.stringify((await api('GET', '/api/defects')).json) === defectsBefore) ok('no draft filed a defect', 'GET /api/defects byte for byte'); else bad('no draft filed a defect');
+  const state = await api('GET', '/api/chat');
+  if (state.json?.busy === null && state.json.stopping === null) ok('nothing in flight afterwards'); else bad('nothing in flight afterwards', JSON.stringify(state.json?.busy));
+
+  // Stop: the second draft in flight is the last to run.
+  const again = await ask({ conversationId: cv, text: 'draft tests for the contact form page' });
+  const p3 = again.reply?.message?.proposal;
+  const drafted = await ask({ conversationId: cv, text: 'yes', confirm: p3?.id }, 60000);
+  const p4 = drafted.reply?.message?.proposal;
+  if (p4?.kind === 'run_drafts' && p4.items?.length === 3) ok('drafted again: three by default', p4.items.map((i) => i.name).join(' | ')); else { bad('drafted again: three by default', JSON.stringify(p4)); await done(); }
+  const from = v.at();
+  const go = await api('POST', '/api/chat/turns', { conversationId: cv, text: 'Yes, do it', confirm: p4.id });
+  const stop = await api('POST', '/api/chat/stop');
+  if (go.status === 202 && stop.status === 200 && stop.json?.stopping === go.json.turnId) ok('POST /api/chat/stop names the turn it stops', stop.json.stopping); else bad('POST /api/chat/stop names the turn it stops', `${go.status} ${stop.status} ${JSON.stringify(stop.json)}`);
+  const stopped = await v.until((m) => (m.t === 'chat.done' || m.t === 'chat.error') && m.turn === go.json.turnId, 90000, from);
+  const outs = stopped?.message?.executed?.result?.outcomes ?? [];
+  if (stopped?.t === 'chat.done' && outs.length === 3 && outs[0].verdict === 'passed' && outs.slice(1).every((o) => o.verdict === 'stopped') && stopped.message.executed.result.stopped === true) ok('it ended after the draft in flight', outs.map((o) => o.verdict).join(', ')); else bad('it ended after the draft in flight', JSON.stringify(outs.map((o) => o.verdict)));
+  if (/^1 of 3 drafted checks passed before it was stopped\./.test(stopped?.message?.text ?? '')) ok('and the reply says so', short(stopped.message.text, 70)); else bad('and the reply says so', short(stopped?.message?.text ?? ''));
+  const idle = await api('POST', '/api/chat/stop');
+  if (idle.status === 200 && idle.json?.stopping === null) ok('a stop with nothing in flight stops nothing'); else bad('a stop with nothing in flight stops nothing', JSON.stringify(idle.json));
+  const gone = await api('DELETE', `/api/chat/${cv}`);
+  if (gone.status === 200) ok('the conversation is deleted'); else bad('the conversation is deleted', `${gone.status}`);
+}
+
+// ---------------------------------------------------------------------------
+section('11 · cleanup');
 {
   const r = await api('DELETE', `/api/suites/${suiteId}`);
   if (r.status === 200) ok('the suite is gone'); else bad('the suite is gone', `${r.status}`);

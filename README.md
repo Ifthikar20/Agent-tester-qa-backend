@@ -1055,15 +1055,42 @@ are the runner's own facts and are stated plainly; names, titles, flows, rule
 text and the sentences a failure leaves came from sites under test, so they
 ride inside a marked UNTRUSTED block the system prompt says to report and
 never obey, redacted through the organisation's vault and saved session on the
-way out, with their own markers defanged. Two tools only **propose**: scanning
-a page and quickstart drive the browser and change what the organisation
-keeps, so they come back as a proposal a person confirms with a button (or the
-word yes) within ten minutes; the engine (`chat.js`) then executes it through
-the same functions the routes call, with the routes' gates, and hands the
-outcome to the mind as a runner-authored note. Nothing a model says executes
-anything by itself, and every refusal the runner makes — the plan, another
-organisation driving, an operator's switch, an origin nobody allowed, a run in
-progress — reaches the reply as the runner's decision, in its words.
+way out, with their own markers defanged. Three tools only **propose**:
+scanning a page, drafting tests for it and quickstart drive the browser and
+change what the organisation keeps, so they come back as a proposal a person
+confirms with a button (or the word yes) within ten minutes; the engine
+(`chat.js`) then executes it through the same functions the routes call, with
+the routes' gates, and hands the outcome to the mind as a runner-authored
+note. Nothing a model says executes anything by itself, and every refusal the
+runner makes — the plan, another organisation driving, an operator's switch,
+an origin nobody allowed, a run in progress — reaches the reply as the
+runner's decision, in its words.
+
+A page can be tested from a sentence. "Draft tests for the contact page" — or
+"test the client solutions page" when nothing is saved for it yet — is the
+third proposing tool, `plan_page_tests`. On the yes the runner opens the page
+under its lock and reads its controls and links (the same read as a scan),
+then drafts up to four checks (`chat-plan.js`): Claude when the
+organisation's *Draft test cases* consent is on (Settings; `plan` beside `ai`
+in `heal.json`, see "Automatic fixes"), else the rules — the page's own
+expectations, the form's fields present, a link followed to a page that
+answers. A model never writes a locator: it fills a closed schema whose
+targets are an enum of what the read found, and every draft is mapped into
+the case language, validated exactly as a saved case is and shown as its
+text. The drafts come back as a second proposal with tick boxes; the ticked
+ones run as **drafts** — history rows marked `draft`, out of the summary,
+counted against `runs.per_day`, never filing, bumping or closing a defect. A
+failure is classified from the runner's own words and a fresh read of the
+page: a target that appeared late or moved gets a mechanical fix (a wait, a
+retarget) and one more run; a check that failed after every action passed is
+reported as *the app is broken* and never revised; the rest *needs a person*.
+A revision may add steps or retarget an action and may never drop or weaken
+an assertion. The reply carries a card per draft with its verdict; a passing
+draft becomes a case only by *Save as a case* (`source: generated`), and
+`POST /api/chat/stop` ends a batch after the draft in flight.
+`npm run check:plan` pins the pure core offline — the menu, the gates, the
+verdict ladder, the guards — `npm run check:plan-request` pins both requests,
+and `check:chat` drives it end to end against `public/contact.html`.
 
 A turn is `POST /api/chat/turns` (a 202) and is answered on the
 organisation's sockets — `chat.turn`, `chat.delta`, `chat.tool`,
@@ -1529,7 +1556,12 @@ nothing else):
   off by default), and it stays `safe` when the runner has no key.
   `GET /api/settings/heal`, `/api/state` and the socket greeting say which, as
   `heal: { mode, ai: { enabled, available, reason }, canManage }` — `reason` is
-  the first thing missing: `deployment`, `switch`, `key` or `organisation`.
+  the first thing missing: `deployment`, `switch`, `key` or `organisation`;
+- **`plan` is the second flag in the same file**, independent of `ai` and off
+  by default: may a model read the organisation's pages to draft tests for
+  them (the chat's `plan_page_tests`, "Chat" above). `PUT /api/settings/heal
+  {"plan": true}` turns it on, `heal.plan: { enabled, available, reason }`
+  reports it, and with the mock mind the rules draft without it.
 
 The key is `ANTHROPIC_API_KEY`, from the environment or, on a laptop, from
 `.env.local` beside the backend — of which that one line is read and nothing
@@ -2206,9 +2238,10 @@ silently inside someone else's docs.
 | `redact.js` | vault values out of text on its way out, for the console and the monitors alike |
 | `support.js` | help & support — a request from the top bar, and the per-organisation access switch it turns on |
 | `chat.js` | the chat — one transcript store and engine per organisation: a turn, the proposal it confirms, which mind answers, the reply kept |
-| `chat-tools.js` | the fourteen tools a mind drives, the keyword matcher, the untrusted block and the redaction on the way out |
+| `chat-tools.js` | the fifteen tools a mind drives, the keyword matcher, the untrusted block and the redaction on the way out |
 | `chat-mock.js` | the mock mind: intents as regular expressions over the same tools, for a runner with no key |
-| `chat-resolver.js` | Claude for the chat: the request, its frozen cached prompt, the tool runner, which mind is on |
+| `chat-resolver.js` | Claude for the chat: the request, its frozen cached prompt, the tool runner, which mind is on; the draft and revise requests for drafted tests |
+| `chat-plan.js` | drafted tests: the closed schemas built from a page read, the mapper into the case language, the compile gates, the verdict ladder, the revision guards, the bounded run-and-revise loop, and the rules drafter |
 | `vocabulary.js` | every verb, declared once: syntax, how it writes back, how it draws |
 | `flow.js` | the test case language: text ↔ IR, and `asFlowchart()` for a picture |
 | `ops.js` | what each verb does, origin allowlist, validation gate |
@@ -2270,7 +2303,10 @@ silently inside someone else's docs.
 | `public/monitor.html` | a page shaped to be watched, with buttons that break it |
 | `scripts/check-support.js` | a support request lands, turns access on, is told to every socket, and turns off again |
 | `scripts/check-chat-request.js` | the matcher, the mock mind and, offline, exactly what the chat's resolver puts on the wire |
-| `scripts/check-chat.js` | the chat on a runner of its own: a count that equals /api/defects, a case run from a sentence, a proposal confirmed, the transcript kept |
+| `scripts/check-chat.js` | the chat on a runner of its own: a count that equals /api/defects, a case run from a sentence, a proposal confirmed, the transcript kept, drafted tests read, ticked, run, fixed once and reported |
+| `scripts/check-plan.js` | drafted tests offline: a target outside the menu never validates, every draft is a fixed point of its text, the attempt bound, a late target gets one wait, a failing check never reaches the model, a revision may not drop an assertion |
+| `scripts/check-plan-request.js` | exactly what the draft and revise requests put on the wire: one cached system block identical across pages, closed schemas with the page's own enums, no vault value, the page's words fenced |
+| `public/contact.html` | Harbour's contact page, shaped to be drafted against: a link that shows late, a brochure nobody serves, a message that keeps 200 characters |
 | `public/site.html` | Harbour — the same links in header and footer, and a long page |
 
 ---

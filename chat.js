@@ -49,6 +49,7 @@ import { originOf } from './suites.js';
 import { makeTools, maskUrl, redactorFor, refusalOf, untrusted } from './chat-tools.js';
 import { answerMock, unavailableNote } from './chat-mock.js';
 import { MAX_ITERATIONS } from './chat-resolver.js';
+import { verdictLine } from './chat-plan.js';
 
 export const TEXT_MAX = 2000;
 export const TITLE_MAX = 60;
@@ -99,8 +100,55 @@ const now = () => Date.now();
 export const isConversationId = (id) => /^cv_[a-z0-9]{8}$/.test(String(id ?? ''));
 
 // ---- the store ------------------------------------------------------------------------------
-/** A proposal as the UI and the transcript see it: what, not the arguments it runs with. */
-const publicProposal = (p) => (p ? { id: p.id, kind: p.kind, label: p.label, at: p.at, expiresAt: p.expiresAt } : null);
+/**
+ * A proposal as the UI and the transcript see it: what, not the arguments it
+ * runs with. `items` are the drafted cases a person picks from (chat-plan.js):
+ * the readable half, kept; `args` is the half that executes, stripped.
+ */
+export const publicProposal = (p) => (p ? { id: p.id, kind: p.kind, label: p.label, at: p.at, expiresAt: p.expiresAt, ...(Array.isArray(p.items) ? { items: p.items } : {}) } : null);
+/** How much of a drafted case a proposal or a kept reply may carry. */
+export const FLOW_MAX = 2000;
+const ITEMS_MAX = 4;
+const CHOICE = /^dc[1-8]$/;
+/**
+ * Values a model or a page had a hand in, bounded before they are kept:
+ * strings cut, arrays shortened, nesting stopped. `setProposal` persists what
+ * it is given and the kept reply is the transcript, so a runaway answer must
+ * not become a runaway file.
+ */
+function capped(v, { text = FLOW_MAX, items = 8, depth = 4 } = {}) {
+  if (depth < 0) return null;
+  if (typeof v === 'string') return v.slice(0, text);
+  if (Array.isArray(v)) return v.slice(0, items).map((x) => capped(x, { text, items, depth: depth - 1 }));
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).slice(0, 32).map(([k, x]) => [k, capped(x, { text, items, depth: depth - 1 })]));
+  return v;
+}
+/** The drafted cases as the person sees them: an id to tick, a name, a size, the script. */
+const cappedItems = (items) => items.slice(0, ITEMS_MAX).map((i) => ({ id: str(i.id, 8), name: str(i.name, 80), steps: Number(i.steps) || 0, flow: str(i.flow, FLOW_MAX), ...(i.why ? { why: str(i.why, 200) } : {}) }));
+/** The items a person ticked, as ids: only the shape a proposal hands out, each once, at most eight. */
+export const pickChoices = (choices) => (Array.isArray(choices) ? [...new Set(choices.filter((c) => typeof c === 'string' && CHOICE.test(c)))].slice(0, 8) : []);
+
+/**
+ * The one proposal a turn may leave. An executed proposal may leave the next
+ * one (reading a page leaves "run these drafts"), and a tool called later in
+ * the same turn must not then clobber it: one slot in the store, one button
+ * on the page, one proposal per turn. A second is refused, never overwritten.
+ */
+export function proposerFor({ store, conversationId, emit }) {
+  let proposal = null;
+  const propose = ({ kind, args, label, items = null }) => {
+    if (proposal) throw Object.assign(new Error('a proposal is already waiting on this conversation — answer it first'), { refused: 'proposal_taken' });
+    const at = now();
+    proposal = {
+      id: newId('pr'), kind, args: capped(args, { items: ITEMS_MAX }), label: str(label, 160), at, expiresAt: at + PROPOSAL_TTL_MS,
+      ...(Array.isArray(items) ? { items: cappedItems(items) } : {}),
+    };
+    store.setProposal(conversationId, proposal);
+    emit({ t: 'chat.proposal', proposal: publicProposal(proposal) });
+    return proposal;
+  };
+  return { propose, current: () => proposal };
+}
 
 class ChatStore {
   constructor(org) {
@@ -112,6 +160,8 @@ class ChatStore {
     this.contexts = new Map();
     /** The turn being answered, or null. */
     this.busy = null;
+    /** The turn a person asked to stop (stop()): read between a draft's attempts, never mid-run. */
+    this.stopping = null;
     this.load();
   }
 
@@ -254,6 +304,7 @@ export function describe(space) {
     llm: cfg.llm,
     budget: budgetState(),
     busy: store.busy ? { id: store.busy.id, conversationId: store.busy.conversationId } : null,
+    stopping: store.stopping ?? null,
     conversations: store.list(),
   };
 }
@@ -265,9 +316,11 @@ export function describe(space) {
  * after this returns.
  *
  * @param confirm the id of the proposal a button confirmed, when one did
+ * @param choices which of a proposal's items the person ticked (their ids);
+ *   absent or empty means every one of them
  * @returns {{id: string, conversationId: string, at: number}}
  */
-export function turn({ conversationId = null, text, confirm = null, space, ent, switches = null, by = null }) {
+export function turn({ conversationId = null, text, confirm = null, choices = null, space, ent, switches = null, by = null }) {
   const store = space.chat;
   const asked = str(text, TEXT_MAX);
   if (!asked) throw refuse('Ask something — a question about defects, runs or suites, or a case to run', 400);
@@ -276,7 +329,7 @@ export function turn({ conversationId = null, text, confirm = null, space, ent, 
   const conversation = existing ?? store.create(asked);
   const at = now();
   store.append(conversation.id, { id: newId('m'), role: 'user', at, text: asked, by: by == null ? null : str(by, 200) });
-  const t = { id: newId('t'), conversationId: conversation.id, at, text: asked, confirm: confirm == null ? null : str(confirm, 40) };
+  const t = { id: newId('t'), conversationId: conversation.id, at, text: asked, confirm: confirm == null ? null : str(confirm, 40), choices: pickChoices(choices) };
   store.busy = t;
   cfg.emitTo(space.org, { t: 'chat.turn', turn: t.id, conversationId: t.conversationId, state: 'thinking' });
   work(t, { store, space, ent, switches }).catch((err) => {
@@ -286,11 +339,24 @@ export function turn({ conversationId = null, text, confirm = null, space, ent, 
   return { id: t.id, conversationId: t.conversationId, at };
 }
 
+/**
+ * Stop the reply being written for this organisation: a run of drafted cases
+ * (chat-plan.js) ends after the attempt in flight — a run cannot be broken
+ * off mid-step — and says so. The id being stopped, or null when nothing is.
+ */
+export function stop(space) {
+  const store = space.chat;
+  if (!store.busy) return null;
+  store.stopping = store.busy.id;
+  return store.stopping;
+}
+
 /** Keep the reply, let go of the lock, tell the organisation. */
 function finish(t, store, space, fields) {
   const message = { id: newId('m'), role: 'assistant', at: now(), ...fields };
   try { store.append(t.conversationId, message); } catch { /* the conversation was deleted mid-turn: the reply has nowhere to go */ }
   if (store.busy?.id === t.id) store.busy = null;
+  if (store.stopping === t.id) store.stopping = null;
   cfg.emitTo(space.org, { t: message.error ? 'chat.error' : 'chat.done', turn: t.id, conversationId: t.conversationId, error: message.error ?? undefined, message });
   return message;
 }
@@ -321,11 +387,12 @@ function runsOf(calls, executed) {
     if (Array.isArray(c.runs)) out.push(...c.runs);
   }
   if (executed?.run) out.push(executed.run);
+  if (Array.isArray(executed?.runs)) out.push(...executed.runs);
   return out;
 }
 
-/** The executed proposal as the transcript keeps it. */
-const publicExecuted = (e) => (e ? { id: e.id, kind: e.kind, label: e.label, ok: e.ok ?? null, refused: e.refused ?? null, result: e.result ?? null } : null);
+/** The executed proposal as the transcript keeps it: bounded, because its result may carry drafted scripts. */
+const publicExecuted = (e) => (e ? { id: e.id, kind: e.kind, label: e.label, ok: e.ok ?? null, refused: e.refused ?? null, result: e.result == null ? null : capped(e.result) } : null);
 
 /**
  * The person's turn as the model reads it: what they typed, under a note
@@ -340,8 +407,14 @@ function userTurn(text, executed) {
   if (e.refused) facts = `the person confirmed "${e.label}" (${e.id}) but the runner refused: ${JSON.stringify(e.refused)}`;
   else if (e.kind === 'scan_page') facts = `the person confirmed "${e.label}" (${e.id}) and it ran: ${e.result.targets} targets and ${e.result.linked} links were recorded`;
   else if (e.kind === 'quickstart') facts = `the person confirmed "${e.label}" (${e.id}) and it ran: a suite (${e.result.suiteId}) was made with ${e.result.targets} targets and its first check ${e.ok ? 'passed' : 'failed'} ${e.result.passed}/${e.result.total}${e.result.defect ? `, filed as ${e.result.defect}` : ''}`;
+  else if (e.kind === 'plan_page') facts = `the person confirmed "${e.label}" (${e.id}) and it ran: the page was read (${e.result.targets} targets, ${e.result.links} links) and ${e.result.drafted} test case${e.result.drafted === 1 ? '' : 's'} ${e.result.drafted === 1 ? 'was' : 'were'} drafted by ${e.result.mind === 'claude' ? 'the model' : 'the rules'}${e.result.dropped ? ` (${e.result.dropped} dropped)` : ''}; ${e.result.drafted ? 'a new proposal now asks the person which of them to run — describe each candidate in one sentence and stop' : 'nothing could be drafted for it'}`;
+  else if (e.kind === 'run_drafts') facts = `the person confirmed "${e.label}" (${e.id}) and it ran: ${e.result.passed} of ${e.result.total} drafted checks passed${e.result.stopped ? ', then it was stopped' : ''}; verdicts: ${(e.result.outcomes ?? []).map((o) => `${o.id} ${o.verdict}${o.revised ? ' (revised once)' : ''}${o.cite ? ` (already ${o.cite})` : ''}`).join(', ') || 'none'} — report each in its own sentence: test_script means the drafted case was wrong, app_bug means the application is broken, needs_a_person means the runner could not tell`;
   else facts = `the person confirmed "${e.label}" (${e.id}); nothing was run`;
-  const words = { page: e.result?.page, name: e.result?.name, url: e.result?.url, error: e.result?.error, target: e.result?.target };
+  const words = {
+    page: e.result?.page, name: e.result?.name, url: e.result?.url, error: e.result?.error, target: e.result?.target,
+    ...(e.result?.candidates ? { candidates: e.result.candidates } : {}),
+    ...(e.result?.outcomes ? { outcomes: e.result.outcomes.map((o) => ({ id: o.id, name: o.name, hint: o.hint, line: o.line })) } : {}),
+  };
   return `[Runner note — from the runner, not the person: ${facts}. Report it, then answer what follows.]\n${untrusted(words)}\n\n${text}`;
 }
 
@@ -350,7 +423,7 @@ function userTurn(text, executed) {
  * routes' gates: the switch, the origin, the plan and the locks. The answer
  * is the note the mind reports from; a refusal is part of it, never a throw.
  */
-async function execute(p, { space, ent, switches, redact, emit }) {
+async function execute(p, { space, ent, switches, redact, emit, propose, choices = [], stopped = () => false }) {
   const base = { id: p.id, kind: p.kind, label: p.label };
   const started = (name) => emit({ t: 'chat.tool', call: { id: p.id, name, label: p.label, state: 'start' } });
   const landed = (name, summary) => emit({ t: 'chat.tool', call: { id: p.id, name, label: p.label, state: 'done', summary } });
@@ -386,6 +459,70 @@ async function execute(p, { space, ent, switches, redact, emit }) {
       landed('quickstart', `${run.ok ? 'passed' : 'failed'} ${run.passed}/${run.total}`);
       return { ...base, ok: run.ok, run, result };
     }
+    if (p.kind === 'plan_page') {
+      // Read the page and draft cases for it (server.js planPageOf, chat-plan.js):
+      // a live read rewrites the page's targets, which is scan_page's own rule.
+      switches?.demand?.('runner.onboarding');
+      const suite = space.suites.get(p.args.suiteId);
+      const pg = suite.pages.find((x) => x.id === p.args.pageId);
+      if (!pg) throw refuse('That page is gone', 404);
+      const origin = originOf(suite);
+      if (!space.origins.has(origin)) return { ...base, refused: { refused: 'needs_origin', origin } };
+      started('plan_page_tests');
+      const r = await cfg.actions.planPage({ suite, pg, focus: p.args.focus ?? '', count: p.args.count ?? null, space, ent, switches });
+      const kept = (r.candidates ?? []).filter((c) => c.ok);
+      const dropped = (r.candidates ?? []).length - kept.length;
+      const result = {
+        page: redact(pg.name), suiteId: suite.id, pageId: pg.id, url: maskUrl(r.url ?? pg.url), targets: r.targets ?? 0, links: r.links ?? 0,
+        mind: r.mind, drafted: kept.length, dropped,
+        candidates: kept.map((c) => ({ id: c.id, name: redact(c.name), steps: c.steps.length, why: redact(c.why ?? '') })),
+      };
+      // The next button: which of these to run. Its args are what executes; its
+      // items are what the person reads and ticks.
+      if (kept.length) {
+        propose({
+          kind: 'run_drafts',
+          args: { suiteId: suite.id, pageId: pg.id, fingerprint: r.fingerprint ?? null, cases: kept.map((c) => ({ id: c.id, name: c.name, why: c.why ?? '', flow: c.flow })) },
+          items: kept.map((c) => ({ id: c.id, name: redact(c.name), steps: c.steps.length, flow: redact(c.flow), why: redact(c.why ?? '') })),
+          label: `run ${kept.length} drafted check${kept.length === 1 ? '' : 's'} on "${redact(pg.name)}", fixing and re-running each once`,
+        });
+      }
+      landed('plan_page_tests', `${kept.length} drafted${dropped ? `, ${dropped} dropped` : ''}`);
+      return { ...base, ok: kept.length > 0, result };
+    }
+    if (p.kind === 'run_drafts') {
+      // Run the ticked drafts, revising a wrong one once (server.js runDraftsOf,
+      // chat-plan.js runPlanLoop). Every attempt is a real run, marked a draft.
+      switches?.demand?.('runner.runs');
+      const suite = space.suites.get(p.args.suiteId);
+      const pg = suite.pages.find((x) => x.id === p.args.pageId);
+      if (!pg) throw refuse('That page is gone', 404);
+      const origin = originOf(suite);
+      if (!space.origins.has(origin)) return { ...base, refused: { refused: 'needs_origin', origin } };
+      const all = Array.isArray(p.args.cases) ? p.args.cases : [];
+      const picked = choices.length ? all.filter((c) => choices.includes(c.id)) : all;
+      if (!picked.length) return { ...base, refused: { refused: 'error', error: 'none of the drafted checks was chosen' } };
+      started('run_drafts');
+      // Progress rides the same tool line, updated in place: the candidate, the attempt, what became of it.
+      const onProgress = ({ name, attempt, state, verdict }) => emit({ t: 'chat.tool', call: { id: p.id, name: 'run_drafts', label: p.label, state: 'start', summary: `${redact(name)} — ${state === 'running' ? `attempt ${attempt}` : state}${verdict ? ` (${verdict})` : ''}` } });
+      const r = await cfg.actions.runDrafts({ suite, pg, cases: picked, fingerprint: p.args.fingerprint ?? null, space, ent, switches, stopped, onProgress });
+      const runs = r.outcomes.map((o) => {
+        const last = o.attempts.at(-1) ?? {};
+        return {
+          suiteId: suite.id, suite: redact(suite.name), caseId: null, caseName: redact(o.name), candidate: o.id,
+          ok: !!o.ok, passed: last.passed ?? 0, total: last.total ?? 0, step: last.step ?? null,
+          error: last.error == null ? null : redact(last.error), target: last.target == null ? null : redact(last.target), defect: last.defect ?? null,
+          at: now(), oneOff: true, draft: true, verdict: o.verdict, attempts: o.attempts.length, revised: !!o.revised, cite: o.cite ?? null,
+          hint: o.hint == null ? null : redact(o.hint), flow: o.flow == null ? null : redact(o.flow), pageId: pg.id,
+        };
+      });
+      const result = {
+        page: redact(pg.name), suiteId: suite.id, pageId: pg.id, passed: r.passed, total: r.total, stopped: !!r.stopped,
+        outcomes: r.outcomes.map((o) => ({ id: o.id, name: redact(o.name), ok: !!o.ok, verdict: o.verdict, attempts: o.attempts.length, revised: !!o.revised, cite: o.cite ?? null, hint: o.hint == null ? null : redact(o.hint), line: redact(verdictLine(o)) })),
+      };
+      landed('run_drafts', `${r.passed}/${r.total} passed${r.stopped ? ', stopped' : ''}`);
+      return { ...base, ok: r.total > 0 && r.passed === r.total && !r.stopped, runs, result };
+    }
     return { ...base, refused: { refused: 'error', error: `nothing runs a "${p.kind}" proposal` } };
   } catch (err) {
     const refused = refusalOf(err);
@@ -407,6 +544,9 @@ async function work(t, { store, space, ent, switches }) {
   const redact = redactorFor(space, cfg.extraRedact ? cfg.extraRedact(space) : undefined);
   const emit = (ev) => cfg.emitTo(org, { ...ev, turn: t.id, conversationId: t.conversationId });
 
+  // ---- 0 · the one proposal this turn may leave (proposerFor) ------------------------
+  const { propose, current: proposed } = proposerFor({ store, conversationId: t.conversationId, emit });
+
   // ---- 1 · a proposal, confirmed or dropped ----------------------------------------------
   const pending = store.proposalOf(t.conversationId);
   let executed = null;
@@ -417,21 +557,13 @@ async function work(t, { store, space, ent, switches }) {
   }
   if (pending && (t.confirm === pending.id || YES.test(t.text))) {
     store.setProposal(t.conversationId, null);
-    executed = await execute(pending, { space, ent, switches, redact, emit });
+    executed = await execute(pending, { space, ent, switches, redact, emit, propose, choices: t.choices, stopped: () => store.stopping === t.id });
   } else if (pending && NO.test(t.text)) {
     store.setProposal(t.conversationId, null);
     return finish(t, store, space, { text: `Dropped: ${pending.label}. Nothing was run.`, mind: 'runner', model: null, tools: [], runs: [], offers: null, proposal: null, executed: null, error: null });
   }
 
   // ---- 2 · the tools ---------------------------------------------------------------------
-  let proposal = null;
-  const propose = ({ kind, args, label }) => {
-    const at = now();
-    proposal = { id: newId('pr'), kind, args, label: str(label, 160), at, expiresAt: at + PROPOSAL_TTL_MS };
-    store.setProposal(t.conversationId, proposal);
-    emit({ t: 'chat.proposal', proposal: publicProposal(proposal) });
-    return proposal;
-  };
   const onCall = (call) => emit({ t: 'chat.tool', call: { id: call.id, name: call.name, label: call.label, state: call.state, summary: call.summary ?? null } });
   const { tools, byName, calls } = makeTools({ space, ent, switches, org, actions: cfg.actions, redact, propose, onCall });
 
@@ -479,7 +611,7 @@ async function work(t, { store, space, ent, switches }) {
     tools: calls.slice(0, TOOLS_KEPT).map(publicCall),
     runs: runsOf(calls, executed).slice(0, RUNS_KEPT),
     offers,
-    proposal: publicProposal(proposal),
+    proposal: publicProposal(proposed()),
     executed: publicExecuted(executed),
     error: null,
   });

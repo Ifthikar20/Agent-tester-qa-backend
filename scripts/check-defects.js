@@ -126,6 +126,21 @@ const cart = byId()['DEF-2609-002'];
 if (changes.length === 0 && cart.hits === 2 && cart.cases.length === 2) ok('a run in the same millisecond as the last one folded counts', 'no skip, no double count');
 else bad('a run in the same millisecond as the last one folded counts', JSON.stringify({ changes, cart }));
 
+// A drafted case's attempts (runs.js `draft`: a model's test nobody has
+// accepted) are read past and never folded: a failure it shares with a real
+// defect does not bump it, a new sentence files nothing, and a pass closes
+// nothing — the real pass a minute later still does.
+{
+  const untouched = JSON.stringify(reg.list());
+  history.push({ ...run(OCT + 20_000, { error: CART, step: 1, caseId: 'cs-draft', caseName: 'Drafted' }), draft: true });
+  history.push({ ...run(OCT + 21_000, { error: 'Nothing on the page says "Brochure"', step: 2, caseId: 'cs-draft', caseName: 'Drafted' }), draft: true });
+  history.push({ ...run(OCT + 22_000, { pass: true, caseId: 'cs-c', caseName: 'Search' }), draft: true });
+  changes = reg.sync(history);
+  const d2 = byId()['DEF-2609-002'];
+  if (changes.length === 0 && JSON.stringify(reg.list()) === untouched && d2.hits === 2 && d2.status === 'open') ok('a drafted case files, bumps and closes nothing', 'three draft runs, the registry byte for byte');
+  else bad('a drafted case files, bumps and closes nothing', JSON.stringify({ changes, hits: d2?.hits, status: d2?.status }));
+}
+
 // ---------------------------------------------------------------------------
 console.log('\n— one sentence about different steps ————————————————————————');
 

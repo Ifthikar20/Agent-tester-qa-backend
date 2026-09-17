@@ -302,6 +302,11 @@ export function open(org) {
 
   /** One run, into the registry. Whatever a person would want to be told is appended to `changes`. */
   function fold(r, changes) {
+    // A drafted case nobody has accepted (runs.js `draft`) files nothing, closes
+    // nothing and reopens nothing: a machine-written test that is wrong must
+    // not blame the application, and one that passes has proven nothing about
+    // it yet. The watermark still moves past the row (sync).
+    if (r.draft) return;
     if (r.ok) {
       // Any affected case passing since the failure was last seen closes it:
       // nobody has to remember to.

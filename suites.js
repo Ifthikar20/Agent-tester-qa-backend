@@ -305,7 +305,9 @@ export function forOrg(org) {
       id: rid('cs'),
       name: text(name, 'Case name', 80),
       pageId: pageId ?? null,
-      source: source === 'recorded' ? 'recorded' : 'written',
+      // Who wrote it: a recording, a person, or a model (chat-plan.js) — the
+      // last is the one a reader should never mistake for the other two.
+      source: ['recorded', 'written', 'generated'].includes(source) ? source : 'written',
       flow: String(flow),
       steps: plan.steps.length,
       createdAt: now(), updatedAt: now(),

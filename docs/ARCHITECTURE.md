@@ -220,7 +220,7 @@ The routes, by mechanism:
 | fixes | `GET /api/fixes`, `POST /api/fixes/:id/accept`, `POST /api/fixes/:id/reject`, `GET/PUT /api/settings/heal` |
 | monitoring | `GET /api/monitoring`, `GET/POST /api/monitors`, `POST /api/monitors/preview`, `POST /api/monitors/compile`, `DELETE /api/monitors/:id`, `POST /api/monitors/:id/pause`, `…/resume`, `GET /api/monitors/shots/:name`, `GET /api/incidents`, `POST /api/incidents/:id/resolve` |
 | support | `GET /api/support`, `POST /api/support/request`, `DELETE /api/support/access` |
-| chat | `GET /api/chat`, `GET/DELETE /api/chat/:id`, `POST /api/chat/turns` (a 202; the reply comes on the socket) |
+| chat | `GET /api/chat`, `GET/DELETE /api/chat/:id`, `POST /api/chat/turns` (a 202; the reply comes on the socket), `POST /api/chat/stop` (ends a batch of drafted tests after the one in flight) |
 | the app | `GET /` redirects to `/app/`; `/app` serves `GC_WEB_DIR` or the 503; `/hero` serves images; `/vendor/mermaid.min.js` |
 | sites | `GET /api/hero`, `GET /api/sites/icon` (the one outbound fetch this process makes, `icons.js`, with every guard that implies) |
 
@@ -507,7 +507,9 @@ nothing else (`heal.js`). Three modes, decided per run and handed to `ops.js` as
 
 The process reads `GC_HEAL` strictly at boot; each organisation opts into `ai` separately in
 `.ghostclick/<org>/heal.json` (owner or admin, `PUT /api/settings/heal`), and `runner.heal` can
-switch the whole thing off. Budgets: model calls per run (`GC_HEAL_AI_MAX_CALLS`) and per day.
+switch the whole thing off. The same file holds a second, independent flag, `plan`: may a model
+read the organisation's pages to draft tests for them (§10); both are off by default and the UI
+shows them as two switches under Settings. Budgets: model calls per run (`GC_HEAL_AI_MAX_CALLS`) and per day.
 
 What a run fixed goes out as `step.heal` and `step.trace` and is kept with the run. Four kinds
 (`fixes.js SAVED_KINDS`: `same_field`, `used_element`, `opened_menu`, `moved`) are about the
@@ -663,7 +665,7 @@ number in a reply comes from a tool result.
 | `monitoring` | `monitor.js` status and incidents |
 | `runner_state` | the driver, what is open, who holds the lock |
 | `run_case`, `run_suite`, `run_page_check` | the executor, through the same functions the routes call |
-| `scan_page`, `quickstart` | **propose only**: they drive the browser and change what the organisation keeps, so they answer with a proposal and stop |
+| `scan_page`, `plan_page_tests`, `quickstart` | **propose only**: they drive the browser and change what the organisation keeps, so they answer with a proposal and stop; `plan_page_tests` exists only for an organisation that has allowed it (below) |
 
 Three rules run through every tool: facts (ids, counts, times, pass and fail) are stated plainly
 while names, titles, flows and failure sentences from sites under test ride inside a marked
@@ -671,6 +673,30 @@ untrusted block; everything site-derived goes through the organisation's redacto
 throws, and every refusal the runner can make (the plan, another organisation driving, a switch,
 an origin nobody allowed) comes back as a `refused` result the mind has to explain rather than
 retry around.
+
+**Drafted tests** (`chat-plan.js`). "Test the contact page" on a page with no saved case, or
+"draft tests for it", is the third proposing tool, `plan_page_tests`; an organisation has it only
+while `runner.onboarding` is on and, with Claude as the mind, its `plan` consent is (the second
+flag in §8's `heal.json`). On the yes `readPageOf` (server.js) opens the page under the driver
+lock and reads its targets and links, and a closed JSON schema is built from that read — the
+step's `target` an enum of the names `discover()` found, its `path` an enum of the page's links —
+so a model never authors a locator. Claude (`chat-resolver.js draft`, one frozen cached system
+block, the page's words fenced as untrusted, the per-page enums in the output format) or, without
+the consent or a key, the rules (`draftByRules`: the page's expectations, the form's fields
+present, a link followed to a page that answers) give up to four candidates; each is mapped into
+the case language, rendered with `toFlow`, validated as a saved case is and required to be a
+fixed point of parse and show. They come back as a second proposal carrying `items`, and the
+confirm carries `choices`. `runDraftsOf` runs the ticked ones through the ordinary executor as
+drafts — `draft: true` on the history row: out of the summary, never folded into a defect, counted
+against `runs.per_day` — under `suite.start`/`suite.end`, in a loop bounded by two attempts a
+candidate, eight model calls and three minutes, reading `POST /api/chat/stop` between attempts.
+A failure is classified from the runner's own error text and a fresh read of the page
+(`classify`): a target that appeared late or moved gets a mechanical repair (a wait, a retarget)
+and one re-run; a check that failed after every action passed is `app_bug` and never revised; a
+model revision may add steps or retarget an action and never drop or weaken an assertion
+(`checkRevision`); the rest is `needs_a_person`. Every attempt re-emits `chat.tool` under the
+same call id, the reply carries a card per candidate with its verdict, and nothing is saved until
+*Save as a case* files it with `source: generated`.
 
 A turn is accepted at once (`POST /api/chat/turns`, a 202) and answered on the organisation's
 sockets: `chat.turn`, `chat.delta`, `chat.tool`, `chat.proposal`, `chat.done`, `chat.error`. A
@@ -753,7 +779,7 @@ what it needs on a free port and drives it over the same HTTP and socket the UI 
 | Kind | Examples |
 |---|---|
 | end to end, on a runner of their own | `check` (rejections, discovery, the three demo runs), `check-suites`, `check-recording`, `check-teach`, `check-monitoring`, `check-chat`, `check-heal`, `check-fixes`, `check-sessions`, `check-support`, `check-console`, `check-defects`, `check-naming`, `check-pace`, `check-patience`, `check-redirects`, `check-longnames`, `check-turnstile`, `check-notes`, `check-fidelity`, `check-frames`, `check-toggles` |
-| offline, exactly what goes on the wire | `check-heal-request`, `check-monitoring-request`, `check-chat-request`, `check-monitoring-judge` (the engine with a scripted model) |
+| offline, exactly what goes on the wire | `check-heal-request`, `check-monitoring-request`, `check-chat-request`, `check-plan-request`, `check-monitoring-judge` (the engine with a scripted model), `check-plan` (the drafting core with a scripted resolver and planted runner errors) |
 | the process, from outside | `check-keys` (the one key, no Chromium carries it), `check-hardening` (switches, limits, headers), `check-startup`, `check-runner` (dropped commands, the run lock, surviving a throw), `check-freshness`, `check-history`, `check-tenancy` |
 | pure, or a browser for one parser | `check-vocabulary`, `check-icons`, `check-app`, `check-diagram` (generated mermaid through the real parser) |
 | the seams | `check-auth` (Python signs, Node verifies), `check-boundary` (the runner serves what it is pointed at), `check-shared` and `scripts/copies.js` (every copy of the language), `check-deploy` (digests pinned, CI in the same image), `check-pool` (the context pool on a real browser) |

@@ -73,8 +73,13 @@ export function forOrg(org) {
   const store = {
     org,
 
-    /** @param {{suite:string, suiteId?:string, caseId?:string, caseName?:string, url:string, ms:number, results:Array, steps?:Array}} run */
-    record({ suite, suiteId, caseId, caseName, url, ms, results, steps }) {
+    /**
+     * @param {{suite:string, suiteId?:string, caseId?:string, caseName?:string, url:string, ms:number, results:Array, steps?:Array, draft?:boolean}} run
+     *   `draft` is a case a model drafted and nobody has accepted (chat-plan.js):
+     *   kept, and counted by today() against the plan, but absent from every
+     *   total the dashboard shows and never folded into a defect (defects.js).
+     */
+    record({ suite, suiteId, caseId, caseName, url, ms, results, steps, draft = false }) {
       const failed = results.filter((r) => !r.ok);
       const fixes = results.flatMap((r) => r.fixes ?? []);
       const entry = {
@@ -107,6 +112,7 @@ export function forOrg(org) {
         // And what that step was doing, since the sentence does not always say
         // (defects.js reads it as part of a defect's identity).
         target: failed[0] ? doing(steps?.[failed[0].i])?.slice(0, 240) ?? null : null,
+        ...(draft ? { draft: true } : {}),
       };
       all.push(entry);
       if (all.length > CAP) all = all.slice(-CAP);
@@ -145,7 +151,9 @@ export function forOrg(org) {
      *   implementations that will disagree by next week.
      */
     summary(days = 14, suiteId = null) {
-      const runs = suiteId ? all.filter((r) => r.suiteId === suiteId) : all;
+      // A draft's attempts are a model trying a case out, not the project's
+      // record: they stay out of every number here (today() still counts them).
+      const runs = (suiteId ? all.filter((r) => r.suiteId === suiteId) : all).filter((r) => !r.draft);
       const now = Date.now();
       const since = now - (days - 1) * DAY_MS;
 

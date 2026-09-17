@@ -42,6 +42,7 @@ function refusalWords(r) {
     case 'switched_off': return `${r.switch} is turned off on this deployment`;
     case 'needs_origin': return `${r.origin} is not allowed yet — allow it under Origins & vault`;
     case 'busy': return 'a run is in progress';
+    case 'proposal_taken': return 'a proposal is already waiting — answer it first';
     default: return String(r?.error ?? 'it could not do that');
   }
 }
@@ -78,6 +79,11 @@ const DEFECT_NUMBER = /\b(def-?)?\d{4}-?\d{1,6}\b/;
 const TEST_VERB = /\b(test|run|check|try|verify)\b/;
 const TEST_SOMETHING = /^(can you |could you |please |would you )?(test|run|check|try|verify|re-?run)\b (.+?)( page| case| test| again)?[?.!]*$/;
 const PAGE_CHECK = /^run the (.+) page check/;
+/** "draft tests for the contact form page", "write 4 checks for pricing" — a page read and cases proposed (chat-plan.js). */
+const DRAFT_SOMETHING = /^(?:can you |could you |please |would you )?(?:draft|write|propose|generate|suggest|plan)\s+(?:(\d+)\s+|some\s+|a few\s+)?(?:test ?cases?|tests|checks|cases)(?:\s+(?:for|on|about))?\s+(.+?)(?:\s+page)?[?.!]*$/;
+
+/** The drafted checks, named with their size — what a person ticks. */
+const candidateList = (cs) => (cs ?? []).map((c) => `${c.name} (${c.steps} step${c.steps === 1 ? '' : 's'})`).join(', ');
 
 /**
  * In order, and the first one that answers wins. An intent that returns null
@@ -98,7 +104,37 @@ const INTENTS = [
       if (executed.ok === false) return { text: `${head}: failed ${r.passed ?? 0}/${r.total ?? 0}${r.error ? ` — stopped${where(r.target, r.step)}: ${r.error}` : ''}.` };
       return { text: `${head}: passed ${r.passed ?? 0}/${r.total ?? 0}.` };
     }
+    if (executed.kind === 'plan_page') {
+      const n = r.drafted ?? 0;
+      if (!n) return { text: `Read "${r.page}" (${r.targets ?? 0} targets, ${r.links ?? 0} links) but could not draft a check for it.` };
+      return { text: `Read "${r.page}" (${r.targets ?? 0} targets, ${r.links ?? 0} links) and drafted ${n} check${n === 1 ? '' : 's'} by the ${r.mind === 'claude' ? 'model' : 'rules'}: ${candidateList(r.candidates)}. Tick the ones to run — or say yes to run them all.` };
+    }
+    if (executed.kind === 'run_drafts') {
+      const head = `${r.passed ?? 0} of ${r.total ?? 0} drafted check${r.total === 1 ? '' : 's'} passed${r.stopped ? ' before it was stopped' : ''}.`;
+      return { text: lines(head, (r.outcomes ?? []).map((o) => o.line).filter(Boolean)) };
+    }
     return { text: 'Nothing is waiting for a yes.' };
+  },
+
+  // 1b · draft tests for the X page (a proposal — chat-plan.js). Before the intents that read "tests" and "cases" as questions about what is saved.
+  async ({ q, byName, T }) => {
+    const m = q.match(DRAFT_SOMETHING);
+    if (!m) return null;
+    const x = strip(m[2]);
+    if (!x) return null;
+    const count = m[1] ? Math.max(1, Math.min(4, Number(m[1]))) : null;
+    const r = await T('find', { query: x, kind: 'page', limit: 8 });
+    const page = r.unsafe.matches[0];
+    if (!page) return { text: `I could not find a page called "${x}" to draft tests for. Give me a URL and I can quickstart a suite for it.` };
+    if (!byName.plan_page_tests) {
+      return {
+        text: `Drafting tests is not offered here: the onboarding switch has to be on, and with a model as the chat's mind an owner has to allow it under Settings. I can run the page's expectations as a one-off check instead.`,
+        offers: [{ label: `Run the ${page.name} page check`, text: `run the ${page.name} page check` }],
+      };
+    }
+    await T('plan_page_tests', { suiteId: page.suiteId, pageId: page.id, focus: x, ...(count ? { count } : {}) });
+    const n = count ?? 3;
+    return { text: `Drafting tests for "${page.name}" opens the page, reads its controls and writes up to ${n} check${n === 1 ? '' : 's'} for you to tick and run. Say yes to go ahead.` };
   },
 
   // 2 · a defect by its number
@@ -210,7 +246,7 @@ const INTENTS = [
   },
 
   // 10 · test the X
-  async ({ q, T }) => {
+  async ({ q, byName, T }) => {
     if (PAGE_CHECK.test(q)) return null;          // that is the next intent's sentence
     const m = q.match(TEST_SOMETHING);
     if (!m) return null;
@@ -241,6 +277,12 @@ const INTENTS = [
     if (page) {
       const offers = [{ label: `Run the ${page.name} page check`, text: `run the ${page.name} page check` }];
       if (page.url) offers.push({ label: `Quickstart ${page.url}`, text: `quickstart ${page.url}` });
+      // Where drafting is offered (chat-plan.js), the page can be read and
+      // cases written for it: proposed, so a yes is what runs the read.
+      if (byName.plan_page_tests) {
+        await T('plan_page_tests', { suiteId: page.suiteId, pageId: page.id, focus: x });
+        return { text: `I could not find a saved case for "${x}". There is a page "${page.name}" in ${page.suite}: I can read it and draft tests for you to tick — say yes — or run its expectations as a one-off check.`, offers };
+      }
       return { text: `I could not find a saved case for "${x}". There is a page "${page.name}" in ${page.suite}: I can run its expectations as a one-off check, or you can record a case for it.`, offers };
     }
     return { text: `I could not find a saved case or a page called "${x}". Give me a URL and I can quickstart a suite for it.` };

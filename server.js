@@ -27,9 +27,9 @@ import { discover, links } from './targets.js';
 import { targetRefresher, watchDom } from './domwatch.js';
 import { parse } from './parse.js';
 import { parseFlow, flatten, toFlow } from './flow.js';
-import { readHealEnv, TRACE_MAX } from './heal.js';
+import { HARMFUL, readHealEnv, TRACE_MAX } from './heal.js';
 import { createResolver, findApiKey } from './resolver.js';
-import { StepNotes } from './understand.js';
+import { StepNotes, captureStep } from './understand.js';
 import { NoSuchFix, SAVED_KINDS, STATUSES as FIX_STATUSES, StaleFix, occurrenceOf, changesCase } from './fixes.js';
 import { LANGUAGE_VERSION } from './vocabulary.js';
 import { toMermaid } from './diagram.js';
@@ -43,6 +43,7 @@ import { createResolver as createMonitorResolver, createBudget, MODEL as MONITOR
 import { llmModeFrom, compactSnapshot, previewSpec } from './monitor-rules.js';
 import { redactWith } from './redact.js';
 import * as chat from './chat.js';
+import * as chatPlan from './chat-plan.js';
 import { createResolver as createChatResolver, chatModeFrom, MODEL as CHAT_MODEL } from './chat-resolver.js';
 import { redactSecrets } from './heal.js';
 
@@ -768,6 +769,7 @@ app.delete('/api/origins', switched('runner.origins'));
 app.post(['/api/fixes/:id/accept', '/api/fixes/:id/reject'], switched('runner.heal'));
 app.put('/api/settings/heal', switched('runner.heal'));
 app.post('/api/chat/turns', switched('runner.chat'));
+app.post('/api/chat/stop', switched('runner.chat'));
 
 /**
  * Step-up: is this token fresh enough for the one action that demands it?
@@ -1098,12 +1100,24 @@ const stateFor = (space, ent, switches) => {
 function healStateFor(space, claims, switches) {
   const on = switches.on('runner.heal');
   const mode = on ? HEAL_ENV.mode : 'off';
-  const enabled = space.healSetting.get().ai === true;
+  const setting = space.healSetting.get();
+  const enabled = setting.ai === true;
   const reason = HEAL_ENV.mode !== 'ai' ? 'deployment'
     : !on ? 'switch'
       : !AI.have ? 'key'
         : !enabled ? 'organisation' : null;
-  return { mode, ai: { enabled, available: mode === 'ai' && AI.have, reason }, canManage: tenancy.manages(claims) };
+  // Drafting tests from a page read (chat-plan.js) is its own consent, with
+  // its own gates: the chat's mind, the onboarding switch (a live read rewrites
+  // the page's targets), and the organisation's yes. The rules draft without
+  // any of them; a model drafts only with all of them.
+  const planOn = switches.on('runner.onboarding');
+  const planReason = CHAT.mode !== 'claude' ? 'key' : !planOn ? 'switch' : setting.plan !== true ? 'organisation' : null;
+  return {
+    mode,
+    ai: { enabled, available: mode === 'ai' && AI.have, reason },
+    plan: { enabled: setting.plan === true, available: CHAT.mode === 'claude' && planOn, reason: planReason },
+    canManage: tenancy.manages(claims),
+  };
 }
 
 /** The mode one run actually gets: ai only when nothing above is missing, and safe in its place. */
@@ -1319,6 +1333,128 @@ async function scanPageOf({ suite, pg, space }) {
   }
 }
 
+/**
+ * The page as a drafted test sees it (chat-plan.js): its controls and links,
+ * as a scan records them, and its accessibility snapshot (understand.js
+ * captureStep: typed values stripped, secrets redacted, capped) — under ONE
+ * lock, because a capture taken after scanPageOf returns describes a page
+ * another run may already have left. `navigate: false` reads the page a
+ * failed run left open, without moving it; nothing is stored then. `capture`
+ * is off when no model will read the page, so nothing is captured for nothing.
+ */
+async function readPageOf({ suite, pg, space, navigate = true, capture = true }) {
+  await take(space.org);
+  if (running) throw Object.assign(new Error('A run is in progress'), { status: 409 });
+
+  running = true;
+  try {
+    if (navigate) await OPS.goto(page, { url: pg.url }, { cursor, emit, nav, onNavigate: publishTargets, origins: space.origins });
+    const targets = await discover(page);
+    const linked = await links(page).catch(() => []);
+    const saved = navigate ? space.suites.updatePage(suite.id, pg.id, { targets, linked }) : null;
+    const snap = capture ? await captureStep(page, { secretValues: secretValuesOf(space) }) : null;
+    if (navigate) emit({ t: 'log', level: 'info', msg: `read ${pg.url} — ${targets.length} targets, ${linked.length} links` });
+    return { url: page.url(), targets, links: linked, capture: snap, page: saved };
+  } finally {
+    running = false;
+    armRelease();
+    await publishTargets();
+  }
+}
+
+/** Which mind drafts and revises for this organisation: the model only with a key, the chat set to it, and the organisation's consent. */
+const planMindFor = (space) => (CHAT.mode === 'claude' && chatResolver && space.healSetting.get().plan === true ? 'claude' : 'rules');
+const pagePathOf = (u) => { try { return new URL(u).pathname; } catch { return null; } };
+
+/**
+ * Candidates for a page (chat-plan.js): read it, draft them — the model when
+ * it may, the rules otherwise — and compile each through the gates. Nothing
+ * runs, nothing is saved; the candidates go back to the chat as a proposal.
+ */
+async function planPageOf({ suite, pg, focus = '', count = null, space, ent, switches }) {
+  switches?.demand?.('runner.onboarding');
+  const mind = planMindFor(space);
+  const read = await readPageOf({ suite, pg, space, navigate: true, capture: mind === 'claude' });
+  const values = secretValuesOf(space);
+  const menu = chatPlan.menuFrom(read, { redact: (s) => redactSecrets(s, values) });
+  menu.pagePath = pagePathOf(pg.url);
+  const checkFlow = checkFlowFor(space);
+  const wanted = Math.max(1, Math.min(chatPlan.MAX_CANDIDATES, Number(count) || chatPlan.DEFAULT_CANDIDATES));
+  let drafted = null;
+  let source = 'rules';
+  if (mind === 'claude') {
+    if (!chatBudget.take()) emit({ t: 'log', level: 'warn', msg: 'the day\'s AI budget is spent; the rules drafted the cases instead' });
+    else {
+      const { text } = chatPlan.composeDraft({ suiteName: suite.name, page: pg, read, menu, focus, count: wanted });
+      const answer = await chatResolver.draft({ text, menu });
+      if (answer) { drafted = chatPlan.candidatesFrom(answer, menu); source = 'claude'; }
+      else emit({ t: 'log', level: 'warn', msg: `the model did not draft (${chatResolver.unavailable ?? 'no answer'}); the rules drafted the cases instead` });
+    }
+  }
+  if (!drafted) drafted = chatPlan.draftByRules({ read, suite, page: pg, menu }, { harmful: HARMFUL, count: wanted });
+  const candidates = drafted.slice(0, wanted).map((c, i) => chatPlan.compile(c, { id: chatPlan.candidateId(i), menu, page: pg, suiteName: suite.name, checkFlow }));
+  for (const c of candidates) {
+    if (!c.ok) emit({ t: 'log', level: 'info', msg: `drafted "${c.name}" dropped: ${c.dropped}` });
+  }
+  return {
+    url: read.url, targets: read.targets.length, links: read.links.length, dropped: menu.dropped, mind: source,
+    consent: space.healSetting.get().plan === true, fingerprint: read.capture?.fingerprint ?? null, candidates,
+  };
+}
+
+/**
+ * Run the ticked drafts (chat-plan.js runPlanLoop). Every attempt is an
+ * ordinary run() marked a draft — kept in the history, counted against the
+ * plan, absent from every total and from the defect registry — and the
+ * batch rides suite.start/suite.end like a suite. A wrong case is revised
+ * once: mechanically from the runner's own words, or by the model when the
+ * organisation lets one read its pages. A case that no longer validates (the
+ * allowlist moved since it was drafted) is an outcome, not a throw.
+ */
+async function runDraftsOf({ suite, pg, cases, fingerprint = null, space, ent, switches, stopped = () => false, onProgress = () => {} }) {
+  switches?.demand?.('runner.runs');
+  if (!cases.length) throw new Error('No drafted checks to run');
+  ent.check('runs.per_day', space.history.today(), cases.length);
+  const checkFlow = checkFlowFor(space);
+  const values = secretValuesOf(space);
+  const redact = (s) => redactSecrets(s, values);
+  const menuOf = (read) => { const m = chatPlan.menuFrom(read, { redact }); m.pagePath = pagePathOf(pg.url); return m; };
+  const mind = planMindFor(space);
+  const ready = [];
+  for (const c of cases) {
+    try {
+      const plan = checkFlow(String(c.flow ?? ''));
+      ready.push({ id: c.id, name: c.name, why: c.why ?? '', steps: plan.steps, flow: String(c.flow), fingerprint });
+    } catch (err) {
+      ready.push({ id: c.id, name: c.name, flow: c.flow ?? null, invalid: err.message });
+    }
+  }
+  const label = `${suite.name} · drafts`;
+  emit({ t: 'suite.start', suite: label, cases: ready.length });
+  const r = await chatPlan.runPlanLoop({
+    cases: ready.filter((c) => !c.invalid),
+    run: async (steps, meta) => {
+      const plan = { suite: `${suite.name} · ${meta.name}`, steps };
+      emit({ t: 'diagram', kind: 'plan', mermaid: toMermaid(plan) });
+      return run(plan, { suiteId: suite.id, caseId: null, caseName: meta.attempt > 1 ? `${meta.name} (attempt ${meta.attempt})` : meta.name, draft: true, attempt: meta.attempt, space, ent, switches })
+        .catch((err) => ({ ok: false, passed: 0, total: 0, error: err.message }));
+    },
+    read: () => readPageOf({ suite, pg, space, navigate: false, capture: true }),
+    revise: mind === 'claude' ? async ({ text, menu }) => (chatBudget.take() ? chatResolver.revise({ text, menu }) : null) : null,
+    compile: (c, menu) => chatPlan.compile(c, { id: c.id ?? 'dc', menu, page: pg, suiteName: suite.name, checkFlow }),
+    menuOf,
+    composeRevise: (x) => chatPlan.composeRevise({ suiteName: suite.name, page: pg, ...x }),
+    stopped,
+    onProgress,
+  });
+  for (const c of ready.filter((x) => x.invalid)) {
+    r.outcomes.push({ id: c.id, name: c.name, ok: false, verdict: 'needs_a_person', hint: `no longer valid: ${c.invalid}`, attempts: [], revised: false, revision: null, cite: null, flow: c.flow, steps: null });
+  }
+  r.total = r.outcomes.length;
+  emit({ t: 'suite.end', suite: label, passed: r.passed, total: r.total });
+  return r;
+}
+
 app.post('/api/suites/:id/cases', (req, res) => {
   try { sendOk(res, { case: req.space.suites.addCase(req.params.id, req.body ?? {}, checkFlowFor(req.space)) }); }
   catch (err) { fail(res, err); }
@@ -1381,7 +1517,11 @@ app.get('/api/settings/heal', (req, res) => res.json(healStateFor(req.space, req
 app.put('/api/settings/heal', (req, res) => {
   try {
     tenancy.requireManager(req.user);
-    req.space.healSetting.set({ ai: req.body?.ai });
+    const patch = {
+      ...(typeof req.body?.ai === 'boolean' ? { ai: req.body.ai } : {}),
+      ...(typeof req.body?.plan === 'boolean' ? { plan: req.body.plan } : {}),
+    };
+    req.space.healSetting.set(patch);
     res.json(healStateFor(req.space, req.user, req.switches));
   } catch (err) { fail(res, err); }
 });
@@ -1742,6 +1882,14 @@ app.post('/api/chat/turns', (req, res) => {
     const turn = chat.turn({ ...(req.body ?? {}), space: req.space, ent: req.ent, switches: req.switches, by: req.user?.sub ?? LOCAL });
     res.status(202).json({ ok: true, conversationId: turn.conversationId, turnId: turn.id });
   } catch (err) { fail(res, err); }
+});
+/**
+ * Stop the reply being written: a run of drafted cases ends after the
+ * attempt in flight (chat.js stop). A run cannot be broken off mid-step, so
+ * this is "no more", never "now" — and the reply says how far it got.
+ */
+app.post('/api/chat/stop', (req, res) => {
+  try { sendOk(res, { stopping: chat.stop(req.space) }); } catch (err) { fail(res, err); }
 });
 /**
  * Redirect shapes worth testing, for the bundled demo.
@@ -2565,6 +2713,13 @@ chat.configure({
     runPlan: run,
     scanPage: scanPageOf,
     quickstart: quickstartOf,
+    // Drafted tests (chat-plan.js). `plans` says whether the tool exists for
+    // an organisation at all: the onboarding switch, and — with a model as
+    // the mind — its consent to a model reading its pages.
+    readPage: readPageOf,
+    planPage: planPageOf,
+    runDrafts: runDraftsOf,
+    plans: (space, switches) => ((switches ? switches.on('runner.onboarding') : true) && (CHAT.mode !== 'claude' || space.healSetting.get().plan === true) ? { mind: planMindFor(space) } : null),
   },
 });
 
@@ -2597,7 +2752,10 @@ const vaultFor = (space, ent) => ({
  *   the history records it as such rather than inventing a home for it.
  *   `space` and `ent` are the calling organisation's workspace and plan;
  *   absent, the laptop's.
- * @returns {{ok:boolean, passed:number, total:number, error:string|null}}
+ * @param meta.draft a drafted case nobody has accepted yet (chat-plan.js): the
+ *   run is kept in the history and counts against the plan, but files no defect
+ *   and moves no total. `attempt` numbers a re-run of the same draft.
+ * @returns {{ok:boolean, passed:number, total:number, error:string|null, errorFull:string|null, why:object|null}}
  */
 async function run(plan, meta = {}) {
   const space = meta.space ?? local;
@@ -2648,7 +2806,8 @@ async function run(plan, meta = {}) {
     origins: space.origins, vault: vaultFor(space, ent),
     heal,
   };
-  emit({ t: 'run.start', total: plan.steps.length, suite: plan.suite, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName });
+  const attempt = Number(meta.attempt) > 1 ? { attempt: Number(meta.attempt) } : {};
+  emit({ t: 'run.start', total: plan.steps.length, suite: plan.suite, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName, ...attempt });
 
   // Everything from here to the finally must be able to throw without wedging
   // the executor. It used to clear the lock on the happy path only, so a
@@ -2704,6 +2863,7 @@ async function run(plan, meta = {}) {
       ms: results.reduce((a, r) => a + (r.ms ?? 0), 0),
       results,
       steps: plan.steps,
+      draft: meta.draft === true,
     });
     space.history.prune(ent.limit('history.retention_days'));
     // What this run filed, closed or reopened (defects.js), said in the log as
@@ -2729,8 +2889,13 @@ async function run(plan, meta = {}) {
     }
     await publishTargets();
     // The failing step and what it was doing, so a caller can say "stopped at
-    // click 'Login'" without reading the history back (the chat does).
-    return { ok, passed, total: results.length, error: entry.error, fixed: entry.fixed, defect, step: entry.step, target: entry.target };
+    // click 'Login'" without reading the history back (the chat does). The
+    // history keeps the error's first line; `errorFull` is the whole of it —
+    // the lines that name a replacement target or a late arrival (ops.js
+    // explainMissing) are what a drafted case's revision reads — and `why` is
+    // the model's verdict when one was asked (chat-plan.js).
+    const failed = results.find((r) => !r.ok) ?? null;
+    return { ok, passed, total: results.length, error: entry.error, errorFull: failed?.error ?? null, why: failed?.why ?? null, fixed: entry.fixed, defect, step: entry.step, target: entry.target };
   } finally {
     // Clear the lock BEFORE announcing the end. run.end means "you may start
     // another run"; emitting it while still locked makes a caller that runs
@@ -2740,7 +2905,7 @@ async function run(plan, meta = {}) {
     driver.touch(space.org);
     armRelease();
     emit({ t: 'run.end', ok: results.every((r) => r.ok) && results.length > 0, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName,
-      fixed: results.reduce((n, r) => n + (r.fixes?.length ?? 0), 0) });
+      fixed: results.reduce((n, r) => n + (r.fixes?.length ?? 0), 0), ...(Number(meta.attempt) > 1 ? { attempt: Number(meta.attempt) } : {}) });
   }
 }
 
