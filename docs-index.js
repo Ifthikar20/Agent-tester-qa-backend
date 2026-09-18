@@ -87,6 +87,9 @@ const FENCE = /^\s*(```|~~~)\s*(\w+)?/;
  * @returns {Array<{id:string, file:string, heading:string, path:string[], level:number, text:string}>}
  */
 export function chunk(markdown, file) {
+  // An HTML comment is a note to whoever edits the file, not to a reader —
+  // and a quoted section should never carry one into a reply.
+  markdown = String(markdown ?? '').replace(/<!--[\s\S]*?-->/g, '');
   const out = [];
   const stack = [];          // [level, heading] of the sections above this one
   let heading = null;

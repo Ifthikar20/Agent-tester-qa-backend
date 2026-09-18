@@ -415,7 +415,20 @@ function sourcesOf(calls) {
  * the drawing are the tool's, so a person can check one against the other.
  */
 const VIEWS_KEPT = 3;
-const viewsOf = (calls) => calls.filter((c) => c.view).slice(0, VIEWS_KEPT).map((c) => c.view);
+/** A view larger than this is not kept: the transcript is read and written whole, and a view is a drawing, not a store. */
+const VIEW_MAX_BYTES = 16_000;
+export function viewsOf(calls) {
+  const out = [];
+  for (const c of calls) {
+    if (!c.view || typeof c.view !== 'object') continue;
+    let size;
+    try { size = JSON.stringify(c.view).length; } catch { continue; }
+    if (size > VIEW_MAX_BYTES) continue;
+    out.push(c.view);
+    if (out.length >= VIEWS_KEPT) break;
+  }
+  return out;
+}
 
 /** The executed proposal as the transcript keeps it: bounded, because its result may carry drafted scripts. */
 const publicExecuted = (e) => (e ? { id: e.id, kind: e.kind, label: e.label, ok: e.ok ?? null, refused: e.refused ?? null, result: e.result == null ? null : capped(e.result) } : null);

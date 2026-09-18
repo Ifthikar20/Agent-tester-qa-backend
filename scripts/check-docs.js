@@ -80,6 +80,12 @@ ${'Another paragraph of the same size here. '.repeat(20).trim()}
     assert.ok(s[1].text.includes('npm start'));
     assert.equal((s[1].text.match(/^```/gm) ?? []).length, 2);
   });
+  await check('an HTML comment is not content', () => {
+    const t = chunk('## Notes\n<!-- for the editor: do not say this -->\nWhat a reader sees.\n<!-- multi\nline -->\n', 'a.md');
+    assert.equal(t.length, 1);
+    assert.ok(!t[0].text.includes('editor'));
+    assert.ok(t[0].text.includes('What a reader sees.'));
+  });
   await check('a mermaid diagram is dropped, the words around it stay', () => {
     assert.ok(!s[3].text.includes('graph TD'));
     assert.ok(s[3].text.includes('A diagram lives above this line.'));

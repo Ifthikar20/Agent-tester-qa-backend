@@ -36,6 +36,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { answerMock, unavailableNote } from '../chat-mock.js';
 import * as chat from '../chat.js';
+import { viewsOf } from '../chat.js';
 import { buildIndex, chunk, search } from '../docs-index.js';
 import {
   MODEL, MAX_TOKENS, FALLBACK_BETA, SYSTEM_PROMPT, chatModeFrom, createBudget, createResolver, findApiKey, requestFor,
@@ -401,6 +402,12 @@ console.log('\n— 2 · the mock mind ——————————————
     const off = makeTools({ space, ent, switches: { demand: (key) => { throw new SwitchedOff(key); } }, org: ORG, actions, redact, propose, now });
     await off.byName.run_case.run({ suiteId: suite.id, caseId: c1.id });
     assert.equal(off.calls[0].view, undefined);
+  });
+  await check('a reply keeps three views at most, and never one too large to draw', () => {
+    const small = { kind: 'suites', rows: [] };
+    const huge = { kind: 'runs', latest: Array.from({ length: 400 }, () => ({ error: 'x'.repeat(200) })) };
+    assert.deepEqual(viewsOf([{ view: small }, { view: huge }, { view: small }, { view: small }, { view: small }]), [small, small, small]);
+    assert.deepEqual(viewsOf([{ view: null }, { view: 'text' }, {}]), []);
   });
   await check('no defect store, no defect tools — and the rules say so', async () => {
     const bare = makeTools({ space, ent, switches: null, org: ORG, actions: { ...actions, defects: () => null }, redact, propose, now });
