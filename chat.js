@@ -391,6 +391,23 @@ function runsOf(calls, executed) {
   return out;
 }
 
+/** Where a reply was read from: the documentation sections its tool calls cited, each once, at most six. */
+const SOURCES_KEPT = 6;
+function sourcesOf(calls) {
+  const out = [];
+  const seen = new Set();
+  for (const c of calls) {
+    for (const s of Array.isArray(c.sources) ? c.sources : []) {
+      const key = `${s.file}#${s.heading}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ file: String(s.file).slice(0, 80), heading: String(s.heading).slice(0, 120) });
+      if (out.length >= SOURCES_KEPT) return out;
+    }
+  }
+  return out;
+}
+
 /** The executed proposal as the transcript keeps it: bounded, because its result may carry drafted scripts. */
 const publicExecuted = (e) => (e ? { id: e.id, kind: e.kind, label: e.label, ok: e.ok ?? null, refused: e.refused ?? null, result: e.result == null ? null : capped(e.result) } : null);
 
@@ -610,6 +627,7 @@ async function work(t, { store, space, ent, switches }) {
     model,
     tools: calls.slice(0, TOOLS_KEPT).map(publicCall),
     runs: runsOf(calls, executed).slice(0, RUNS_KEPT),
+    sources: sourcesOf(calls),
     offers,
     proposal: publicProposal(proposed()),
     executed: publicExecuted(executed),

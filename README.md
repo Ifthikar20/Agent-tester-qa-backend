@@ -1092,6 +1092,19 @@ draft becomes a case only by *Save as a case* (`source: generated`), and
 verdict ladder, the guards — `npm run check:plan-request` pins both requests,
 and `check:chat` drives it end to end against `public/contact.html`.
 
+Questions about ghostclick itself — how to record a test, what a switch or a
+setting does, why the runner refused an origin, how to deploy — are answered
+from this documentation. At boot the runner cuts its own markdown (this
+README, SETUP.md and docs/) into sections (`docs-index.js`, about three
+hundred of them) and ranks them for a question with BM25 over stemmed words,
+a heading's words counted three times: no embeddings, no second provider, no
+network, and the same question finds the same section on every runner. The
+`docs` tool hands the mind the best sections with the file and heading each
+came from; the reply says where it read, and keeps those sources on the
+message for the UI to show. The rules quote the best section outright. `npm
+run check:docs` pins the chunking, the ranking and thirty questions against
+this very corpus.
+
 A turn is `POST /api/chat/turns` (a 202) and is answered on the
 organisation's sockets — `chat.turn`, `chat.delta`, `chat.tool`,
 `chat.proposal`, `chat.done` — because a reply that runs a case takes as
@@ -2238,10 +2251,11 @@ silently inside someone else's docs.
 | `redact.js` | vault values out of text on its way out, for the console and the monitors alike |
 | `support.js` | help & support — a request from the top bar, and the per-organisation access switch it turns on |
 | `chat.js` | the chat — one transcript store and engine per organisation: a turn, the proposal it confirms, which mind answers, the reply kept |
-| `chat-tools.js` | the fifteen tools a mind drives, the keyword matcher, the untrusted block and the redaction on the way out |
+| `chat-tools.js` | the sixteen tools a mind drives, the keyword matcher, the untrusted block and the redaction on the way out |
 | `chat-mock.js` | the mock mind: intents as regular expressions over the same tools, for a runner with no key |
 | `chat-resolver.js` | Claude for the chat: the request, its frozen cached prompt, the tool runner, which mind is on; the draft and revise requests for drafted tests |
 | `chat-plan.js` | drafted tests: the closed schemas built from a page read, the mapper into the case language, the compile gates, the verdict ladder, the revision guards, the bounded run-and-revise loop, and the rules drafter |
+| `docs-index.js` | the documentation, searchable: this README, SETUP.md and docs/ cut into sections at boot and ranked for a question, for the chat's `docs` tool |
 | `vocabulary.js` | every verb, declared once: syntax, how it writes back, how it draws |
 | `flow.js` | the test case language: text ↔ IR, and `asFlowchart()` for a picture |
 | `ops.js` | what each verb does, origin allowlist, validation gate |
@@ -2306,6 +2320,7 @@ silently inside someone else's docs.
 | `scripts/check-chat.js` | the chat on a runner of its own: a count that equals /api/defects, a case run from a sentence, a proposal confirmed, the transcript kept, drafted tests read, ticked, run, fixed once and reported |
 | `scripts/check-plan.js` | drafted tests offline: a target outside the menu never validates, every draft is a fixed point of its text, the attempt bound, a late target gets one wait, a failing check never reaches the model, a revision may not drop an assertion |
 | `scripts/check-plan-request.js` | exactly what the draft and revise requests put on the wire: one cached system block identical across pages, closed schemas with the page's own enums, no vault value, the page's words fenced |
+| `scripts/check-docs.js` | the documentation index: sections from headings, a fence is not a heading, the ranking, and thirty questions that each find their section in this repository |
 | `public/contact.html` | Harbour's contact page, shaped to be drafted against: a link that shows late, a brochure nobody serves, a message that keeps 200 characters |
 | `public/site.html` | Harbour — the same links in header and footer, and a long page |
 

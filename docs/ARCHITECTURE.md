@@ -665,6 +665,7 @@ number in a reply comes from a tool result.
 | `monitoring` | `monitor.js` status and incidents |
 | `runner_state` | the driver, what is open, who holds the lock |
 | `run_case`, `run_suite`, `run_page_check` | the executor, through the same functions the routes call |
+| `docs` | the runner's own documentation, cut into sections at boot and ranked for the question (`docs-index.js`, BM25 over stemmed words, headings weighted) — the one tool about the product rather than the organisation; its sections are the reply's `sources` |
 | `scan_page`, `plan_page_tests`, `quickstart` | **propose only**: they drive the browser and change what the organisation keeps, so they answer with a proposal and stop; `plan_page_tests` exists only for an organisation that has allowed it (below) |
 
 Three rules run through every tool: facts (ids, counts, times, pass and fail) are stated plainly
@@ -779,7 +780,7 @@ what it needs on a free port and drives it over the same HTTP and socket the UI 
 | Kind | Examples |
 |---|---|
 | end to end, on a runner of their own | `check` (rejections, discovery, the three demo runs), `check-suites`, `check-recording`, `check-teach`, `check-monitoring`, `check-chat`, `check-heal`, `check-fixes`, `check-sessions`, `check-support`, `check-console`, `check-defects`, `check-naming`, `check-pace`, `check-patience`, `check-redirects`, `check-longnames`, `check-turnstile`, `check-notes`, `check-fidelity`, `check-frames`, `check-toggles` |
-| offline, exactly what goes on the wire | `check-heal-request`, `check-monitoring-request`, `check-chat-request`, `check-plan-request`, `check-monitoring-judge` (the engine with a scripted model), `check-plan` (the drafting core with a scripted resolver and planted runner errors) |
+| offline, exactly what goes on the wire | `check-heal-request`, `check-monitoring-request`, `check-chat-request`, `check-plan-request`, `check-monitoring-judge` (the engine with a scripted model), `check-plan` (the drafting core with a scripted resolver and planted runner errors), `check-docs` (the documentation index, and thirty questions against the repository's own markdown) |
 | the process, from outside | `check-keys` (the one key, no Chromium carries it), `check-hardening` (switches, limits, headers), `check-startup`, `check-runner` (dropped commands, the run lock, surviving a throw), `check-freshness`, `check-history`, `check-tenancy` |
 | pure, or a browser for one parser | `check-vocabulary`, `check-icons`, `check-app`, `check-diagram` (generated mermaid through the real parser) |
 | the seams | `check-auth` (Python signs, Node verifies), `check-boundary` (the runner serves what it is pointed at), `check-shared` and `scripts/copies.js` (every copy of the language), `check-deploy` (digests pinned, CI in the same image), `check-pool` (the context pool on a real browser) |

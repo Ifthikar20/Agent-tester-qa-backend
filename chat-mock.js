@@ -24,6 +24,7 @@
  * "which one?" is answered by pressing rather than by typing it out again.
  */
 import { when } from './chat-tools.js';
+import { excerpt } from './docs-index.js';
 
 /** What the engine puts in front of an answer the model was meant to write. */
 export const unavailableNote = (reason) => `(The model was unavailable — ${reason}; answered by rules.)`;
@@ -324,6 +325,23 @@ const INTENTS = [
     const p = await T('quickstart', { url });
     if (p.error) return { text: p.error };
     return { text: `Quickstart would create a suite for ${url}, open it, record its targets and run the first check. Say yes to go ahead.` };
+  },
+
+  // 14 · a question about the product itself, answered from its own
+  // documentation — last, so every intent that reads the organisation's data
+  // goes first, and only where the runner offers the docs tool. The rules
+  // quote the best section outright and name it; a model would paraphrase.
+  async ({ q, byName, T }) => {
+    if (!byName?.docs) return null;
+    if (!/\?$|^(how|why|where|when|what|which|can|could|does|do|is|are|should|explain|tell me)\b/.test(q)) return null;
+    const r = await T('docs', { query: q, limit: 3 });
+    const [best, ...more] = r.facts.sections;
+    // Half the question's words, at least: one word in common is a coincidence, not an answer.
+    if (!best || best.matched < Math.max(1, Math.ceil(best.terms / 2))) return null;
+    const where = (s) => `${s.file} · ${s.heading}`;
+    const also = more.filter((s) => s.matched >= Math.max(1, Math.ceil(s.terms / 2))).map(where);
+    // A quote starts where the section starts, even when a later part of it matched.
+    return { text: `From ${where(best)}:\n\n${excerpt(best.lead ?? best.text, 900)}${also.length ? `\n\nSee also: ${also.join('; ')}.` : ''}` };
   },
 ];
 

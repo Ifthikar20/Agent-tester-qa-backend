@@ -44,6 +44,7 @@ import { llmModeFrom, compactSnapshot, previewSpec } from './monitor-rules.js';
 import { redactWith } from './redact.js';
 import * as chat from './chat.js';
 import * as chatPlan from './chat-plan.js';
+import * as docsIndex from './docs-index.js';
 import { createResolver as createChatResolver, chatModeFrom, MODEL as CHAT_MODEL } from './chat-resolver.js';
 import { redactSecrets } from './heal.js';
 
@@ -212,6 +213,15 @@ if (!Number.isInteger(CHAT_AI_PER_DAY) || CHAT_AI_PER_DAY < 0) {
   process.exit(1);
 }
 const chatResolver = CHAT.mode === 'claude' ? createChatResolver({ apiKey: CHAT_KEY.key }) : null;
+
+/**
+ * The documentation beside this file, cut into sections for the chat's `docs`
+ * tool (docs-index.js): read once here, never written. A checkout deployed
+ * without its markdown gets a chat that cannot answer questions about the
+ * product, and the banner says so. Read here, with the other boot-time reads, because
+ * the banner below names it before the chat is configured.
+ */
+const DOCS = docsIndex.load(fileURLToPath(new URL('./', import.meta.url)));
 const chatBudget = createBudget({ max: CHAT_AI_PER_DAY });
 
 /**
@@ -2086,6 +2096,7 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  monitoring  ->  ${MONITOR_LLM.mode === 'claude'
               ? `Claude (${MONITOR_MODEL}) compiles rules and judges incidents — key from ${MONITOR_KEY.source}, at most ${monitorBudget.max} calls a day (GC_MONITOR_AI_MAX_PER_DAY)`
               : `the mock compiler and judge${MONITOR_KEY.key ? ' (GC_MONITOR_LLM=mock)' : ' — set ANTHROPIC_API_KEY for Claude'}`}` +
+            `\n  docs        ->  ${DOCS.sections.length ? `${DOCS.sections.length} sections of ${DOCS.files.join(', ')}, for the chat` : 'no markdown beside server.js — the chat cannot answer questions about the product'}` +
             `\n  chat        ->  ${CHAT.mode === 'claude'
               ? `Claude (${CHAT_MODEL}) answers from the organisation's own stores and runs its saved cases — key from ${CHAT_KEY.source}, at most ${chatBudget.max} calls a day (GC_CHAT_AI_MAX_PER_DAY)`
               : `the mock mind — rules over the same tools${CHAT_KEY.key ? ' (GC_CHAT=mock)' : ' — set ANTHROPIC_API_KEY for Claude'}`}` +
@@ -2720,6 +2731,8 @@ chat.configure({
     planPage: planPageOf,
     runDrafts: runDraftsOf,
     plans: (space, switches) => ((switches ? switches.on('runner.onboarding') : true) && (CHAT.mode !== 'claude' || space.healSetting.get().plan === true) ? { mind: planMindFor(space) } : null),
+    // The documentation: a tool only where the checkout has any.
+    docs: () => (DOCS.sections.length ? DOCS : null),
   },
 });
 

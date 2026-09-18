@@ -334,7 +334,24 @@ section('10 · drafted tests: read, tick, run, revise once, report');
 }
 
 // ---------------------------------------------------------------------------
-section('11 · cleanup');
+section('11 · a question about the product, from its own documentation');
+{
+  // A conversation of its own: the transcript section above deleted the shared one.
+  const { r, reply } = await ask({ text: 'How do I record a test?' });
+  const m = reply?.message ?? {};
+  if (r.status === 202 && reply?.t === 'chat.done') ok('a question about the product is taken', short(m.text)); else bad('a question about the product is taken', `${r.status} ${JSON.stringify(reply)}`);
+  const used = (m.tools ?? []).map((c) => c.name);
+  if (used.includes('docs')) ok('and answered from the docs tool', used.join(', ')); else bad('and answered from the docs tool', used.join(', '));
+  if (/^From README\.md · .+:\n\n/.test(m.text ?? '')) ok('the rules quote the section and name it', short(m.text, 80)); else bad('the rules quote the section and name it', short(m.text));
+  if (Array.isArray(m.sources) && m.sources.length && m.sources[0].file === 'README.md') ok('the reply keeps where it was read', m.sources.map((s) => `${s.file} · ${s.heading}`).join('; ')); else bad('the reply keeps where it was read', JSON.stringify(m.sources));
+  const kept = await api('GET', `/api/chat/${r.json?.conversationId}`);
+  const last = kept.json?.conversation?.messages?.at(-1);
+  if (last?.sources?.length) ok('and the transcript keeps them too'); else bad('and the transcript keeps them too', JSON.stringify(last?.sources));
+  if (r.json?.conversationId) await api('DELETE', `/api/chat/${r.json.conversationId}`);
+}
+
+// ---------------------------------------------------------------------------
+section('12 · cleanup');
 {
   const r = await api('DELETE', `/api/suites/${suiteId}`);
   if (r.status === 200) ok('the suite is gone'); else bad('the suite is gone', `${r.status}`);

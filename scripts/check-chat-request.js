@@ -36,6 +36,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { answerMock, unavailableNote } from '../chat-mock.js';
 import * as chat from '../chat.js';
+import { buildIndex, chunk, search } from '../docs-index.js';
 import {
   MODEL, MAX_TOKENS, FALLBACK_BETA, SYSTEM_PROMPT, chatModeFrom, createBudget, createResolver, findApiKey, requestFor,
 } from '../chat-resolver.js';
@@ -174,7 +175,12 @@ const actions = {
   // Drafting is offered: the tool proposes here, and what a confirmed proposal
   // does is the server's (check-chat.js drives that end to end).
   plans: () => ({ mind: 'rules' }),
+  // The documentation, two sections of it (docs-index.js; check-docs.js has the rest).
+  docs: () => DOCS,
 };
+const DOC_SECTIONS = chunk('# ghostclick\n\n## Teach mode\n\nRecord a test by clicking through the page in the console.\n\n## Automatic fixes (GC_HEAL)\n\nGC_HEAL=safe applies four rule fixes to a broken step.\n', 'README.md');
+const DOC_INDEX = buildIndex(DOC_SECTIONS);
+const DOCS = { files: ['README.md'], sections: DOC_SECTIONS, search: (q, limit) => search(DOC_INDEX, q, { limit }) };
 
 const proposals = [];
 const propose = ({ kind, args, label }) => { const p = { id: `pr${proposals.length + 1}`, kind, args, label }; proposals.push(p); return p; };
@@ -364,6 +370,17 @@ console.log('\n— 2 · the mock mind ——————————————
     const off = makeTools({ space, ent, switches: { demand: (k) => { throw new SwitchedOff(k); } }, org: ORG, actions, redact, propose, now });
     const a = await answerMock({ text: 'test the contact us page', byName: off.byName, propose, now });
     assert.equal(a.text, 'The runner refused: runner.runs is turned off on this deployment');
+  });
+  await check('a question about the product is read from the docs, and the reply keeps where', async () => {
+    const k = kit();
+    const a = await answerMock({ text: 'How do I record a test?', byName: k.byName, propose, now });
+    assert.ok(a.text.startsWith('From README.md · Teach mode:\n\n'), a.text.slice(0, 60));
+    const c = k.calls.find((x) => x.name === 'docs');
+    assert.equal(c.label, 'looked up the docs for "how do i record a test?"');
+    assert.deepEqual(c.sources, [{ file: 'README.md', heading: 'Teach mode' }]);
+    const none = makeTools({ space, ent, switches: null, org: ORG, actions: { ...actions, docs: () => null }, redact, propose, now });
+    assert.equal(none.byName.docs, undefined);
+    assert.equal(none.tools.length, k.tools.length - 1);
   });
   await check('no defect store, no defect tools — and the rules say so', async () => {
     const bare = makeTools({ space, ent, switches: null, org: ORG, actions: { ...actions, defects: () => null }, redact, propose, now });

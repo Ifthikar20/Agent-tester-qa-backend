@@ -71,7 +71,7 @@ export function canonicalId(input) {
  */
 export const TOOL_NAMES = Object.freeze([
   'run_history', 'defects', 'defect', 'suites', 'suite', 'find', 'pages_scanned', 'monitoring', 'runner_state',
-  'run_case', 'run_suite', 'run_page_check', 'scan_page', 'plan_page_tests', 'quickstart',
+  'run_case', 'run_suite', 'run_page_check', 'scan_page', 'plan_page_tests', 'quickstart', 'docs',
 ]);
 
 // ---- ids ---------------------------------------------------------------------------------
@@ -328,6 +328,17 @@ const SPECS = Object.freeze({
       properties: { suiteId: { type: 'string', description: 'The suite id, from suites or find.' } },
     }),
   }),
+  docs: Object.freeze({
+    name: 'docs',
+    description: 'Search ghostclick\'s own documentation — how to record a test, what a setting, switch or plan does, why the runner refused an origin or a step, how to deploy, sign in or keep a secret — and get the best-matching sections with the file and heading each came from. For questions about the product itself, never for this organisation\'s data.',
+    inputSchema: Object.freeze({
+      type: 'object', additionalProperties: false, required: ['query'],
+      properties: {
+        query: { type: 'string', description: 'The question, or its key words.' },
+        limit: { type: 'integer', description: 'How many sections, at most 5.' },
+      },
+    }),
+  }),
   find: Object.freeze({
     name: 'find',
     description: 'Search this organisation\'s suites, pages and cases by name, path or flow text and get the best matches with a score from 0 to 1. Call this FIRST whenever the person names something in words rather than by id.',
@@ -459,6 +470,8 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
   // gates a live page read, and — with a model as the mind — the
   // organisation's consent to a model reading its pages (server.js plans).
   const plansOf = () => (typeof actions.plans === 'function' ? actions.plans(space, switches) : null);
+  // The documentation (docs-index.js) is offered where the checkout has any.
+  const docsOf = () => (typeof actions.docs === 'function' ? actions.docs(space) : null);
 
   // A page or a case, found or named as missing — every run tool starts here.
   const suiteOf = (suiteId) => {
@@ -602,6 +615,32 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
             cases: s.cases.map((c) => ({ id: c.id, name: clean(c.name, 80), flow: clean(c.flow, 600) })),
           },
         };
+      },
+    },
+
+    docs: {
+      label: (a) => `looked up the docs for "${String(a.query ?? '').slice(0, 60)}"`,
+      validate: (a) => {
+        const query = String(a.query ?? '').trim().slice(0, 200);
+        if (!query) throw new BadInput('docs needs a query — the question, or its key words');
+        return { query, limit: int(a.limit, 1, 5, 3) };
+      },
+      summary: ({ facts }) => (facts.sections.length
+        ? `${facts.sections.length} section${facts.sections.length === 1 ? '' : 's'}: ${facts.sections.map((s) => s.heading).join(', ')}`
+        : 'nothing in the docs matched'),
+      execute: ({ query, limit }) => {
+        const hits = docsOf().search(query, limit);
+        // The documentation is the runner's own words, not a site's: it goes
+        // to the model as facts it may read, each section with the file and
+        // heading it came from, and the same two land on the reply as its
+        // sources (chat.js) so a person can see where the answer was read.
+        const sections = hits.map((h) => ({
+          file: h.section.file, heading: h.section.heading, under: h.section.path.join(' › ') || null,
+          matched: h.matched, terms: h.terms, text: h.section.text,
+          // The section's opening, when the part that matched was a later one.
+          ...(h.lead ? { lead: h.lead.text } : {}),
+        }));
+        return { facts: { query, sections }, unsafe: null, sources: hits.map((h) => ({ file: h.section.file, heading: h.section.heading })) };
       },
     },
 
@@ -864,6 +903,7 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
     if (result.runs) record.runs = result.runs;
     if (refused) record.refused = refused;
     if (result.proposal) record.proposal = result.proposal;
+    if (result.sources) record.sources = result.sources;
     calls.push(record);
     onCall({ id, name, label, state: refused ? 'error' : 'done', summary });
     return result;
@@ -873,7 +913,7 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
     // A runner with no defect store has no defect tools rather than two that
     // answer "not here": the list of names is the product's, the tools are
     // this deployment's.
-    const adapter = name === 'defects' || name === 'defect' ? defectsOf() : name === 'plan_page_tests' ? plansOf() : true;
+    const adapter = name === 'defects' || name === 'defect' ? defectsOf() : name === 'plan_page_tests' ? plansOf() : name === 'docs' ? docsOf() : true;
     if (!adapter) continue;
     if (name === 'defect' && !adapter.byId) continue;
     const spec = SPECS[name];
