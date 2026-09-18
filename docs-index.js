@@ -166,7 +166,9 @@ export function buildIndex(sections) {
     for (const w of body) tf.set(w, (tf.get(w) ?? 0) + 1);
     for (const w of head) tf.set(w, (tf.get(w) ?? 0) + HEADING_WEIGHT);
     for (const w of name) tf.set(w, (tf.get(w) ?? 0) + 1);
-    return { section, tf, len: body.length + head.length * HEADING_WEIGHT + name.length };
+    // The words a section is ABOUT — its headings and its file — as a set, so
+    // a hit can say whether the question named the subject or just brushed the text.
+    return { section, tf, heads: new Set([...head, ...name]), len: body.length + head.length * HEADING_WEIGHT + name.length };
   });
   const df = new Map();
   for (const d of docs) for (const w of d.tf.keys()) df.set(w, (df.get(w) ?? 0) + 1);
@@ -180,7 +182,9 @@ export function buildIndex(sections) {
 /**
  * The sections that answer a question best, most likely first.
  * `score` is BM25; `matched` of `terms` says how much of the question the
- * section actually contains, which is the honest measure of a hit.
+ * section actually contains, which is the honest measure of a hit, and
+ * `headed` how many of those words are in its headings or file name — the
+ * section's subject rather than a word that happened to pass through it.
  */
 export function search(index, query, { limit = 4 } = {}) {
   const asked = [...new Set(words(query))];
@@ -192,15 +196,16 @@ export function search(index, query, { limit = 4 } = {}) {
   for (const d of index.docs) {
     let score = 0;
     let matched = 0;
+    let headed = 0;
     for (const { w, weight, own } of qs) {
       const f = d.tf.get(w);
       if (!f) continue;
-      if (own) matched++;
+      if (own) { matched++; if (d.heads.has(w)) headed++; }
       const n = index.df.get(w) ?? 0;
       const idf = Math.log(1 + (index.n - n + 0.5) / (n + 0.5));
       score += weight * idf * ((f * (K1 + 1)) / (f + K1 * (1 - B + (B * d.len) / index.avg)));
     }
-    if (score > 0) scored.push({ section: d.section, score: Math.round(score * 1000) / 1000, matched, terms: asked.length });
+    if (score > 0) scored.push({ section: d.section, score: Math.round(score * 1000) / 1000, matched, headed, terms: asked.length });
   }
   scored.sort((a, b) => b.score - a.score || a.section.id.localeCompare(b.section.id));
   // One entry per section: a long section was cut into parts, and its best

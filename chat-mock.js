@@ -207,7 +207,7 @@ const INTENTS = [
 
   // 7 · what the runner is doing
   async ({ q, T }) => {
-    if (!/what('s| is) open|which page|driving|runner (state|status)|busy/.test(q)) return null;
+    if (!/what('s| is) open|which page|driving|runner (state|status|doing)|is the runner|busy/.test(q)) return null;
     const r = await T('runner_state', {});
     const f = r.facts ?? {};
     const d = f.driving ?? {};
@@ -236,7 +236,7 @@ const INTENTS = [
     // page" is not a question about the cases in "page".
     if (TEST_SOMETHING.test(q)) return null;
     const m = q.match(/\b(?:cases?|tests?|scripts?)\b.*\b(?:for|on|about|of|in)\b (.+)/);
-    if (!m && !/(what|which) (test )?cases/.test(q)) return null;
+    if (!m && !/(what|which) (test )?cases|\b(list|show)\b.*\b(cases?|tests?)\b/.test(q)) return null;
     const x = m ? strip(m[1]) : null;
     let rows = null;
     if (x) {
@@ -336,10 +336,13 @@ const INTENTS = [
     if (!/\?$|^(how|why|where|when|what|which|can|could|does|do|is|are|should|explain|tell me)\b/.test(q)) return null;
     const r = await T('docs', { query: q, limit: 3 });
     const [best, ...more] = r.facts.sections;
-    // Half the question's words, at least: one word in common is a coincidence, not an answer.
-    if (!best || best.matched < Math.max(1, Math.ceil(best.terms / 2))) return null;
+    // Half the question's words, and two of them once there are two — one word
+    // in common, "blue" in a section on blue/green deploys, is a coincidence —
+    // unless the one word is the section's own subject, in its heading.
+    const enough = (s) => s.matched >= Math.max(Math.min(2, s.terms), Math.ceil(s.terms / 2)) || (s.matched >= 1 && s.headed >= 1);
+    if (!best || !enough(best)) return null;
     const where = (s) => `${s.file} · ${s.heading}`;
-    const also = more.filter((s) => s.matched >= Math.max(1, Math.ceil(s.terms / 2))).map(where);
+    const also = more.filter(enough).map(where);
     // A quote starts where the section starts, even when a later part of it matched.
     return { text: `From ${where(best)}:\n\n${excerpt(best.lead ?? best.text, 900)}${also.length ? `\n\nSee also: ${also.join('; ')}.` : ''}` };
   },

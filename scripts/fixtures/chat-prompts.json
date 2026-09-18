@@ -1,0 +1,545 @@
+{
+  "version": 1,
+  "about": "Every kind of question the chat answers, one scenario each, with what the runner must do for it: which agents it asks (tools), what the reply says (a regular expression over the rules' wording), what data rides on the reply, whether anything ran, and whether it proposed rather than acted. `also` lists other ways people put the same question; every phrasing is run. `then` is the follow-up in the same conversation — a yes carries the proposal's id, a no does not. `requires` skips a scenario on a runner that lacks the thing: defect_by_id (a registry that numbers defects), plans (drafting tests), no_plans (its absence).",
+  "placeholders": {
+    "{{base}}": "the runner's own origin, e.g. http://localhost:3413",
+    "{{defect}}": "the number of the defect the check files first, e.g. DEF-2609-001"
+  },
+  "seed": {
+    "suite": "Prompt catalogue",
+    "pages": [
+      {
+        "name": "Contact us",
+        "path": "/demo.html"
+      },
+      {
+        "name": "Pricing",
+        "path": "/site.html"
+      },
+      {
+        "name": "About",
+        "path": "/nav.html"
+      }
+    ],
+    "cases": [
+      {
+        "name": "Contact us loads",
+        "page": "Contact us",
+        "flow": "the page's own check"
+      },
+      {
+        "name": "Pricing loads",
+        "page": "Pricing",
+        "flow": "the page's own check"
+      },
+      {
+        "name": "Pricing footer",
+        "page": "Pricing",
+        "flow": "the page's own check"
+      },
+      {
+        "name": "Missing button",
+        "page": "Contact us",
+        "flow": "open the page, then click a button that is not there — so one defect exists"
+      }
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "defects.count",
+      "group": "defects",
+      "prompt": "How many defects do we have?",
+      "also": [
+        "What is broken?",
+        "Show me the open defects",
+        "Anything failing right now?"
+      ],
+      "expect": {
+        "tools": [
+          "defects"
+        ],
+        "reply": "open defect\\(s\\)|No defects have been filed",
+        "data": "defects",
+        "runs": 0,
+        "proposal": null
+      },
+      "notes": "Counts come from the defect registry on the deployed runner, from run history on the runner copy."
+    },
+    {
+      "id": "defects.by-number",
+      "group": "defects",
+      "requires": "defect_by_id",
+      "prompt": "What is {{defect}}?",
+      "also": [
+        "Tell me about defect {{defect}}",
+        "{{defect}}"
+      ],
+      "expect": {
+        "tools": [
+          "defect"
+        ],
+        "reply": "^DEF-\\d{4}-\\d{3,} · ",
+        "data": "defect",
+        "runs": 0
+      },
+      "notes": "A defect number in any spelling — DEF-2609-007, def2609007 — is read as one."
+    },
+    {
+      "id": "runs.latest",
+      "group": "runs",
+      "prompt": "What were the latest scans?",
+      "also": [
+        "What was the last run?",
+        "Show me the most recent runs",
+        "Latest test results?"
+      ],
+      "expect": {
+        "tools": [
+          "run_history",
+          "pages_scanned"
+        ],
+        "reply": "The latest run was|No runs have been recorded",
+        "data": "runs",
+        "runs": 0
+      }
+    },
+    {
+      "id": "runs.summary",
+      "group": "runs",
+      "prompt": "How many runs this week?",
+      "also": [
+        "What is the pass rate?",
+        "Give me a summary of the run history",
+        "How has it been going today?"
+      ],
+      "expect": {
+        "tools": [
+          "run_history"
+        ],
+        "reply": "runs in \\d+ days, \\d+ this week, pass rate",
+        "data": "runs",
+        "runs": 0
+      }
+    },
+    {
+      "id": "suites.list",
+      "group": "suites",
+      "prompt": "Which suites are set up?",
+      "also": [
+        "What projects do we have?",
+        "List the suites"
+      ],
+      "expect": {
+        "tools": [
+          "suites"
+        ],
+        "reply": "\\d+ suite\\(s\\): ",
+        "data": "suites",
+        "runs": 0
+      }
+    },
+    {
+      "id": "cases.all",
+      "group": "cases",
+      "prompt": "Which test cases are saved?",
+      "also": [
+        "What cases do we have?",
+        "List every saved test"
+      ],
+      "expect": {
+        "tools": [
+          "suites",
+          "suite"
+        ],
+        "reply": "\\d+ saved case\\(s\\):",
+        "data": "suite",
+        "runs": 0
+      }
+    },
+    {
+      "id": "cases.for-page",
+      "group": "cases",
+      "prompt": "Which cases are there for the Contact us page?",
+      "also": [
+        "What tests do we have on Contact us?",
+        "Cases about pricing"
+      ],
+      "expect": {
+        "tools": [
+          "find"
+        ],
+        "reply": "Contact us loads|Pricing loads",
+        "runs": 0
+      }
+    },
+    {
+      "id": "monitoring.status",
+      "group": "monitoring",
+      "prompt": "What is monitoring watching?",
+      "also": [
+        "Any incidents?",
+        "Which monitors do we have?"
+      ],
+      "expect": {
+        "tools": [
+          "monitoring"
+        ],
+        "reply": "monitor|incident",
+        "data": "monitoring",
+        "runs": 0
+      }
+    },
+    {
+      "id": "runner.state",
+      "group": "runner",
+      "prompt": "What is the runner doing?",
+      "also": [
+        "Is the runner busy?",
+        "Which page is open?",
+        "What is the runner status?"
+      ],
+      "expect": {
+        "tools": [
+          "runner_state"
+        ],
+        "reply": "runner|open|driving|nothing",
+        "runs": 0
+      }
+    },
+    {
+      "id": "run.case-by-page",
+      "group": "run",
+      "prompt": "Test the Contact us page",
+      "also": [
+        "Run the Contact us loads case",
+        "Check contact us",
+        "Verify the contact us page again"
+      ],
+      "expect": {
+        "tools": [
+          "find",
+          "run_case"
+        ],
+        "reply": "passed \\d+/\\d+|failed \\d+/\\d+",
+        "runs": 1,
+        "proposal": null
+      },
+      "notes": "A clear match runs at once: a saved case is a thing the organisation already chose to run."
+    },
+    {
+      "id": "run.ambiguous",
+      "group": "run",
+      "prompt": "Test the pricing page",
+      "also": [
+        "Run pricing"
+      ],
+      "expect": {
+        "tools": [
+          "find"
+        ],
+        "notTools": [
+          "run_case"
+        ],
+        "reply": "^Two cases match \"pricing\"",
+        "offers": "^Test ",
+        "runs": 0
+      },
+      "then": [
+        {
+          "prompt": "@offer:0",
+          "expect": {
+            "tools": [
+              "find",
+              "run_case"
+            ],
+            "reply": "passed \\d+/\\d+|failed \\d+/\\d+",
+            "runs": 1
+          }
+        }
+      ],
+      "notes": "Two close matches are a question, not a guess; the offers are the two cases, pressed rather than retyped."
+    },
+    {
+      "id": "run.page-without-case",
+      "group": "run",
+      "prompt": "Test the about page",
+      "expect": {
+        "tools": [
+          "find"
+        ],
+        "notTools": [
+          "run_case"
+        ],
+        "reply": "^I could not find a saved case for \"about\"\\. There is a page \"About\"",
+        "offers": "page check",
+        "runs": 0
+      },
+      "then": [
+        {
+          "prompt": "@offer:0",
+          "expect": {
+            "tools": [
+              "run_page_check"
+            ],
+            "reply": "one-off check, not saved as a case",
+            "runs": 1
+          }
+        }
+      ],
+      "notes": "A page with no case: the page's expectations can run once, unsaved; on the deployed runner drafting tests is offered too."
+    },
+    {
+      "id": "run.page-check",
+      "group": "run",
+      "prompt": "Run the Contact us page check",
+      "expect": {
+        "tools": [
+          "run_page_check"
+        ],
+        "reply": "one-off check, not saved as a case",
+        "runs": 1
+      }
+    },
+    {
+      "id": "run.unknown",
+      "group": "run",
+      "prompt": "Test the checkout page",
+      "also": [
+        "Run the payment flow"
+      ],
+      "expect": {
+        "tools": [
+          "find"
+        ],
+        "notTools": [
+          "run_case",
+          "run_page_check"
+        ],
+        "reply": "^I could not find a saved case or a page called",
+        "runs": 0
+      }
+    },
+    {
+      "id": "scan.propose-and-confirm",
+      "group": "proposals",
+      "prompt": "Scan the Contact us page",
+      "expect": {
+        "tools": [
+          "scan_page"
+        ],
+        "reply": "Say yes to go ahead",
+        "proposal": "scan_page",
+        "runs": 0
+      },
+      "then": [
+        {
+          "prompt": "Yes, do it",
+          "confirm": true,
+          "expect": {
+            "reply": "^Scanned \"Contact us\": \\d+ targets and \\d+ links\\.",
+            "executed": "scan_page",
+            "proposal": null
+          }
+        }
+      ],
+      "notes": "A scan drives the browser and rewrites the page's targets, so it is proposed and only a press runs it."
+    },
+    {
+      "id": "scan.propose-and-decline",
+      "group": "proposals",
+      "prompt": "Scan the Pricing page",
+      "expect": {
+        "tools": [
+          "scan_page"
+        ],
+        "proposal": "scan_page",
+        "runs": 0
+      },
+      "then": [
+        {
+          "prompt": "No, leave it",
+          "confirm": false,
+          "expect": {
+            "reply": "^Dropped",
+            "executed": null,
+            "proposal": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "quickstart.propose-and-confirm",
+      "group": "proposals",
+      "prompt": "Quickstart {{base}}/shop.html",
+      "also": [
+        "Onboard {{base}}/shop.html",
+        "Can you set up {{base}}/shop.html?"
+      ],
+      "expect": {
+        "tools": [
+          "quickstart"
+        ],
+        "reply": "^Quickstart would create a suite for",
+        "proposal": "quickstart",
+        "runs": 0
+      },
+      "then": [
+        {
+          "prompt": "Yes, do it",
+          "confirm": true,
+          "expect": {
+            "reply": "^Made the suite",
+            "executed": "quickstart",
+            "runs": 1
+          }
+        }
+      ],
+      "notes": "Makes a suite on the runner; the check deletes what it made."
+    },
+    {
+      "id": "quickstart.refused-origin",
+      "group": "refusals",
+      "prompt": "Quickstart https://not-allowed.example.com/",
+      "expect": {
+        "tools": [
+          "quickstart"
+        ],
+        "proposal": "quickstart"
+      },
+      "then": [
+        {
+          "prompt": "Yes, do it",
+          "confirm": true,
+          "expect": {
+            "reply": "refused|not allowed",
+            "runs": 0
+          }
+        }
+      ],
+      "notes": "Only a person can allow an origin (Origins & vault); the chat reports the refusal in the runner's words."
+    },
+    {
+      "id": "quickstart.no-url",
+      "group": "proposals",
+      "prompt": "Can you quickstart that for me?",
+      "expect": {
+        "reply": "^Give me a URL",
+        "proposal": null,
+        "runs": 0
+      }
+    },
+    {
+      "id": "yes.nothing-waiting",
+      "group": "proposals",
+      "prompt": "yes",
+      "also": [
+        "Go ahead",
+        "ok"
+      ],
+      "expect": {
+        "reply": "^Nothing is waiting for a yes",
+        "proposal": null,
+        "runs": 0
+      }
+    },
+    {
+      "id": "draft.propose",
+      "group": "drafting",
+      "requires": "plans",
+      "prompt": "Draft tests for the Contact us page",
+      "also": [
+        "Write 3 test cases for Contact us",
+        "Suggest some checks for the contact us page"
+      ],
+      "expect": {
+        "tools": [
+          "plan_page_tests"
+        ],
+        "reply": "^Drafting tests for \"Contact us\"",
+        "proposal": "plan_page",
+        "runs": 0
+      },
+      "then": [
+        {
+          "prompt": "Yes, do it",
+          "confirm": true,
+          "expect": {
+            "reply": "drafted \\d+ check",
+            "proposal": "run_drafts",
+            "items": 1
+          }
+        },
+        {
+          "prompt": "No, leave it",
+          "confirm": false,
+          "expect": {
+            "reply": "^Dropped",
+            "proposal": null
+          }
+        }
+      ],
+      "notes": "Reads the page and drafts up to four checks; nothing runs or is saved until the ticked ones are confirmed."
+    },
+    {
+      "id": "draft.not-offered",
+      "group": "drafting",
+      "requires": "no_plans",
+      "prompt": "Draft tests for the Contact us page",
+      "expect": {
+        "reply": "^Drafting tests is not offered here",
+        "proposal": null,
+        "runs": 0
+      }
+    },
+    {
+      "id": "docs.record",
+      "group": "docs",
+      "prompt": "How do I record a test?",
+      "also": [
+        "How does teach mode work?",
+        "Where do passwords and secrets go?"
+      ],
+      "expect": {
+        "tools": [
+          "docs"
+        ],
+        "reply": "^From [\\w./-]+\\.md · ",
+        "sources": true,
+        "runs": 0
+      },
+      "notes": "Answered from the runner's own documentation; the rules quote the section, Claude paraphrases and cites it."
+    },
+    {
+      "id": "docs.settings",
+      "group": "docs",
+      "prompt": "What does GC_HEAL do?",
+      "also": [
+        "How do I deploy to a server?",
+        "Why is www.example.com a different origin?"
+      ],
+      "expect": {
+        "tools": [
+          "docs"
+        ],
+        "reply": "^From [\\w./-]+\\.md · ",
+        "sources": true,
+        "runs": 0
+      }
+    },
+    {
+      "id": "fallback.unknown",
+      "group": "fallback",
+      "prompt": "hello there",
+      "also": [
+        "Why is the sky blue?",
+        "Sing me a song"
+      ],
+      "expect": {
+        "reply": "^I can answer about defects, runs, suites",
+        "runs": 0,
+        "proposal": null
+      },
+      "notes": "What the rules cannot place is answered with what they can do; Claude answers in its own words and says the same."
+    }
+  ]
+}

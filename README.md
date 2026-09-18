@@ -1113,6 +1113,17 @@ chat page draws them under the reply as tiles, tables and the dashboard's own
 chart. The words are the mind's; the numbers in the drawing are the tool's,
 so the two can be checked against each other.
 
+Every kind of question the chat answers is written down once, in
+`scripts/fixtures/chat-prompts.json`: a scenario per kind — defects, runs,
+suites, cases, monitoring, the runner, a test to run, a page to scan, a
+quickstart, drafted tests, the documentation, a yes with nothing waiting, a
+refusal, a question nothing answers — with other phrasings of it and what the
+runner must do: which agents it asks, what the reply says, what data rides on
+it, whether anything ran, whether it proposed instead, and the follow-up a
+yes or a no gets. `npm run check:chat-prompts` runs every phrasing on a
+conversation of its own against a runner of its own, so the catalogue stays
+true; it is also the list to try by hand.
+
 A turn is `POST /api/chat/turns` (a 202) and is answered on the
 organisation's sockets — `chat.turn`, `chat.delta`, `chat.tool`,
 `chat.proposal`, `chat.done` — because a reply that runs a case takes as
@@ -2326,6 +2337,8 @@ silently inside someone else's docs.
 | `scripts/check-support.js` | a support request lands, turns access on, is told to every socket, and turns off again |
 | `scripts/check-chat-request.js` | the matcher, the mock mind and, offline, exactly what the chat's resolver puts on the wire |
 | `scripts/check-chat.js` | the chat on a runner of its own: a count that equals /api/defects, a case run from a sentence, a proposal confirmed, the transcript kept, drafted tests read, ticked, run, fixed once and reported |
+| `scripts/check-chat-prompts.js` | the prompt catalogue, run: every kind of question and every phrasing of it, each on its own conversation, against a runner of its own |
+| `scripts/fixtures/chat-prompts.json` | every kind of question the chat answers, with what the runner must do for it — the catalogue to test with, by script or by hand |
 | `scripts/check-plan.js` | drafted tests offline: a target outside the menu never validates, every draft is a fixed point of its text, the attempt bound, a late target gets one wait, a failing check never reaches the model, a revision may not drop an assertion |
 | `scripts/check-plan-request.js` | exactly what the draft and revise requests put on the wire: one cached system block identical across pages, closed schemas with the page's own enums, no vault value, the page's words fenced |
 | `scripts/check-docs.js` | the documentation index: sections from headings, a fence is not a heading, the ranking, and thirty questions that each find their section in this repository |

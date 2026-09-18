@@ -658,7 +658,7 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
         // sources (chat.js) so a person can see where the answer was read.
         const sections = hits.map((h) => ({
           file: h.section.file, heading: h.section.heading, under: h.section.path.join(' › ') || null,
-          matched: h.matched, terms: h.terms, text: h.section.text,
+          matched: h.matched, headed: h.headed, terms: h.terms, text: h.section.text,
           // The section's opening, when the part that matched was a later one.
           ...(h.lead ? { lead: h.lead.text } : {}),
         }));

@@ -127,6 +127,8 @@ Nothing here mentions the word you are looking for twice.`;
     const hits = search(idx, 'cursor', { limit: 3 });
     assert.equal(hits[0].section.heading, 'Cursor handling');
     assert.equal(hits[1].section.heading, 'Vault');
+    assert.equal(hits[0].headed, 1, 'the heading names the subject');
+    assert.equal(hits[1].headed, 0, 'the body only mentions it');
   });
   await check('a synonym of the product\'s own joins at half weight and never counts as a match', () => {
     const hits = search(idx, 'password', { limit: 3 });
