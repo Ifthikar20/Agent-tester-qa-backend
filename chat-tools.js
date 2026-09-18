@@ -510,6 +510,10 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
   const TOOLS = {
     run_history: {
       label: () => 'read the run history',
+      view: ({ facts, unsafe }) => ({
+        kind: 'runs', days: facts.days, totals: facts.totals, suites: facts.suites.slice(0, 8),
+        latest: facts.latest.slice(0, 10).map((r, i) => ({ ...r, suite: unsafe.latest[i]?.suite ?? null, caseName: unsafe.latest[i]?.caseName ?? null, error: unsafe.latest[i]?.error ?? null })),
+      }),
       validate: (a) => ({
         days: int(a.days, 1, 30, 14),
         suiteId: a.suiteId == null ? null : (isSuiteId(a.suiteId) ? String(a.suiteId) : null),
@@ -534,6 +538,10 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
 
     defects: {
       label: () => 'read the defect list',
+      view: ({ facts, unsafe }) => ({
+        kind: 'defects', status: facts.status, totals: facts.totals,
+        rows: facts.rows.slice(0, 10).map((r, i) => ({ ...r, title: unsafe.rows[i]?.title ?? null })),
+      }),
       validate: (a) => ({
         status: STATUSES.includes(a.status) ? a.status : 'open',
         limit: int(a.limit, 1, 25, 10),
@@ -555,6 +563,11 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
 
     defect: {
       label: (a) => `read ${canonicalId(a.id) ?? 'a defect'}`,
+      view: ({ facts, unsafe }) => ({
+        kind: 'defect', ...facts, title: unsafe.title, target: unsafe.target,
+        caseNames: unsafe.cases.slice(0, 6), suiteNames: unsafe.suites.slice(0, 6),
+        runs: facts.runs.map((r, i) => ({ at: r.at, caseName: unsafe.runs[i]?.caseName ?? null, error: unsafe.runs[i]?.error ?? null })),
+      }),
       validate: (a) => {
         const id = canonicalId(a.id);
         if (!id) throw new BadInput(`"${a.id}" is not a defect number — they look like DEF-2609-007`);
@@ -582,6 +595,7 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
 
     suites: {
       label: () => 'listed the suites',
+      view: ({ facts, unsafe }) => ({ kind: 'suites', rows: facts.suites.slice(0, 12).map((s, i) => ({ ...s, name: unsafe.suites[i]?.name ?? s.id })) }),
       validate: () => ({}),
       summary: ({ facts }) => `${facts.suites.length} suite${facts.suites.length === 1 ? '' : 's'}`,
       execute: () => {
@@ -595,6 +609,14 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
 
     suite: {
       label: (a) => `opened "${nameIn(a.suiteId, null)}"`,
+      view: ({ facts, unsafe }) => {
+        const pageName = new Map(facts.pages.map((p, i) => [p.id, unsafe.pages[i]?.name ?? p.path]));
+        return {
+          kind: 'suite', id: facts.id, name: unsafe.name, origin: facts.origin, allowed: facts.allowed,
+          pages: facts.pages.slice(0, 12).map((p, i) => ({ ...p, name: unsafe.pages[i]?.name ?? p.path })),
+          cases: facts.cases.slice(0, 12).map((c, i) => ({ ...c, name: unsafe.cases[i]?.name ?? c.id, page: c.pageId ? pageName.get(c.pageId) ?? null : null })),
+        };
+      },
       validate: (a) => {
         if (!isSuiteId(a.suiteId)) throw new BadInput(`"${a.suiteId}" is not a suite id — take one from suites or find`);
         return { suiteId: String(a.suiteId) };
@@ -669,6 +691,7 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
 
     pages_scanned: {
       label: () => 'read what has been scanned',
+      view: ({ facts, unsafe }) => ({ kind: 'pages', rows: facts.pages.slice(0, 12).map((p, i) => ({ ...p, suite: unsafe.pages[i]?.suite ?? null, name: unsafe.pages[i]?.name ?? null, url: unsafe.pages[i]?.url ?? null })) }),
       validate: (a) => ({ limit: int(a.limit, 1, 20, 10) }),
       summary: ({ facts }) => `${facts.pages.length} page${facts.pages.length === 1 ? '' : 's'}`,
       execute: ({ limit }) => {
@@ -689,6 +712,11 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
 
     monitoring: {
       label: () => 'read the monitors',
+      view: ({ facts, unsafe }) => ({
+        kind: 'monitoring', counts: facts.counts,
+        monitors: facts.monitors.slice(0, 12).map((m, i) => ({ ...m, label: unsafe.monitors[i]?.label ?? null })),
+        incidents: facts.incidents.slice(0, 8).map((x, i) => ({ ...x, explanation: unsafe.incidents[i]?.explanation ?? null })),
+      }),
       validate: () => ({}),
       summary: ({ facts }) => `${facts.counts.monitors} monitors, ${facts.counts.open} open`,
       execute: () => {
@@ -904,6 +932,10 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
     if (refused) record.refused = refused;
     if (result.proposal) record.proposal = result.proposal;
     if (result.sources) record.sources = result.sources;
+    // What the tool read, shaped for the page to draw (chat.js `data`): rows and
+    // numbers only, names already cleaned, never a decision. A view that
+    // cannot be shaped is no view; the reply is still the reply.
+    if (!refused && t.view) { try { record.view = t.view(result); } catch { /* decoration */ } }
     calls.push(record);
     onCall({ id, name, label, state: refused ? 'error' : 'done', summary });
     return result;

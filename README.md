@@ -1105,6 +1105,14 @@ message for the UI to show. The rules quote the best section outright. `npm
 run check:docs` pins the chunking, the ranking and thirty questions against
 this very corpus.
 
+What a tool read is also drawn. A reply carries the data its tools returned —
+the defect rows, the runs per day, a suite's pages and cases, the pages
+scanned, the monitors — shaped by the tool that read it (`chat-tools.js`
+`view`, three views a reply at most, rows capped, names redacted), and the
+chat page draws them under the reply as tiles, tables and the dashboard's own
+chart. The words are the mind's; the numbers in the drawing are the tool's,
+so the two can be checked against each other.
+
 A turn is `POST /api/chat/turns` (a 202) and is answered on the
 organisation's sockets — `chat.turn`, `chat.delta`, `chat.tool`,
 `chat.proposal`, `chat.done` — because a reply that runs a case takes as

@@ -162,6 +162,9 @@ let conversationId = null;
   if (agrees) ok('the number is /api/defects’s', `open ${t.open}, all ${t.all}`); else bad('the number is /api/defects’s', `${JSON.stringify(t)} vs "${short(said)}"`);
   const used = reply.message.tools.map((c) => c.name);
   if (used.includes('defects')) ok('and came from the defects tool', used.join(', ')); else bad('and came from the defects tool', used.join(', '));
+  // What the tool read rides on the reply, shaped for the page to draw.
+  const view = (reply.message.data ?? [])[0];
+  if (view?.kind === 'defects' && view.totals?.all === t.all && Array.isArray(view.rows)) ok('and the reply carries the defects as data', `${view.rows.length} row(s), totals ${JSON.stringify(view.totals)}`); else bad('and the reply carries the defects as data', JSON.stringify(view));
 }
 
 // ---------------------------------------------------------------------------

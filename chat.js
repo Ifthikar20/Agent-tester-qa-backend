@@ -408,6 +408,15 @@ function sourcesOf(calls) {
   return out;
 }
 
+/**
+ * What a reply's tools read, shaped for the page to draw (chat-tools.js `view`):
+ * the defect rows, the runs per day, a suite's pages and cases — the first
+ * three, in the order they were read. The words are the mind's; the numbers in
+ * the drawing are the tool's, so a person can check one against the other.
+ */
+const VIEWS_KEPT = 3;
+const viewsOf = (calls) => calls.filter((c) => c.view).slice(0, VIEWS_KEPT).map((c) => c.view);
+
 /** The executed proposal as the transcript keeps it: bounded, because its result may carry drafted scripts. */
 const publicExecuted = (e) => (e ? { id: e.id, kind: e.kind, label: e.label, ok: e.ok ?? null, refused: e.refused ?? null, result: e.result == null ? null : capped(e.result) } : null);
 
@@ -628,6 +637,7 @@ async function work(t, { store, space, ent, switches }) {
     tools: calls.slice(0, TOOLS_KEPT).map(publicCall),
     runs: runsOf(calls, executed).slice(0, RUNS_KEPT),
     sources: sourcesOf(calls),
+    data: viewsOf(calls),
     offers,
     proposal: publicProposal(proposed()),
     executed: publicExecuted(executed),

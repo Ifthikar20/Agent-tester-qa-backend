@@ -673,7 +673,9 @@ while names, titles, flows and failure sentences from sites under test ride insi
 untrusted block; everything site-derived goes through the organisation's redactor; a tool never
 throws, and every refusal the runner can make (the plan, another organisation driving, a switch,
 an origin nobody allowed) comes back as a `refused` result the mind has to explain rather than
-retry around.
+retry around. A fourth: what a data tool read is also shaped as a `view` (rows and numbers, names
+redacted) and kept on the reply as `data`, so the page draws the defect rows, the runs per day or a
+suite's cases under the words — the numbers in the drawing are the tool's, not the mind's.
 
 **Drafted tests** (`chat-plan.js`). "Test the contact page" on a page with no saved case, or
 "draft tests for it", is the third proposing tool, `plan_page_tests`; an organisation has it only

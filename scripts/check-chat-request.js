@@ -382,6 +382,26 @@ console.log('\n— 2 · the mock mind ——————————————
     assert.equal(none.byName.docs, undefined);
     assert.equal(none.tools.length, k.tools.length - 1);
   });
+  await check('what a tool read is shaped for the page to draw, and a refusal is not', async () => {
+    const k = kit();
+    await k.byName.run_history.run({ days: 7 });
+    await k.byName.suites.run({});
+    await k.byName.suite.run({ suiteId: suite.id });
+    if (registry) await k.byName.defects.run({});
+    const views = k.calls.map((c) => c.view);
+    assert.equal(views[0].kind, 'runs');
+    assert.ok(Array.isArray(views[0].days) && views[0].totals && Array.isArray(views[0].latest));
+    assert.equal(views[1].kind, 'suites');
+    assert.equal(views[1].rows[0].name, 'Acme');
+    assert.equal(views[2].kind, 'suite');
+    assert.ok(views[2].cases.every((c) => typeof c.name === 'string' && typeof c.steps === 'number'));
+    assert.ok(views[2].cases.some((c) => c.page === 'Contact us'));
+    if (registry) { assert.equal(views[3].kind, 'defects'); assert.ok(views[3].totals && Array.isArray(views[3].rows)); }
+    for (const v of views) assert.ok(!JSON.stringify(v).includes('hunter2'), 'a vault value never reaches a view');
+    const off = makeTools({ space, ent, switches: { demand: (key) => { throw new SwitchedOff(key); } }, org: ORG, actions, redact, propose, now });
+    await off.byName.run_case.run({ suiteId: suite.id, caseId: c1.id });
+    assert.equal(off.calls[0].view, undefined);
+  });
   await check('no defect store, no defect tools — and the rules say so', async () => {
     const bare = makeTools({ space, ent, switches: null, org: ORG, actions: { ...actions, defects: () => null }, redact, propose, now });
     assert.equal(bare.byName.defects, undefined);
