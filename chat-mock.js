@@ -230,6 +230,10 @@ const INTENTS = [
 
   // 9 · which cases exist
   async ({ q, T }) => {
+    // A sentence that starts with a test verb asks for a run (intent 10), even
+    // when a page's name reads like the preposition below: "test the sign in
+    // page" is not a question about the cases in "page".
+    if (TEST_SOMETHING.test(q)) return null;
     const m = q.match(/\b(?:cases?|tests?|scripts?)\b.*\b(?:for|on|about|of|in)\b (.+)/);
     if (!m && !/(what|which) (test )?cases/.test(q)) return null;
     const x = m ? strip(m[1]) : null;
