@@ -36,6 +36,7 @@ import { toMermaid } from './diagram.js';
 import { Recorder } from './recorder.js';
 import { NavigationLog } from './navlog.js';
 import * as monitoring from './monitor.js';
+import * as schedules from './schedules.js';
 import { MonitorAgent } from './monitor-page.js';
 // Aliased: resolver.js (automatic fixes) exports the same two names, and each
 // layer keeps its own copy of the key lookup and its own client.
@@ -274,6 +275,8 @@ let notes = null;
 let recordRev = 0;
 let recordedSteps = [];   // the steps the revision was counted on, to tell a new one from the same steps again
 let running = false;
+/** What runs with nobody at the console (schedules.js), up once the browser is. */
+let scheduler = null;
 /**
  * The rest of the driven session, and why these are `let` rather than `const`.
  *
@@ -1568,7 +1571,7 @@ app.post('/api/suites/:id/run', async (req, res) => {
  * refused before case one, not discovered halfway. And the plan before the
  * lock: a run the plan refuses never takes the browser.
  */
-async function runCasesOf({ suite, wanted, pace = PACE, space, ent, switches }) {
+async function runCasesOf({ suite, wanted, pace = PACE, space, ent, switches, scheduled = false }) {
   if (!wanted.length) throw new Error('This suite has no cases to run');
   ent.check('runs.per_day', space.history.today(), wanted.length);
   await take(space.org);
@@ -1593,13 +1596,66 @@ async function runCasesOf({ suite, wanted, pace = PACE, space, ent, switches }) 
     // Express 4 does not catch a rejection from an async handler, so an
     // unexpected throw here would take the process with it rather than failing
     // one case. A suite run survives a bad case.
-    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name, pace, space, ent, switches })
+    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name, pace, space, ent, switches, scheduled })
       .catch((err) => ({ ok: false, passed: 0, total: 0, error: err.message }));
     outcomes.push({ case: c.id, name: c.name, ...r });
   }
   const passed = outcomes.filter((o) => o.ok).length;
   emit({ t: 'suite.end', suite: suite.name, passed, total: outcomes.length });
   return { suite: suite.id, passed, total: outcomes.length, outcomes };
+}
+
+/**
+ * What a schedule does when its time comes (schedules.js, Scheduler.fire):
+ * the run the Run suite button makes, or a sweep of every page this
+ * organisation has a monitor on — opened one after another so the monitors
+ * arm and measure, the way Check now opens one. Under the plan and the
+ * switches the schedule was saved with. A Deferred means the browser is
+ * held; the engine tries again next tick, and says so if the slot passes.
+ */
+async function fireSchedule(org, s) {
+  const space = tenancy.workspace(org);
+  const claims = s.claims ?? null;
+  if (claims && tenancy.stale(claims)) return { ok: false, error: 'the plan changed since this schedule was saved — save it again' };
+  const ent = tenancy.entitlements(claims);
+  const sw = switchesFor(claims);
+  try { sw.demand('runner.schedules'); } catch (err) { return { ok: false, error: err.message }; }
+  const held = () => running || (recorder?.recording ?? false);
+  if (held()) throw new schedules.Deferred('a run or a recording holds the browser');
+  const lock = async () => {
+    try { await take(org); }
+    catch (err) { if (err instanceof tenancy.RunnerBusy) throw new schedules.Deferred(err.message); throw err; }
+  };
+  if (s.kind === 'suite') {
+    const suite = space.suites.get(s.suiteId);
+    if (!suite.cases.length) return { ok: false, error: 'the suite has no cases to run' };
+    const origin = originOf(suite);
+    if (!space.origins.has(origin)) return { ok: false, error: `${origin} is not allowed — allow it under Origins & vault` };
+    await lock();
+    const r = await runCasesOf({ suite, wanted: suite.cases, space, ent, switches: sw, scheduled: true });
+    return { ok: r.passed === r.total, passed: r.passed, total: r.total };
+  }
+  const urls = [...new Set(space.monitors.list().filter((m) => m.state !== 'paused' && m.url).map((m) => m.url))];
+  if (!urls.length) return { ok: true, pages: 0, of: 0, note: 'nothing to sweep: no monitors' };
+  await lock();
+  let opened = 0;
+  const errors = [];
+  for (const url of urls) {
+    if (held()) { errors.push('stopped: the browser was taken'); break; }
+    let origin;
+    try { origin = new URL(url).origin; } catch { errors.push(`${url}: not an address`); continue; }
+    if (!space.origins.has(origin)) { errors.push(`${url}: ${origin} is not allowed`); continue; }
+    try {
+      await OPS.goto(page, { url }, { cursor, emit, nav, onNavigate: publishTargets, origins: space.origins });
+      opened++;
+    } catch (err) { errors.push(`${url}: ${String(err.message).split('\n')[0]}`); continue; }
+    // The document arms its monitors on load; each gets this long to be measured (monitor.js ARM_GRACE_MS).
+    await sleep(monitoring.ARM_GRACE_MS + 1500);
+    driver.touch(org);
+  }
+  emit({ t: 'log', level: 'info', msg: `swept ${opened} of ${urls.length} monitored page${urls.length === 1 ? '' : 's'}` });
+  const open = space.monitors.listIncidents('open').length;
+  return { ok: errors.length === 0, pages: opened, of: urls.length, openIncidents: open, ...(errors.length ? { error: errors.slice(0, 3).join('; ') } : {}) };
 }
 
 /**
@@ -1833,6 +1889,50 @@ app.post('/api/monitors/:id/resume', async (req, res) => {
   try { const engine = monitorsOf(req); const m = await engine.resume(req.params.id); sendOk(res, { monitor: engine.publicMonitor(m) }); }
   catch (err) { fail(res, err); }
 });
+// ---- schedules: suites run and monitored pages swept on a cadence (schedules.js) ------------
+app.get('/api/schedules', (req, res) => {
+  sendOk(res, { schedules: req.space.schedules.list(req.query.suite ? String(req.query.suite) : null) });
+});
+app.post('/api/schedules', switched('runner.schedules'));
+app.post('/api/schedules', (req, res) => {
+  const space = req.space;
+  const b = req.body ?? {};
+  try {
+    if (b.kind === 'suite') space.suites.get(String(b.suiteId ?? ''));   // this organisation's, or "no suite"
+    req.ent.check('schedules.max', space.schedules.list().length);
+    const schedule = space.schedules.create({ kind: b.kind, suiteId: b.suiteId, cron: b.cron, name: b.name, claims: req.user ?? null, by: req.user?.email ?? null });
+    scheduler?.watch(space.org);
+    emitTo(space.org, { t: 'schedules.changed' });
+    sendOk(res, { schedule });
+  } catch (err) { fail(res, err, err instanceof NoSuchSuite ? 404 : 400); }
+});
+app.patch('/api/schedules/:id', (req, res) => {
+  const b = req.body ?? {};
+  try {
+    const schedule = req.space.schedules.update(req.params.id, { cron: b.cron, enabled: b.enabled, name: b.name });
+    emitTo(req.space.org, { t: 'schedules.changed' });
+    sendOk(res, { schedule });
+  } catch (err) { fail(res, err, err instanceof schedules.NoSuchSchedule ? 404 : 400); }
+});
+app.delete('/api/schedules/:id', (req, res) => {
+  try {
+    const schedule = req.space.schedules.remove(req.params.id);
+    emitTo(req.space.org, { t: 'schedules.changed' });
+    sendOk(res, { schedule });
+  } catch (err) { fail(res, err, err instanceof schedules.NoSuchSchedule ? 404 : 400); }
+});
+app.post('/api/schedules/:id/run', switched('runner.schedules'));
+app.post('/api/schedules/:id/run', (req, res) => {
+  const space = req.space;
+  let s;
+  try { s = space.schedules.get(req.params.id); } catch (err) { return fail(res, err, 404); }
+  if (!scheduler) return fail(res, new Error('the scheduler is not up yet'), 503);
+  if (scheduler.firing || running || (recorder?.recording ?? false)) return fail(res, new Error('the runner is busy — try again when the run has ended'), 409);
+  // A fire may take minutes: answered now, reported on the socket (schedule.fired) when it ends.
+  scheduler.runNow(space.org, s.id).catch((err) => emitTo(space.org, { t: 'log', level: 'error', msg: `schedule "${s.name}": ${err.message}` }));
+  res.status(202).json({ ok: true, firing: true, id: s.id });
+});
+
 app.get('/api/incidents', (req, res) => {
   const status = ['open', 'resolved'].includes(req.query.status) ? req.query.status : null;
   try { res.json({ ok: true, incidents: monitorsOf(req).listIncidents(status, projectOf(req)) }); }
@@ -2820,7 +2920,7 @@ async function run(plan, meta = {}) {
     heal,
   };
   const attempt = Number(meta.attempt) > 1 ? { attempt: Number(meta.attempt) } : {};
-  emit({ t: 'run.start', total: plan.steps.length, suite: plan.suite, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName, ...attempt });
+  emit({ t: 'run.start', total: plan.steps.length, suite: plan.suite, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName, ...attempt, ...(meta.scheduled ? { scheduled: true } : {}) });
 
   // Everything from here to the finally must be able to throw without wedging
   // the executor. It used to clear the lock on the happy path only, so a
@@ -2877,6 +2977,7 @@ async function run(plan, meta = {}) {
       results,
       steps: plan.steps,
       draft: meta.draft === true,
+      scheduled: meta.scheduled === true,
     });
     space.history.prune(ent.limit('history.retention_days'));
     // What this run filed, closed or reopened (defects.js), said in the log as
@@ -3553,5 +3654,9 @@ process.on('unhandledRejection', (err) => {
   try { emit({ t: 'log', level: 'error', msg: `internal error: ${err?.message ?? err}` }); } catch {}
 });
 
-process.on('SIGINT', async () => { monitoring.flushAll(); await browser.close(); process.exit(0); });
-process.on('SIGTERM', async () => { monitoring.flushAll(); await browser.close(); process.exit(0); });
+// ---- schedules: what runs with nobody at the console (schedules.js) -------------------------
+scheduler = new schedules.Scheduler({ fire: fireSchedule, busy: () => running || (recorder?.recording ?? false), emit: emitTo, log: console }).start();
+console.log(`  schedules   ${scheduler.known.size ? [...scheduler.known].map((o) => `${o}: ${tenancy.workspace(o).schedules.list().length}`).join(', ') : 'none yet'}`);
+
+process.on('SIGINT', async () => { scheduler?.stop(); monitoring.flushAll(); await browser.close(); process.exit(0); });
+process.on('SIGTERM', async () => { scheduler?.stop(); monitoring.flushAll(); await browser.close(); process.exit(0); });

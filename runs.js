@@ -79,7 +79,7 @@ export function forOrg(org) {
      *   kept, and counted by today() against the plan, but absent from every
      *   total the dashboard shows and never folded into a defect (defects.js).
      */
-    record({ suite, suiteId, caseId, caseName, url, ms, results, steps, draft = false }) {
+    record({ suite, suiteId, caseId, caseName, url, ms, results, steps, draft = false, scheduled = false }) {
       const failed = results.filter((r) => !r.ok);
       const fixes = results.flatMap((r) => r.fixes ?? []);
       const entry = {
@@ -113,6 +113,8 @@ export function forOrg(org) {
         // (defects.js reads it as part of a defect's identity).
         target: failed[0] ? doing(steps?.[failed[0].i])?.slice(0, 240) ?? null : null,
         ...(draft ? { draft: true } : {}),
+        // Started by a schedule, not a person (schedules.js): the dashboard tells the two apart.
+        ...(scheduled ? { scheduled: true } : {}),
       };
       all.push(entry);
       if (all.length > CAP) all = all.slice(-CAP);

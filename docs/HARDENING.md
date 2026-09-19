@@ -23,6 +23,7 @@ unchanged: they say what a *customer* bought. A switch says what the
 |---|---|---|
 | `runner.recording` | recording a flow (Record, `POST /api/recording`) | runner |
 | `runner.runs` | running scripts and suites | runner |
+| `runner.schedules` | running suites and sweeping monitored pages on a schedule (`POST /api/schedules`, `POST /api/schedules/:id/run`, and the engine's own fires) | runner |
 | `runner.onboarding` | creating suites, pages and page scans | runner |
 | `runner.origins` | allowing or removing origins | runner |
 | `runner.driving` | opening pages and driving them from the console | runner |

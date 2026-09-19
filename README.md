@@ -759,6 +759,36 @@ Open answered `Only http and https can be driven, not about:`.
 appears and you get an unexplained white rectangle instead of the black one it
 replaced.
 
+## Schedules: runs and sweeps with nobody at the console
+
+A run happens when somebody presses Run, and a monitor watches the page that
+is open. A **schedule** makes both happen on their own. On a suite's Overview
+the Schedule card takes a cadence — every 15 or 30 minutes, hourly, daily or
+weekdays at a time, or a cron line (`0 9 * * 1-5`, five fields, in the
+runner's own time zone) — and from then on the suite's cases run at those
+times exactly as the Run suite button runs them: the same lock, the same
+allowlist, the same history, with the run marked as scheduled so the run
+history can tell it from a person's. On the Monitoring page the Sweeps card
+takes the same cadence and opens every page this organisation has a monitor
+on, one after another, so the monitors arm and measure while nobody is
+looking — an element that broke overnight is an incident by the first sweep,
+not by the next time somebody opens the page.
+
+The engine (`schedules.js`) ticks every half minute. A schedule whose time
+has come waits while a run or a recording holds the browser and fires when
+it is free; held for the whole slot, the slot is recorded as **missed** and
+the next one taken — nothing runs twice for one slot, and a runner that was
+down for a day runs each schedule once when it is back, not once per slot
+it slept through. Each card row shows the next time, the last outcome and
+a switch; **Run now** fires one by hand and answers at once, the outcome
+arriving on the socket (`schedule.fired`) a run later. Schedules are the
+organisation's (`.ghostclick/<org>/schedules.json`, twenty at most), they
+fire under the plan and the switches they were saved with — a plan that
+changed since says so rather than running — and the `runner.schedules`
+switch turns the whole thing off for a deployment. `GET/POST /api/schedules`,
+`PATCH/DELETE /api/schedules/:id`, `POST /api/schedules/:id/run`;
+`npm run check:schedules` proves the arithmetic, the engine and the routes.
+
 ## Defects: numbered, filed by the runner, triaged by people
 
 Run history answers "what happened". Defects answers "what is broken", and gives
