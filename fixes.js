@@ -443,19 +443,30 @@ export function forOrg(org) {
  * it (GC_HEAL=ai with a key) but cannot make it for them.
  */
 export function openSetting(file) {
+  // Two consents, two questions: `ai` is "may a model fix our broken steps"
+  // (a single recorded step, under a human accept); `plan` is "may a model
+  // read our pages to draft test cases" (chat-plan.js: whole scripts, from a
+  // page's own words). Each off until an owner or admin says otherwise; a
+  // file written before `plan` existed reads as plan off.
   let ai = false;
-  try { ai = JSON.parse(readFileSync(file, 'utf8')).ai === true; } catch { /* the default */ }
+  let plan = false;
+  try {
+    const read = JSON.parse(readFileSync(file, 'utf8'));
+    ai = read.ai === true;
+    plan = read.plan === true;
+  } catch { /* the defaults */ }
   return {
     file,
-    get: () => ({ ai }),
+    get: () => ({ ai, plan }),
     set(patch) {
-      if (typeof patch?.ai !== 'boolean') throw new Error('ai must be true or false');
-      ai = patch.ai;
+      if (typeof patch?.ai !== 'boolean' && typeof patch?.plan !== 'boolean') throw new Error('ai or plan must be true or false');
+      if (typeof patch.ai === 'boolean') ai = patch.ai;
+      if (typeof patch.plan === 'boolean') plan = patch.plan;
       try {
         mkdirSync(join(file, '..'), { recursive: true });
-        writeFileSync(file, JSON.stringify({ ai }, null, 2));
+        writeFileSync(file, JSON.stringify({ ai, plan }, null, 2));
       } catch { /* read-only checkout: the setting holds for this session */ }
-      return { ai };
+      return { ai, plan };
     },
   };
 }

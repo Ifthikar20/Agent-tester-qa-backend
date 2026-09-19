@@ -209,7 +209,8 @@ cart and charges for one. Both bugs turn their run red.
 
 The whole pipeline, editable: [`docs/ghostclick-end-to-end.drawio`](docs/ghostclick-end-to-end.drawio)
 — open it at [app.diagrams.net](https://app.diagrams.net) or with the draw.io
-VS Code extension.
+VS Code extension. The map of the parts as they are built — every module, store,
+route and event, and how they talk — is [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 
 Three loops share one Chrome. Video flows right-to-left, control flows
@@ -758,6 +759,63 @@ Open answered `Only http and https can be driven, not about:`.
 appears and you get an unexplained white rectangle instead of the black one it
 replaced.
 
+## Notifications: told somewhere a person will see it
+
+Everything the runner says goes to its own sockets, which is to say to nobody
+once the tab is closed. **Notifications** (Settings → Notifications) name a
+place to tell instead: a **webhook** (JSON, with an `X-Ghostclick-Event`
+header and, when the channel has a secret, an `X-Ghostclick-Signature` of
+`sha256=<HMAC of the body>`), a **Slack** incoming webhook (a line of text),
+or an **email** through the operator's relay — `GC_SMTP_URL`
+(`smtp://user:pass@host:587`, upgraded to TLS on the wire when the relay
+offers it; `smtps://…:465` for TLS from the first byte) and `GC_SMTP_FROM`,
+sent by the runner's own client (`smtp.js`, no dependency). Each channel
+names the events it wants: an **incident** opening or resolving, a **run
+failing** (a person's or a schedule's, with the step it stopped on and the
+defect it went under), a **defect** filed or reopened. Every word is
+redacted against the vault before it leaves, like a console line; a send
+that fails is retried three times with growing pauses and then recorded on
+the channel with the reason; a day's sends per organisation are capped at
+three hundred, so a flapping monitor is a nuisance, not a firehose; and on a
+gated runner a channel may not point inside the container's network
+(`GC_BLOCK_PRIVATE`, the same rule a page lives under). Channels are the
+organisation's, set by its managers, and shown by their host, never their
+full address or secret; **Test** sends one message and says what came back.
+`GET /api/notify`, `POST /api/notify/channels`, `PATCH/DELETE
+/api/notify/channels/:id`, `POST /api/notify/channels/:id/test`;
+`npm run check:notify` drives every kind against receivers it starts
+itself, a relay included.
+
+## Schedules: runs and sweeps with nobody at the console
+
+A run happens when somebody presses Run, and a monitor watches the page that
+is open. A **schedule** makes both happen on their own. On a suite's Overview
+the Schedule card takes a cadence — every 15 or 30 minutes, hourly, daily or
+weekdays at a time, or a cron line (`0 9 * * 1-5`, five fields, in the
+runner's own time zone) — and from then on the suite's cases run at those
+times exactly as the Run suite button runs them: the same lock, the same
+allowlist, the same history, with the run marked as scheduled so the run
+history can tell it from a person's. On the Monitoring page the Sweeps card
+takes the same cadence and opens every page this organisation has a monitor
+on, one after another, so the monitors arm and measure while nobody is
+looking — an element that broke overnight is an incident by the first sweep,
+not by the next time somebody opens the page.
+
+The engine (`schedules.js`) ticks every half minute. A schedule whose time
+has come waits while a run or a recording holds the browser and fires when
+it is free; held for the whole slot, the slot is recorded as **missed** and
+the next one taken — nothing runs twice for one slot, and a runner that was
+down for a day runs each schedule once when it is back, not once per slot
+it slept through. Each card row shows the next time, the last outcome and
+a switch; **Run now** fires one by hand and answers at once, the outcome
+arriving on the socket (`schedule.fired`) a run later. Schedules are the
+organisation's (`.ghostclick/<org>/schedules.json`, twenty at most), they
+fire under the plan and the switches they were saved with — a plan that
+changed since says so rather than running — and the `runner.schedules`
+switch turns the whole thing off for a deployment. `GET/POST /api/schedules`,
+`PATCH/DELETE /api/schedules/:id`, `POST /api/schedules/:id/run`;
+`npm run check:schedules` proves the arithmetic, the engine and the routes.
+
 ## Defects: numbered, filed by the runner, triaged by people
 
 Run history answers "what happened". Defects answers "what is broken", and gives
@@ -789,6 +847,33 @@ run, the runner:
 
 Each lands in the defect's activity as ghostclick's, and in the console log as it
 happens (`DEF-2609-007 filed: …`). The reporter is always the application.
+
+**A monitor's incident is a defect too.** A monitored element — or the whole
+page — that breaks its rule and is confirmed (the monitoring section below) is
+filed here as the incident opens, under the same numbers as a failed run, with
+the monitor and the checks that failed as its identity and the incident's
+evidence as its own: the failed checks, the verdict's word, the clips before
+and after. It closes as the incident resolves — on its own when the page
+recovers, by a person accepting the new state (the activity says who), or by
+Claude judging the change fine — reopens under the same number when the same
+rule breaks the same way again, and closes when its monitor is deleted. It has
+no cases, so a passing run never closes it. The incident's notification and
+its card carry the number, and the Defects page is one list for what is
+broken, whichever way the runner found out.
+
+**The Defects page** is that list, drawn the way a good issue tracker draws
+one: the numbers first (open, needing attention, from monitors, closed this
+week), a search and one-press filters — open, parked, closed; runs or
+monitors; each severity — with the count behind each, and a dense row per
+defect: the severity as a shape and a word before a colour, the number, the
+sentence, where (the suites and cases, or the monitor and its page), the
+source, the status, how often, when last, who has it. A row opens a drawer
+beside the list with the whole story — the evidence, the runs that hit it or
+the clips, the activity, and the triage for an owner or admin — and the
+drawer has an address, `/defects/DEF-2609-007`, so a number in a chat reply, a
+run's row or a notification opens straight onto it. The list follows the
+runner over the socket (`defects.changed`): a run or an incident that files,
+closes or reopens one redraws it.
 
 **Severity is worked out, and a person can overrule it.** Critical when the case
 could not get past its first step, or three or more cases went down with it;
@@ -900,12 +985,30 @@ pick shows what was chosen: a clip of it, its words, its measurements, and
 the script already written — `Must exist and always be visible; width and
 height must not change; text must not change` (a table keeps its rows instead
 of its size) — with the checks that sentence compiles to shown under it as you
-edit it (`POST /api/monitors/preview`: the mock compiler, nothing kept).
+edit it (`POST /api/monitors/preview`: the mock compiler, nothing kept) and,
+under those, one chip per clause saying what became of it: understood (the
+checks it turned into), **judged on change** (it cannot be a number; see
+below) or **not understood**. Where the element sits is shown too
+(`body › main › div.hero`). When the runner has a key, **Compile with Claude**
+asks the model for its reading of the same sentence before you save
+(`POST /api/monitors/compile`: one call from the daily budget, nothing kept),
+so what you approve is what will run.
 
 The rule is compiled ONCE into checks (`monitor-rules.js`): the mock compiler
 instantly, from the phrasing above, and Claude — when `ANTHROPIC_API_KEY` is
-set — asynchronously, replacing the mock's checks when its answer lands. From
-then on the model is never in the loop. An agent inside the page
+set — asynchronously, replacing the mock's checks when its answer lands and
+saying so on the socket (`monitor.compiled`) and on the card. Both compilers
+are handed a bounded excerpt of the element's markup — its own HTML with
+scripts, handlers and long attribute values taken out in the page
+(`monitor/page/sanitize.js`), where it sits, and a line per sibling and child —
+so "rows" binds to table rows or list items as the case is and "the price" to
+the child that carries it; the excerpt is page content, redacted through the
+vault and inside the untrusted block like everything else the model reads.
+Every clause is accounted for: one that cannot be a number ("the call to
+action must stay the most prominent element") becomes a **judgment clause** —
+its proxies, the markup among them, say only that the element changed, and
+Claude decides whether the rule still holds (below). From then on the model is
+out of the loop for checks. An agent inside the page
 (`monitor/page/`, installed the way the recorder is) watches the element with a
 `ResizeObserver` and a `MutationObserver` and reports a snapshot when its
 change signature changes; the runner evaluates every report by arithmetic
@@ -918,7 +1021,15 @@ a ticker that never stops.
 An incident carries the evidence: before/after screenshot clips, the metric
 diff (`fontSize: 16 → 36`), the failed checks with their numbers, and a
 verdict — the mock's at once, Claude's a little later when there is a key
-(severity and an explanation, from both clips). When the
+(severity and an explanation, from both clips and the markup before and
+after). A change on a judgment clause opens the incident as **judging**
+instead: Claude is asked, with the clause, both excerpts and both clips,
+whether the rule as the engineer meant it still holds — one question per
+monitor per minute, from the daily budget. A yes makes the incident stand, in
+Claude's words; a no resolves it and the element as it is now becomes the
+baseline, so the same state is not asked about again; no answer, no key or no
+budget leaves it open, saying why — never silence. `npm run
+check:monitoring-judge` drives that with a scripted model. When the
 page recovers, the incident resolves itself. **Resolve & accept current state**
 closes one by hand: relative rules take the element as it is now for their
 new baseline; an absolute rule that still fails puts the monitor into
@@ -953,6 +1064,54 @@ is not there when the document arms is late before it is missing: a freshly
 armed monitor gives it six seconds (`ARM_GRACE_MS`) to arrive before a missing
 incident opens, where a change on a page that has been open a while is
 confirmed in half a second, as before.
+
+### Watching the whole page
+
+Sometimes the question is not "did the hero grow" but "did anything change".
+**Watch the whole page**, beside Pick element, makes a monitor on the reserved
+selector `:page`: not one element's numbers but the page's *blocks* — every
+heading, paragraph, list item, link, button, cell and label, a field's
+placeholder, an image's alt, and the boxes that arrange them (nav, main,
+sections, forms, tables) — each with where it sits and what it says. Two of
+those snapshots diffed say what was **added**, what was **removed**, what
+**moved** or was resized, and what was **reworded**, and that list is the
+incident: the exact totals as chips, the first few of each named
+(`added td “#10046”`, `section#faq down 40px`, `p “Every order…” → “Every
+order… (copy changed by a deploy…)”`), a before and after clip of the
+viewport, and a verdict that says the same in a sentence. Over the API it is
+`POST /api/monitors` with `"selector": ":page"`.
+
+The rule is one of three things — *the layout must not change*, *the text must
+not change*, or *nothing on the page may change* — and a number of pixels
+loosens how far a block may drift before it has moved (`no block may move by
+more than 12px`; the default is 4). A sentence the compiler cannot place ("the
+page must stay on brand") watches for any change and leaves the verdict to a
+reviewer, the way a judgment clause on an element does.
+
+What it deliberately does not report: a class that changes nothing visible (a
+page monitor is not a markup hash); a move under the tolerance; where a fixed
+or sticky block is, which depends on the scroll; a snapshot taken at another
+viewport width, which is a different layout rather than a change; and whatever
+the page changes **on its own**. While the monitor is made the runner watches
+the page for a second and a half, and the blocks that changed with nobody
+touching it — a ticker, a clock, a carousel — are learned into the spec's
+`ignore` and never reported. A counter that grows a digit wider and pushes
+its neighbour along is still a move; the pixel phrase, or **Resolve & accept
+current state**, is the answer. Everything else about a monitor holds: the
+confirm-before-alert funnel, six seconds of grace after a visit for blocks
+that arrive late (any verdict waits, not only "missing"), sweeps on a schedule,
+notifications, **Check now**. A snapshot keeps up to 400 blocks; the API and
+the cards carry the count, the store keeps the blocks. `npm run
+check:monitoring` walks it: the ticker learned, a swapped class ignored, the
+reworded hero caught by the words rule, a new table row caught by the layout
+rule with the cells named and the sections below it moved down.
+
+An incident is also a defect. The moment one opens it is filed under a
+`DEF-YYMM-NNN` number like a failed run's (the Defects section), with the
+failed checks and both clips as its evidence; the incident card, the log and
+the notification carry the number, and the defect closes when the incident
+resolves. The Defects page is where a person triages it — assigns it, grades
+it, parks it — beside everything the runs found.
 
 Two things worth knowing about the security model. A monitor's selector is data
 handed to `querySelector` inside a script the RUNNER installs; the flow
@@ -991,7 +1150,11 @@ Three smaller things moved with this. Light, dark or the device's theme is a
 setting, so it lives on *Origins & vault → Appearance* rather than in the
 sidebar; the sidebar's collapse control is at the top, where a hand goes
 looking for it, and Sign out is at the foot; and Run history's suite filter sits
-with the tables it narrows instead of in the top bar.
+with the tables it narrows instead of in the top bar. The pages a person sees
+before they are signed in — sign in, sign up, the code, the reset, an
+invitation — are always light, whatever theme was chosen for the app: they are
+drawn once, in daylight, and `public/theme-boot.js` decides that before the
+first paint so a dark-mode browser never flashes them dark first.
 
 ## Chat: ask the runner what it knows
 
@@ -1028,17 +1191,136 @@ are the runner's own facts and are stated plainly; names, titles, flows, rule
 text and the sentences a failure leaves came from sites under test, so they
 ride inside a marked UNTRUSTED block the system prompt says to report and
 never obey, redacted through the organisation's vault and saved session on the
-way out, with their own markers defanged. Two tools only **propose**: scanning
-a page and quickstart drive the browser and change what the organisation
-keeps, so they come back as a proposal a person confirms with a button (or the
-word yes) within ten minutes; the engine (`chat.js`) then executes it through
-the same functions the routes call, with the routes' gates, and hands the
-outcome to the mind as a runner-authored note. Nothing a model says executes
-anything by itself, and every refusal the runner makes — the plan, another
-organisation driving, an operator's switch, an origin nobody allowed, a run in
-progress — reaches the reply as the runner's decision, in its words.
+way out, with their own markers defanged. Three tools only **propose**:
+scanning a page, drafting tests for it and quickstart drive the browser and
+change what the organisation keeps, so they come back as a proposal a person
+confirms with a button (or the word yes) within ten minutes; the engine
+(`chat.js`) then executes it through the same functions the routes call, with
+the routes' gates, and hands the outcome to the mind as a runner-authored
+note. Nothing a model says executes anything by itself, and every refusal the
+runner makes — the plan, another organisation driving, an operator's switch,
+an origin nobody allowed, a run in progress — reaches the reply as the
+runner's decision, in its words.
 
-A turn is `POST /api/chat/turns` (a 202) and is answered on the
+A page can be tested from a sentence. "Draft tests for the contact page" — or
+"test the client solutions page" when nothing is saved for it yet — is the
+third proposing tool, `plan_page_tests`. On the yes the runner opens the page
+under its lock and reads its controls and links (the same read as a scan),
+then drafts up to four checks (`chat-plan.js`): Claude when the
+organisation's *Draft test cases* consent is on (Settings; `plan` beside `ai`
+in `heal.json`, see "Automatic fixes"), else the rules — the page's own
+expectations, the form's fields present, a link followed to a page that
+answers. A model never writes a locator: it fills a closed schema whose
+targets are an enum of what the read found, and every draft is mapped into
+the case language, validated exactly as a saved case is and shown as its
+text. The drafts come back as a second proposal with tick boxes; the ticked
+ones run as **drafts** — history rows marked `draft`, out of the summary,
+counted against `runs.per_day`, never filing, bumping or closing a defect. A
+failure is classified from the runner's own words and a fresh read of the
+page: a target that appeared late or moved gets a mechanical fix (a wait, a
+retarget) and one more run; a check that failed after every action passed is
+reported as *the app is broken* and never revised; the rest *needs a person*.
+A revision may add steps or retarget an action and may never drop or weaken
+an assertion. The reply carries a card per draft with its verdict; a passing
+draft becomes a case only by *Save as a case* (`source: generated`), and
+`POST /api/chat/stop` ends a batch after the draft in flight.
+`npm run check:plan` pins the pure core offline — the menu, the gates, the
+verdict ladder, the guards — `npm run check:plan-request` pins both requests,
+and `check:chat` drives it end to end against `public/contact.html`.
+
+Questions about ghostclick itself — how to record a test, what a switch or a
+setting does, why the runner refused an origin, how to deploy — are answered
+from this documentation. At boot the runner cuts its own markdown (this
+README, SETUP.md and docs/) into sections (`docs-index.js`, about three
+hundred of them) and ranks them for a question with BM25 over stemmed words,
+a heading's words counted three times: no embeddings, no second provider, no
+network, and the same question finds the same section on every runner. The
+`docs` tool hands the mind the best sections with the file and heading each
+came from; the reply says where it read, and keeps those sources on the
+message for the UI to show. The rules quote the best section outright. `npm
+run check:docs` pins the chunking, the ranking and thirty questions against
+this very corpus.
+
+What a tool read is also drawn. A reply carries the data its tools returned —
+the defect rows, the runs per day, a suite's pages and cases, the pages
+scanned, the monitors — shaped by the tool that read it (`chat-tools.js`
+`view`, three views a reply at most, rows capped, names redacted), and the
+chat page draws them under the reply as tiles, tables and charts. The words
+are the mind's; the numbers in the drawing are the tool's, so the two can be
+checked against each other.
+
+### Charts, files and code
+
+Every chart the product draws is one component over Chart.js
+(`web/src/components/Chart.vue`, `web/src/charts.js`) — the runs on the
+dashboard, the runs under a suite, the runs per day, defects by severity and
+cases by suite under a reply, and a chart asked for in words: "chart the runs
+per day", "graph the pass rate by suite", "plot the defects by status". The
+`chart` tool shapes a SPEC from the same records the other tools read
+(`chat-charts.js`: labels, series, a role each) and the page draws it in the
+theme's own tokens, light or dark; the mind gets the totals and the largest
+values and says in a sentence what the chart shows. The rules of the drawing
+are the dashboard's: failures carry the colour and passes stay neutral,
+status and severity wear the status colours, anything else takes one of four
+hues checked together for colourblind separation, thin marks, one axis, a
+legend only for two series or more — and every chart has its values as a
+table, a press away, because a picture is the one thing a screen reader
+cannot read.
+
+A turn may carry FILES — the paperclip on the composer, a drop onto it, or a
+paste too long to be a question, which becomes a file rather than a wall in
+the box. Two kinds are understood (`chat-import.js`). A TABLE — CSV, TSV,
+JSON, or an `.xlsx` read by a small zip-and-XML reader of this repository's
+own rather than a library — is described (rows, columns and their kinds,
+the first rows drawn under the reply) and charted on request, by the columns
+named: "chart revenue by month". CODE — a Playwright, Cypress, Selenium or
+Puppeteer test, or one of this runner's own flow documents — is translated
+into checks (`chat-translate.js`): `page.getByRole('button', { name: 'Sign
+in' }).click()` is `click 'Sign in' : button`, `expect(page).toHaveURL(/dashboard/)`
+is an arrival at `["/dashboard"]`, `.check()` is `tick`, `.selectOption('Yearly')`
+is `choose … = 'Yearly'`, `.press('Enter')`, Cypress's `{enter}` and Selenium's
+`Keys.RETURN` are `press Enter`, a `beforeEach` visit is prepended to every
+test, a relative address is completed by the suite the question names, else by
+the one suite there is or the one origin every suite shares. What does not
+carry is said, line by line, with the reason — a CSS selector names
+nothing a person can read (an id or a name attribute is guessed from, and
+marked as a guess), a double click, an upload, an option by its position or
+an absence cannot be carried yet — and a password the code types
+becomes a vault reference (`$PASSWORD`) with the literal never kept, not in
+the check, not in the transcript, not in the reply. Nothing is executed as
+code: the checks are validated by the validator a saved case passes, the
+origin allowlist included, and PROPOSED — the person ticks the ones to run,
+a yes runs them once as they are (`run_import`), and a passing one is kept
+as a case only by the Save button under its card. A table whose rows are
+steps in the language's own words becomes checks the same way.
+
+The caps are the runner's and the composer mirrors them: four files a turn,
+256 kB each, 300 kB together; a file that cannot be read is refused by name
+before anything else is. Files are read on arrival, kept in memory for half
+an hour so a follow-up can still ask about them, and never written to disk —
+the transcript keeps their names and shapes, and the checks they became are
+what persists. Their words are the person's own data and ride to the model
+inside the untrusted block like a page's do. `npm run check:import` is the
+offline check of the intake, the tables (a spreadsheet built by hand inside
+it), the translation of all four frameworks and the charts; the mock mind's
+sentences for files and charts are in `check:chat-request`, and `check:chat`
+attaches a Playwright file, runs the checks it became and charts a CSV on a
+runner of its own.
+
+Every kind of question the chat answers is written down once, in
+`scripts/fixtures/chat-prompts.json`: a scenario per kind — defects, runs,
+suites, cases, monitoring, the runner, a test to run, a page to scan, a
+quickstart, drafted tests, the documentation, a chart, a file attached (a
+table, test code, rows of steps), a yes with nothing waiting, a refusal, a
+question nothing answers — with other phrasings of it and what the
+runner must do: which agents it asks, what the reply says, what data rides on
+it, whether anything ran, whether it proposed instead, and the follow-up a
+yes or a no gets. `npm run check:chat-prompts` runs every phrasing on a
+conversation of its own against a runner of its own, so the catalogue stays
+true; it is also the list to try by hand.
+
+A turn is `POST /api/chat/turns` (a 202, with the files it carries as
+`attachments` in the same JSON) and is answered on the
 organisation's sockets — `chat.turn`, `chat.delta`, `chat.tool`,
 `chat.proposal`, `chat.done` — because a reply that runs a case takes as
 long as the case does; one reply at a time per organisation (a 409
@@ -1502,13 +1784,22 @@ nothing else):
   off by default), and it stays `safe` when the runner has no key.
   `GET /api/settings/heal`, `/api/state` and the socket greeting say which, as
   `heal: { mode, ai: { enabled, available, reason }, canManage }` — `reason` is
-  the first thing missing: `deployment`, `switch`, `key` or `organisation`.
+  the first thing missing: `deployment`, `switch`, `key` or `organisation`;
+- **`plan` is the second flag in the same file**, independent of `ai` and off
+  by default: may a model read the organisation's pages to draft tests for
+  them (the chat's `plan_page_tests`, "Chat" above). `PUT /api/settings/heal
+  {"plan": true}` turns it on, `heal.plan: { enabled, available, reason }`
+  reports it, and with the mock mind the rules draft without it.
 
 The key is `ANTHROPIC_API_KEY`, from the environment or, on a laptop, from
 `.env.local` beside the backend — of which that one line is read and nothing
 else. The banner says `key found` or `no key`; the key itself is never printed,
-never in `/api/state` or an error, and is removed from the runner's environment
-at boot so the browser does not inherit it. The runner then calls
+never in `/api/state` or an error. It is read once at boot for the three layers
+that may call a model — the fixes, monitoring and the chat — and then removed
+from the runner's environment so the browser does not inherit it; `npm run
+check:keys` proves both, because monitoring once read the environment after the
+fixes had emptied it and ran on the mock in production whatever key was set.
+The runner then calls
 `api.anthropic.com` over HTTPS, so a deployment needs that egress
 (docker/docker-compose.prod.yml says why `edge` already allows it).
 
@@ -2058,6 +2349,9 @@ Node shape is the assertion; edge label is the action.
 | `--\|fill 'User' : textbox = 'a' * 20\|--` | `fill`, repeated value |
 | `--\|check 'User' : textbox is 20 chars\|--` | assert value |
 | `--\|scroll to top\|--` · `--\|scroll to 'Docs' : link\|--` | move the page on purpose |
+| `--\|tick 'Remember me' : checkbox\|--` · `--\|untick 'Newsletter' : label\|--` | a checkbox, a switch or a radio put in that state — never toggled |
+| `--\|choose 'Plan' : combobox = 'Yearly'\|--` | an option in a dropdown, by its words |
+| `--\|press Enter in 'Search' : searchbox\|--` · `--\|press Escape\|--` | a key on a control, or wherever the focus is |
 | `--\|see 'Profile saved'\|--` | assert text without making a node of it |
 | `--\|check status 404\|--` · `--\|check 2 redirects\|--` · `--\|check redirect via '/go'\|--` | what the last navigation *did* |
 | `--\|check at top\|--` · `--\|wait 500ms\|--` | position, patience |
@@ -2171,13 +2465,15 @@ silently inside someone else's docs.
 | `monitor-evaluate.js` | the deterministic evaluator: metric out of a snapshot, compare, tolerance, diff |
 | `monitor-resolver.js` | Claude: the two requests, their closed schemas and frozen cached prompts, the daily budget |
 | `monitor-page.js` | the agent inside the driven page, and the runner's handle on it |
-| `monitor/page/` | that agent's source — the runtime, the picker, the watcher — read off disk and bundled |
+| `monitor/page/` | that agent's source — the sanitiser, the runtime, the picker, the watcher — read off disk and bundled |
 | `redact.js` | vault values out of text on its way out, for the console and the monitors alike |
 | `support.js` | help & support — a request from the top bar, and the per-organisation access switch it turns on |
 | `chat.js` | the chat — one transcript store and engine per organisation: a turn, the proposal it confirms, which mind answers, the reply kept |
-| `chat-tools.js` | the fourteen tools a mind drives, the keyword matcher, the untrusted block and the redaction on the way out |
+| `chat-tools.js` | the sixteen tools a mind drives, the keyword matcher, the untrusted block and the redaction on the way out |
 | `chat-mock.js` | the mock mind: intents as regular expressions over the same tools, for a runner with no key |
-| `chat-resolver.js` | Claude for the chat: the request, its frozen cached prompt, the tool runner, which mind is on |
+| `chat-resolver.js` | Claude for the chat: the request, its frozen cached prompt, the tool runner, which mind is on; the draft and revise requests for drafted tests |
+| `chat-plan.js` | drafted tests: the closed schemas built from a page read, the mapper into the case language, the compile gates, the verdict ladder, the revision guards, the bounded run-and-revise loop, and the rules drafter |
+| `docs-index.js` | the documentation, searchable: this README, SETUP.md and docs/ cut into sections at boot and ranked for a question, for the chat's `docs` tool |
 | `vocabulary.js` | every verb, declared once: syntax, how it writes back, how it draws |
 | `flow.js` | the test case language: text ↔ IR, and `asFlowchart()` for a picture |
 | `ops.js` | what each verb does, origin allowlist, validation gate |
@@ -2192,6 +2488,7 @@ silently inside someone else's docs.
 | `auth/` | Django: users, sessions, SSO later — identity and nothing else |
 | `auth/accounts/tokens.py` | mints the HS256 token the runner accepts, stdlib only |
 | `auth.js` | verifies it — verify-only, so the runner cannot authorise itself |
+| `docs/ARCHITECTURE.md` | the map of the system as built: the three projects, the runner process, tenancy, a run, teach mode, fixes, monitoring, the chat, the models, the UI, the checks |
 | `docs/BOUNDARY.md` | the seam between the two repositories, and what still needs a check |
 | `docs/DEPLOY.md` | putting it on AWS, and why auth is not optional once you do |
 | `Dockerfile`, `docker/` | the runner image, the compose stack, the Caddyfile |
@@ -2232,11 +2529,19 @@ silently inside someone else's docs.
 | `public/results.html` | a sticky header over cards named by a whole paragraph |
 | `scripts/check-console.js` | the canvas paints on arrival, and the wheel reaches the page |
 | `scripts/check-monitoring.js` | a rule, a change, an incident, recovery, picking from the canvas — on a runner of its own |
-| `scripts/check-monitoring-request.js` | the mock compiler and, offline, exactly what the resolver puts on the wire |
+| `scripts/check-monitoring-request.js` | the mock compiler, clause by clause; the sanitiser; and, offline, exactly what the resolver puts on the wire |
+| `scripts/check-monitoring-judge.js` | a rule that is not a number, judged: the engine with a scripted model — judging, adopted, stood, unjudged |
+| `scripts/check-keys.js` | the one key reaches the fixes, monitoring and the chat, and no Chromium process carries it |
 | `public/monitor.html` | a page shaped to be watched, with buttons that break it |
 | `scripts/check-support.js` | a support request lands, turns access on, is told to every socket, and turns off again |
 | `scripts/check-chat-request.js` | the matcher, the mock mind and, offline, exactly what the chat's resolver puts on the wire |
-| `scripts/check-chat.js` | the chat on a runner of its own: a count that equals /api/defects, a case run from a sentence, a proposal confirmed, the transcript kept |
+| `scripts/check-chat.js` | the chat on a runner of its own: a count that equals /api/defects, a case run from a sentence, a proposal confirmed, the transcript kept, drafted tests read, ticked, run, fixed once and reported |
+| `scripts/check-chat-prompts.js` | the prompt catalogue, run: every kind of question and every phrasing of it, each on its own conversation, against a runner of its own |
+| `scripts/fixtures/chat-prompts.json` | every kind of question the chat answers, with what the runner must do for it — the catalogue to test with, by script or by hand |
+| `scripts/check-plan.js` | drafted tests offline: a target outside the menu never validates, every draft is a fixed point of its text, the attempt bound, a late target gets one wait, a failing check never reaches the model, a revision may not drop an assertion |
+| `scripts/check-plan-request.js` | exactly what the draft and revise requests put on the wire: one cached system block identical across pages, closed schemas with the page's own enums, no vault value, the page's words fenced |
+| `scripts/check-docs.js` | the documentation index: sections from headings, a fence is not a heading, the ranking, and thirty questions that each find their section in this repository |
+| `public/contact.html` | Harbour's contact page, shaped to be drafted against: a link that shows late, a brochure nobody serves, a message that keeps 200 characters |
 | `public/site.html` | Harbour — the same links in header and footer, and a long page |
 
 ---

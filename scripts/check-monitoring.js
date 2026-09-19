@@ -12,11 +12,15 @@
  * would. No model: `GC_MONITOR_LLM=mock`, and the runner says so first.
  *
  *   1  which mind             mock, and nothing armed
- *   2  a monitor needs a page  409 before a page; then a rule, its checks, its baseline shot
+ *   2  a monitor needs a page  409 before a page; then a rule, its checks, its clause, its markup, its baseline shot
+ *   2c what the preview says    clause by clause, and Compile with Claude refused on a mock runner
  *   3  a change opens an incident   the numbers, the after shot, the mock verdict
  *   4  and recovery closes it       resolved by `auto`
  *   5  churn stays quiet            a ticker and a clock are not incidents
  *   6  rows, visibility, accepting  exactly N rows; always visible; manual resolve → acknowledged
+ *   6b a rule the table cannot read  a judgment clause, a markup-only change, a verdict that asks for a key
+ *   6c the whole page, watched     blocks, not one element; a ticker learned and ignored; a swapped class is
+ *                                   not a change; new words are; a new row is a layout incident that names it
  *   7  pause, resume, delete        quiet while paused; gone means gone, shot and all
  *   8  reloads and other pages      re-armed after a reload; not on this page, not missing
  *   8b every visit runs the check   the visit is counted; late is not missing; gone is
@@ -121,6 +125,8 @@ async function sweep() {
 const incidentFor = (v, id, from, ms = 10000) => v.until((m) => m.t === 'incident.opened' && m.incident.monitorId === id, ms, from);
 const stateOf = async (id) => (await api('GET', '/api/monitors')).json?.monitors.find((m) => m.id === id) ?? null;
 const metricsOf = (m) => (m?.metrics ? `${m.metrics.width}×${m.metrics.height}, ${m.metrics.textLength} chars` : 'no metrics');
+/** A page just armed is late for any verdict for ARM_GRACE_MS (monitor.js); a wait a little longer than that settles it. */
+const ARM_WAIT = 8000;
 
 // ---------------------------------------------------------------- a runner
 let child = null;
@@ -192,6 +198,9 @@ let hero = null;
   if (c && c.metric === 'fontSize' && c.op === 'lte' && c.value === '18' && hero.specSource === 'mock') ok('the rule compiled to fontSize ≤ 18', 'by the mock');
   else bad('the rule compiled to fontSize ≤ 18', JSON.stringify(hero.spec));
   if (hero.baseline?.metrics?.fontSizePx === 16 && hero.metrics?.fontSize === 16) ok('the baseline was measured live', '16px'); else bad('the baseline was measured live', JSON.stringify(hero.metrics));
+  if (hero.spec?.clauses?.length === 1 && hero.spec.clauses[0].outcome === 'checks' && hero.spec.clauses[0].checkIds[0] === 'c1') ok('and says the one clause became that check', hero.spec.clauses[0].text); else bad('and says the one clause became that check', JSON.stringify(hero.spec?.clauses));
+  const ex = hero.baselineExcerpt;
+  if (ex?.html?.includes('<p class="hero-copy"') && !/<script|onclick/.test(ex.html) && Array.isArray(ex.path) && ex.path.at(-1) === 'div.hero') ok('the markup excerpt was taken, sanitised, with where it sits', `${ex.path.join(' > ')} · ${ex.html.length} chars`); else bad('the markup excerpt was taken, sanitised, with where it sits', JSON.stringify(ex)?.slice(0, 200));
   if (hero.state === 'ok' && hero.onPage === true) ok('state ok, on this page'); else bad('state ok, on this page', `${hero.state} ${hero.onPage}`);
   if (await v.until((m) => m.t === 'monitor.changed' && m.monitor.id === hero.id, 5000, from)) ok('monitor.changed reached the socket'); else bad('monitor.changed reached the socket');
   if (hero.baselineShot) {
@@ -232,6 +241,16 @@ section('2b · a monitor belongs to a project');
 }
 
 // ---------------------------------------------------------------------------
+section('2c · what the preview says, clause by clause');
+{
+  const p = await api('POST', '/api/monitors/preview', { ruleText: 'font size must not exceed 18px and the badge must look right', tag: 'p', selector: HERO, baseline: hero.baseline });
+  const cl = p.json?.spec?.clauses ?? [];
+  if (p.status === 200 && p.json.spec.source === 'mock' && cl.map((c) => c.outcome).join(',') === 'checks,judgment') ok('the mock names the clause it could not read', `"${cl[1]?.text}" → judgment`); else bad('the mock names the clause it could not read', JSON.stringify(p.json?.spec?.clauses));
+  const c = await api('POST', '/api/monitors/compile', { ruleText: 'font size must not exceed 18px', tag: 'p', selector: HERO, baseline: hero.baseline });
+  if (c.status === 409 && c.json?.error === 'no_model' && c.json.spec?.source === 'mock') ok('Compile with Claude is refused on a mock runner, with the mock’s spec', c.json.message?.slice(0, 60)); else bad('Compile with Claude is refused on a mock runner, with the mock’s spec', `${c.status} ${JSON.stringify(c.json)?.slice(0, 120)}`);
+}
+
+// ---------------------------------------------------------------------------
 section('3 · a change opens an incident');
 let incident = null;
 {
@@ -244,6 +263,7 @@ let incident = null;
   const vio = incident.violations?.[0];
   if (vio && vio.metric === 'fontSize' && Number(vio.actual) > 18) ok('the violation carries the numbers', `actual ${vio.actual}, expected ${vio.expected}`); else bad('the violation carries the numbers', JSON.stringify(vio));
   if (incident.diff?.fontSize?.[1] === 36) ok('the diff says 16 → 36', JSON.stringify(incident.diff.fontSize)); else bad('the diff says 16 → 36', JSON.stringify(incident.diff));
+  if (/f-grow/.test(incident.after?.excerpt?.html ?? '') && !/f-grow/.test(incident.before?.excerpt?.html ?? '') && incident.before?.excerpt?.html) ok('the markup before and after rides with the incident', 'class f-grow appeared'); else bad('the markup before and after rides with the incident', JSON.stringify({ before: incident.before?.excerpt?.html?.slice(0, 60), after: incident.after?.excerpt?.html?.slice(0, 60) }));
   if (incident.verdict?.source === 'mock' && /36px/.test(incident.verdict.explanation)) ok('a mock verdict, at once', incident.verdict.severity); else bad('a mock verdict, at once', JSON.stringify(incident.verdict));
   if (incident.after?.screenshot) {
     const s = await bytes(`/api/monitors/shots/${encodeURIComponent(incident.after.screenshot)}`);
@@ -252,6 +272,11 @@ let incident = null;
   if (await v.until((m) => m.t === 'monitor.changed' && m.monitor.id === hero.id && m.monitor.state === 'violated', 5000, from)) ok('the monitor is violated'); else bad('the monitor is violated');
   if (await v.until((m) => m.t === 'monitor.tick' && m.monitorId === hero.id && m.ok === false, 5000, from)) ok('a tick said ok:false'); else bad('a tick said ok:false');
   if (await v.until((m) => m.t === 'log' && /incident: check-hero/.test(m.msg), 5000, from)) ok('and the log said so'); else bad('and the log said so');
+  // An incident is a defect too (defects.js): filed under a number as it opens, with the monitor and the incident's evidence.
+  if (/^DEF-\d{4}-\d{3,}$/.test(incident.defect ?? '')) ok('the incident names the defect it was filed as', incident.defect); else bad('the incident names the defect it was filed as', JSON.stringify(incident.defect));
+  const filed = (await api('GET', '/api/defects')).json?.defects.find((d) => d.id === incident.defect);
+  if (filed && filed.kind === 'monitor' && filed.status === 'open' && filed.monitor?.id === hero.id && filed.monitor.incidentId === incident.id && filed.evidence?.after === incident.after?.screenshot && filed.evidence.violations[0]?.metric === 'fontSize') ok('and the Defects page lists it, from the monitor, with the evidence', `${filed.id} · ${filed.severity} · ${filed.title}`); else bad('and the Defects page lists it, from the monitor, with the evidence', String(JSON.stringify(filed)).slice(0, 200));
+  if (await v.until((m) => m.t === 'defects.changed' && m.changes.some((c) => c.kind === 'filed' && c.id === incident.defect), 5000, from)) ok('and the sockets heard the filing'); else bad('and the sockets heard the filing');
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +291,8 @@ section('4 · and recovery closes it');
   if (list.json?.incidents.some((i) => i.id === incident.id)) ok('it is listed as resolved'); else bad('it is listed as resolved');
   const open_ = await api('GET', '/api/incidents?status=open');
   if (!open_.json?.incidents.some((i) => i.id === incident.id)) ok('and not as open'); else bad('and not as open');
+  const closedDefect = (await api('GET', `/api/defects/${incident.defect}`)).json?.defect;
+  if (closedDefect?.status === 'closed' && /recovered on its own/.test(closedDefect.activity.at(-1)?.text ?? '')) ok('and its defect closed with it', closedDefect.activity.at(-1).text); else bad('and its defect closed with it', JSON.stringify(closedDefect && { status: closedDefect.status, last: closedDefect.activity.at(-1) }));
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +333,104 @@ let submit = null;
   await run(v, 'click button:Reset all');
   if (await v.until((m) => m.t === 'monitor.changed' && m.monitor.id === rows.id && m.monitor.state === 'ok', 10000, from)) ok('five rows again: acknowledged → ok'); else bad('five rows again: acknowledged → ok');
   if (await v.until((m) => m.t === 'incident.resolved' && m.incident.id === subInc?.id && m.incident.resolvedBy === 'auto', 10000, from)) ok('the button is back: resolved by auto'); else bad('the button is back: resolved by auto');
+}
+
+// ---------------------------------------------------------------------------
+section('6b · a rule the table cannot read waits for a key');
+{
+  const from = v.at();
+  const r = await create('check-judge', HERO, 'the call to action must stay the most prominent element');
+  const jm = r.json?.monitor ?? null;
+  const cl = jm?.spec?.clauses?.[0];
+  if (jm && cl?.outcome === 'judgment' && jm.spec.checks.some((c) => c.metric === 'htmlHash' && c.judgment === true)) ok('compiles to a judgment clause with a markup check', `${cl.text} → ${jm.spec.checks.map((c) => c.id).join(',')}`); else { bad('compiles to a judgment clause with a markup check', JSON.stringify(jm?.spec)?.slice(0, 200)); await done(); }
+  const end = await run(v, 'click button:Swap class');
+  if (end?.t === 'run.end' && end.ok) ok('a class with no style was swapped in'); else bad('a class with no style was swapped in', JSON.stringify(end));
+  const opened = await incidentFor(v, jm.id, from);
+  const inc = opened?.incident ?? null;
+  if (inc && inc.status === 'open' && inc.judgment === true && inc.violations.some((x) => x.metric === 'htmlHash')) ok('a markup-only change opens an incident on a mock runner', inc.id); else { bad('a markup-only change opens an incident on a mock runner', JSON.stringify(inc && { status: inc.status, judgment: inc.judgment, v: inc.violations.map((x) => x.metric) })); await done(); }
+  if (inc.verdict?.source === 'mock' && /set ANTHROPIC_API_KEY/.test(inc.verdict.explanation)) ok('whose verdict says a key is needed to judge it', inc.verdict.severity); else bad('whose verdict says a key is needed to judge it', JSON.stringify(inc.verdict));
+  if (/f-swapped/.test(inc.after?.excerpt?.html ?? '') && !/f-swapped/.test(inc.before?.excerpt?.html ?? '')) ok('and carries the swapped class in the after markup'); else bad('and carries the swapped class in the after markup', inc.after?.excerpt?.html?.slice(0, 80));
+  const open = await api('GET', '/api/incidents?status=open');
+  if (open.json?.incidents?.some((i) => i.id === inc.id)) ok('listed as open'); else bad('listed as open');
+  const back = await run(v, 'click button:Reset all');
+  if (back?.ok && await v.until((m) => m.t === 'incident.resolved' && m.incident.id === inc.id, 10000, from)) ok('Reset all resolves it'); else bad('Reset all resolves it');
+  await api('DELETE', `/api/monitors/${jm.id}`);
+}
+
+// ---------------------------------------------------------------------------
+section('6c · the whole page, watched');
+{
+  // Two monitors on `:page`: one about the layout, one about the words. The
+  // ticker and the clock change while the baseline settles and are learned
+  // as the page's own churn; a class with no style changes nothing a person
+  // can see; a deploy that rewords the hero is news for one, a row added to
+  // the table for both — and the incident says what was added and what moved
+  // to make room.
+  // 12px, not the default 4: the ticker's count grows a digit wider now and
+  // then and pushes the uptime beside it 8px right — a move the rule is
+  // allowed to forgive, where a row's 40px is not.
+  const page = (await create('check-page', ':page', 'no block may move by more than 12px')).json?.monitor;
+  const pageText = (await create('check-page-text', ':page', 'the text must not change')).json?.monitor;
+  if (page?.spec?.kind === 'page' && page.spec.checks.length === 1 && page.spec.checks[0].metric === 'layout' && page.spec.tolerance === 12) ok('a monitor on the whole page, about its layout', `${page.baseline?.counts?.blocks} blocks, 12px of give`); else { bad('a monitor on the whole page, about its layout', JSON.stringify(page?.spec ?? page).slice(0, 200)); await done(); }
+  if (pageText?.spec?.kind === 'page' && pageText.spec.checks.length === 1 && pageText.spec.checks[0].metric === 'content') ok('and one about its words', pageText.spec.summary.slice(0, 60)); else { bad('and one about its words', JSON.stringify(pageText?.spec ?? pageText).slice(0, 200)); await done(); }
+  const blocks = page.baseline?.counts?.blocks ?? 0;
+  if (blocks >= 20 && !page.baseline.blocks && page.metrics?.kind === 'page' && page.metrics.blocks === blocks) ok('the API carries the block count, not the blocks', `${blocks} blocks, ${page.metrics.width}×${page.metrics.height}`); else bad('the API carries the block count, not the blocks', JSON.stringify({ blocks, raw: !!page.baseline?.blocks, metrics: page.metrics }));
+  if (page.spec.ignore?.length >= 2 && page.specSource === 'mock') ok('the ticker and the clock were learned as its own churn', `${page.spec.ignore.length} blocks ignored`); else bad('the ticker and the clock were learned as its own churn', JSON.stringify({ ignore: page.spec.ignore, source: page.specSource }));
+  if (page.selector === ':page' && page.label === 'check-page' && page.tag === 'page' && page.state === 'ok') ok('selector :page, tag page, state ok'); else bad('selector :page, tag page, state ok', JSON.stringify({ selector: page.selector, tag: page.tag, state: page.state }));
+  if (/^h1 "Acme Orders"/m.test(page.baselineExcerpt?.html ?? '') && /section#orders/.test(page.baselineExcerpt?.html ?? '')) ok('its excerpt is the page’s outline', page.baselineExcerpt.html.split('\n')[0]); else bad('its excerpt is the page’s outline', (page.baselineExcerpt?.html ?? '').slice(0, 80));
+  const shot = page.baselineShot ? await bytes(`/api/monitors/shots/${encodeURIComponent(page.baselineShot)}`) : null;
+  if (shot && shot.status === 200 && isPng(shot.buf)) ok('with a baseline shot of the viewport'); else bad('with a baseline shot of the viewport', String(shot?.status));
+  const pageIds = new Set([page.id, pageText.id]);
+  const anyIncident = (m) => m.t === 'incident.opened' && pageIds.has(m.incident.monitorId);
+
+  let from = v.at();
+  await wait(3500);
+  if (await v.none(anyIncident, 1, from)) ok('three seconds of ticker and clock: nothing opened'); else bad('three seconds of ticker and clock: nothing opened', 'the page’s own churn was reported');
+  from = v.at();
+  await run(v, 'click button:Swap class');
+  await wait(3000);
+  if (await v.none(anyIncident, 1, from)) ok('a class with no style is not a change anyone can see'); else bad('a class with no style is not a change anyone can see');
+  await run(v, 'click button:Reset all');
+  await wait(800);
+
+  from = v.at();
+  await run(v, 'click button:Change text');
+  const worded = (await incidentFor(v, pageText.id, from))?.incident;
+  if (worded?.violations[0]?.metric === 'content') ok('reworded copy is an incident for the words', worded.violations[0].actual.slice(0, 70)); else { bad('reworded copy is an incident for the words', JSON.stringify(worded?.violations)); }
+  const pc = worded?.diff?.pageChanges;
+  if (pc && pc.totals.changed >= 1 && pc.changed.some((b) => b.t === 'p' && /Every order/.test(b.before) && /copy changed/.test(b.after))) ok('and the diff quotes before and after', `${pc.changed[0].before.slice(0, 24)}… → …${pc.changed[0].after.slice(-30)}`); else bad('and the diff quotes before and after', JSON.stringify(pc?.changed).slice(0, 200));
+  if (worded?.verdict?.source === 'mock' && /words changed/i.test(worded.verdict.explanation)) ok('a verdict in words, at once', worded.verdict.severity); else bad('a verdict in words, at once', JSON.stringify(worded?.verdict).slice(0, 200));
+  if (worded?.selector === ':page' && worded.before?.snapshot && !worded.before.snapshot.blocks && worded.before.snapshot.counts?.blocks) ok('the incident’s snapshots carry the count, not the blocks'); else bad('the incident’s snapshots carry the count, not the blocks', JSON.stringify(worded?.before?.snapshot).slice(0, 120));
+  from = v.at();
+  await run(v, 'click button:Reset all');
+  if (await v.until((m) => m.t === 'incident.resolved' && m.incident.id === worded?.id, 10000, from)) ok('the copy put back resolves it'); else bad('the copy put back resolves it');
+  await wait(2500);
+  const settled = await stateOf(page.id);
+  if (settled?.state === 'ok') ok('and the layout monitor is ok', settled.stats.incidents ? `it opened ${settled.stats.incidents} on the reflow, since resolved` : 'the reflow did not move it'); else bad('and the layout monitor is ok', JSON.stringify(settled?.state));
+
+  from = v.at();
+  await run(v, 'click button:Add table row');
+  const grew = (await incidentFor(v, page.id, from))?.incident;
+  if (grew?.violations[0]?.metric === 'layout') ok('a new row is a layout incident', grew.violations[0].actual.slice(0, 70)); else { bad('a new row is a layout incident', JSON.stringify(grew?.violations)); }
+  const gc = grew?.diff?.pageChanges;
+  if (gc && gc.totals.added >= 4 && gc.added.some((b) => b.t === 'td' && /10046/.test(b.text))) ok('the diff names what was added', `${gc.totals.added} added: ${gc.added.map((b) => b.text).join(', ')}`); else bad('the diff names what was added', JSON.stringify(gc?.added).slice(0, 200));
+  if (gc && gc.totals.moved >= 2 && gc.moved.some((b) => (b.t === 'table' || b.t === 'section') && b.dh > 12) && gc.moved.some((b) => b.dy > 12)) ok('and what grew and what moved down to make room', `${gc.totals.moved} moved: ${gc.moved.slice(0, 3).map((b) => `${b.t}${b.id ? '#' + b.id : ''} dy=${b.dy} dh=${b.dh}`).join(', ')}`); else bad('and what grew and what moved down to make room', JSON.stringify(gc?.moved).slice(0, 300));
+  if (grew?.verdict?.source === 'mock' && /added/.test(grew.verdict.explanation) && /10046/.test(grew.verdict.explanation)) ok('the verdict says so in a sentence', grew.verdict.explanation.slice(0, 90) + '…'); else bad('the verdict says so in a sentence', JSON.stringify(grew?.verdict).slice(0, 200));
+  if (grew?.after?.screenshot && grew.after.screenshotKind === 'viewport') ok('the after shot is the viewport'); else bad('the after shot is the viewport', JSON.stringify({ shot: grew?.after?.screenshot, kind: grew?.after?.screenshotKind }));
+  if (await v.until((m) => m.t === 'log' && /incident: check-page — The layout must not change: nothing added, removed, moved or resized by more than 12px/.test(m.msg), 5000, from)) ok('and the log said so'); else bad('and the log said so');
+  from = v.at();
+  await run(v, 'click button:Reset all');
+  if (await v.until((m) => m.t === 'incident.resolved' && m.incident.id === grew?.id, 10000, from)) ok('the row taken out resolves it'); else bad('the row taken out resolves it');
+
+  // A reload arms the page monitor again: the estimate that arrives late is
+  // late, not a block that went — nothing opens on a visit to an unchanged page.
+  from = v.at();
+  await open(v, FIXTURE);
+  await wait(ARM_WAIT);
+  if (await v.none(anyIncident, 1, from)) ok('a reload of an unchanged page opens nothing', 'the late paragraph was waited for'); else bad('a reload of an unchanged page opens nothing');
+  const after = await stateOf(page.id);
+  if (after?.state === 'ok' && (after.stats?.visits ?? 0) >= 1) ok('and counted as a visit', `${after.stats.visits} visit${after.stats.visits === 1 ? '' : 's'}`); else bad('and counted as a visit', JSON.stringify({ state: after?.state, visits: after?.stats?.visits }));
+  for (const id of pageIds) await api('DELETE', `/api/monitors/${id}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -422,6 +547,7 @@ section('9 · picking from the canvas');
   const sel = await v.until((m) => m.t === 'monitor.selected', 5000, from);
   if (sel?.selector === HERO && sel.snapshot?.metrics?.fontSizePx === 16 && /Every order/.test(sel.snapshot?.text ?? '')) ok('the click chose the paragraph', sel.selector); else bad('the click chose the paragraph', JSON.stringify(sel && { selector: sel.selector }));
   if (sel?.label && sel.fingerprint?.tag === 'p') ok('with a label and a fingerprint', sel.label); else bad('with a label and a fingerprint');
+  if (Array.isArray(sel?.path) && sel.path.at(-1) === 'div.hero') ok('and where it sits', sel.path.join(' > ')); else bad('and where it sits', JSON.stringify(sel?.path));
   if (sel && sel.readError === null) ok('and nothing it could not read'); else bad('and nothing it could not read', JSON.stringify(sel?.readError));
   if (await v.until((m) => m.t === 'monitor.pick' && m.on === false, 5000, from)) ok('and picking ended'); else bad('and picking ended');
   const shot = await v.until((m) => m.t === 'monitor.shot' && m.selector === HERO, 8000, from);
@@ -486,6 +612,8 @@ section('10 · secrets never reach a snapshot');
   const m = r.json?.monitor;
   const txt = m?.baseline?.text ?? '';
   if (m && /\$QA_PASS/.test(txt) && !/hunter2/.test(txt)) ok('the vault value is its name in the baseline', txt); else bad('the vault value is its name in the baseline', txt);
+  const ex = m?.baselineExcerpt?.html ?? '';
+  if (/\$QA_PASS/.test(ex) && !/hunter2/.test(ex)) ok('and in the markup excerpt', ex.slice(0, 70)); else bad('and in the markup excerpt', ex.slice(0, 120));
   if (EXTERNAL) ok('(monitors.json — skipped against an external runner)');
   else {
     await wait(1200);   // the store is debounced half a second

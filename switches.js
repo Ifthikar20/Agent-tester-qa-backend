@@ -28,6 +28,7 @@
 export const SWITCHES = {
   'runner.recording':    'recording a flow',
   'runner.runs':         'running scripts and suites',
+  'runner.schedules':    'running suites and sweeping monitored pages on a schedule',
   'runner.onboarding':   'creating suites, pages and page scans',
   'runner.origins':      'allowing or removing origins',
   'runner.driving':      'opening pages and driving them from the console',

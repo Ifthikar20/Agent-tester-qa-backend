@@ -17,6 +17,11 @@
  *   the triage      a person's: assignee, severity, known issue or won't-fix,
  *                   all or nothing, with who did it. The facts cannot be
  *                   written, and a pass unparks.
+ *   a monitor's     an incident is filed as it opens, under the same numbers;
+ *                   a different failure rewrites it, resolving closes it (and
+ *                   says who accepted the state), the same failure again
+ *                   reopens it, a deleted monitor closes it — and no passing
+ *                   run ever closes it, since it has no cases.
  *
  * Then over HTTP, against a gated runner on a THROWAWAY key like
  * check-tenancy.js: history on disk is numbered on the first read, an admin
@@ -126,6 +131,21 @@ const cart = byId()['DEF-2609-002'];
 if (changes.length === 0 && cart.hits === 2 && cart.cases.length === 2) ok('a run in the same millisecond as the last one folded counts', 'no skip, no double count');
 else bad('a run in the same millisecond as the last one folded counts', JSON.stringify({ changes, cart }));
 
+// A drafted case's attempts (runs.js `draft`: a model's test nobody has
+// accepted) are read past and never folded: a failure it shares with a real
+// defect does not bump it, a new sentence files nothing, and a pass closes
+// nothing — the real pass a minute later still does.
+{
+  const untouched = JSON.stringify(reg.list());
+  history.push({ ...run(OCT + 20_000, { error: CART, step: 1, caseId: 'cs-draft', caseName: 'Drafted' }), draft: true });
+  history.push({ ...run(OCT + 21_000, { error: 'Nothing on the page says "Brochure"', step: 2, caseId: 'cs-draft', caseName: 'Drafted' }), draft: true });
+  history.push({ ...run(OCT + 22_000, { pass: true, caseId: 'cs-c', caseName: 'Search' }), draft: true });
+  changes = reg.sync(history);
+  const d2 = byId()['DEF-2609-002'];
+  if (changes.length === 0 && JSON.stringify(reg.list()) === untouched && d2.hits === 2 && d2.status === 'open') ok('a drafted case files, bumps and closes nothing', 'three draft runs, the registry byte for byte');
+  else bad('a drafted case files, bumps and closes nothing', JSON.stringify({ changes, hits: d2?.hits, status: d2?.status }));
+}
+
 // ---------------------------------------------------------------------------
 console.log('\n— one sentence about different steps ————————————————————————');
 
@@ -208,6 +228,64 @@ reg.sync(history);
 const back = byId()['DEF-2609-003'];
 if (back.status === 'reopened' && back.severity === 'major') ok('so coming back is reopened, not hidden — and a regression is major', `${back.status} · ${back.severity}`);
 else bad('so coming back is reopened, not hidden — and a regression is major', JSON.stringify(back));
+
+// ---------------------------------------------------------------------------
+console.log('\n— filed by a monitor —————————————————————————————————————————————');
+
+// An incident (monitor.js) is a defect too, under the same numbers, with the
+// monitor and the checks that failed as its identity and the incident's
+// evidence as its own. A run's pass never closes it: it has no cases.
+const ORG_INC = 'check-defects-incidents';
+rmSync(stateDir(ORG_INC), { recursive: true, force: true });
+{
+  const inc = defects.open(ORG_INC);
+  const monitor = { id: 'm_hero', label: 'Hero copy', selector: '[data-testid="hero-copy"]', ruleText: 'font size must not exceed 18px', url: 'https://shop.example/', suiteId: 'su-shop' };
+  const grew = { id: 'i_1', monitorId: 'm_hero', type: 'violation', violations: [{ checkId: 'c1', metric: 'fontSize', message: 'Font size must not exceed 18px', actual: 36, expected: '≤ 18px', baseline: 16 }], verdict: { severity: 'high', explanation: 'It grew.' }, before: { screenshot: 'm_hero-baseline.png' }, after: { screenshot: 'i_1-after.png' } };
+  const filedFrom = inc.incident('opened', { incident: grew, monitor, suiteName: 'Shop', at: SEPT });
+  const d1 = filedFrom.id ? inc.get(filedFrom.id) : null;
+  if (d1 && filedFrom.changes[0]?.kind === 'filed' && d1.id === 'DEF-2609-001' && d1.kind === 'monitor' && d1.status === 'open' && d1.severity === 'critical'
+      && d1.monitor?.id === 'm_hero' && d1.monitor.incidentId === 'i_1' && d1.evidence?.after === 'i_1-after.png' && d1.suites[0]?.name === 'Shop' && d1.cases.length === 0
+      && /Hero copy broke its rule/.test(d1.activity[0]?.text)) ok('an incident opening files a defect, graded by its verdict', `${d1.id} · ${d1.severity} · ${d1.title}`);
+  else bad('an incident opening files a defect, graded by its verdict', JSON.stringify(filedFrom) + ' ' + JSON.stringify(d1).slice(0, 200));
+
+  const runs = [run(SEPT + MIN, { pass: true }), run(SEPT + 2 * MIN, { error: CART, step: 1, caseId: 'cs-c', caseName: 'Search' })];
+  const folded = inc.sync(runs);
+  if (folded.every((c) => c.id !== d1?.id) && inc.get(d1.id).status === 'open' && folded.some((c) => c.kind === 'filed' && c.id === 'DEF-2609-002')) ok('a passing run closes no monitor defect, and the numbers are shared', folded.map((c) => `${c.id} ${c.kind}`).join(', '));
+  else bad('a passing run closes no monitor defect, and the numbers are shared', JSON.stringify(folded));
+
+  const reworded = { ...grew, violations: [{ checkId: 'c2', metric: 'text', message: 'Text must not change', actual: 'new copy', expected: 'unchanged' }] };
+  inc.incident('updated', { incident: reworded, monitor, at: SEPT + 3 * MIN });
+  const d1b = inc.get(d1.id);
+  if (d1b.title === 'Text must not change' && d1b.evidence.violations[0].checkId === 'c2' && /now failing differently/.test(d1b.activity.at(-1).text)) ok('a different failure inside the incident rewrites it', d1b.activity.at(-1).text);
+  else bad('a different failure inside the incident rewrites it', JSON.stringify(d1b).slice(0, 200));
+
+  const closed = inc.incident('resolved', { incident: { ...grew, resolvedBy: 'manual' }, monitor, by: { sub: PERSON.sub, email: PERSON.email, how: 'manual' }, at: SEPT + 4 * MIN });
+  const d1c = inc.get(d1.id);
+  if (closed.changes[0]?.kind === 'closed' && d1c.status === 'closed' && /accepted as the new baseline/.test(d1c.activity.at(-1).text) && d1c.activity.at(-1).by?.email === PERSON.email) ok('resolving closes it, and says who accepted the state', d1c.activity.at(-1).text);
+  else bad('resolving closes it, and says who accepted the state', JSON.stringify(d1c.activity.at(-1)));
+
+  const again = inc.incident('opened', { incident: { ...grew, id: 'i_2' }, monitor, at: SEPT + 5 * MIN });
+  const d1d = inc.get(d1.id);
+  if (again.id === d1.id && again.changes[0]?.kind === 'reopened' && d1d.status === 'reopened' && d1d.hits === 2 && d1d.monitor.incidentId === 'i_2') ok('the same rule breaking the same way reopens the same number', `${d1d.id} · ${d1d.hits} hits`);
+  else bad('the same rule breaking the same way reopens the same number', JSON.stringify(again));
+
+  const gone = inc.incident('opened', { incident: { id: 'i_3', monitorId: 'm_hero', type: 'missing', violations: [], verdict: { severity: 'high', explanation: 'gone' } }, monitor, at: SEPT + 6 * MIN });
+  const d2 = inc.get(gone.id);
+  if (gone.id === 'DEF-2609-003' && d2.severity === 'critical' && d2.monitor.type === 'missing' && /no longer on the page/.test(d2.title)) ok('going missing is another defect of the same monitor, critical', d2.title);
+  else bad('going missing is another defect of the same monitor, critical', JSON.stringify(gone));
+  const auto = inc.incident('resolved', { incident: { id: 'i_3', monitorId: 'm_hero', resolvedBy: 'auto' }, monitor, at: SEPT + 7 * MIN });
+  if (auto.changes[0]?.kind === 'closed' && /recovered on its own/.test(inc.get(d2.id).activity.at(-1).text)) ok('recovering closes it on its own', inc.get(d2.id).activity.at(-1).text);
+  else bad('recovering closes it on its own', JSON.stringify(auto));
+
+  const removed = inc.incident('removed', { monitor, at: SEPT + 8 * MIN });
+  if (removed.changes.length === 1 && removed.changes[0].id === d1.id && inc.get(d1.id).status === 'closed' && /monitor was deleted/.test(inc.get(d1.id).activity.at(-1).text)) ok('deleting the monitor closes what it had open', inc.get(d1.id).activity.at(-1).text);
+  else bad('deleting the monitor closes what it had open', JSON.stringify(removed));
+  const t = inc.totals();
+  const back = defects.open(ORG_INC);
+  if (t.monitors === 0 && t.all === 3 && back.get(d1.id).kind === 'monitor' && back.get(d1.id).evidence?.after === 'i_1-after.png') ok('counted by source, and kept across a restart', JSON.stringify({ all: t.all, monitors: t.monitors }));
+  else bad('counted by source, and kept across a restart', JSON.stringify(t));
+}
+rmSync(stateDir(ORG_INC), { recursive: true, force: true });
 
 // ---------------------------------------------------------------------------
 console.log('\n— kept ———————————————————————————————————————————————————————————');

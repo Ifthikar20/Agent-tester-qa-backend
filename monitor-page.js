@@ -1,8 +1,8 @@
 /**
  * The monitoring agent inside the driven page, and the runner's handle on it.
  *
- * Three files under monitor/page/ — the runtime, the picker, the watcher —
- * are read off disk and wrapped in one function body, exactly as recorder.js
+ * Four files under monitor/page/ — the sanitiser, the runtime, the picker,
+ * the watcher — are read off disk and wrapped in one function body, exactly as recorder.js
  * does with the extension's propose.js: one copy of the code, installed the
  * same way. `attach()` installs it the way Recorder.attach does, in the order
  * that matters: the bindings first (the page calls them), then the init script
@@ -21,13 +21,24 @@
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { PAGE_SELECTOR } from './monitor-rules.js';
 
 const part = (name) => readFileSync(fileURLToPath(new URL(`./monitor/page/${name}`, import.meta.url)), 'utf8');
 
-/** The in-page agent: one IIFE, top frame only, shared lexical scope for the three files. */
+/** The in-page agent: one IIFE, top frame only, shared lexical scope for the four files. */
 export const BUNDLE = "(function () {\n'use strict';\nif (window !== window.top) return;\n"
-  + ['core.js', 'picker.js', 'watcher.js'].map(part).join('\n')
+  + ['sanitize.js', 'core.js', 'picker.js', 'watcher.js'].map(part).join('\n')
   + '\n})();\n';
+
+/**
+ * The page's sanitiser, as a function the runner can call: the one file,
+ * evaluated on its own. It is pure — a string in, a string out — which is
+ * what lets check:monitoring-request prove what an excerpt can never carry
+ * without opening a browser.
+ */
+export function pageSanitizer() {
+  return new Function(`${part('sanitize.js')}\nreturn sanitizeHtml;`)();
+}
 
 export class MonitorAgent {
   /**
@@ -150,6 +161,11 @@ export class MonitorAgent {
     return this.#call((t) => (window.__gcMonitor ? window.__gcMonitor.measureFor(t) : null),
       { selector: target.selector, fingerprint: target.fingerprint || null });
   }
+  /** The element's markup excerpt (core.js excerptOf), or null when it is gone. */
+  async excerpt(target) {
+    return this.#call((t) => (window.__gcMonitor ? window.__gcMonitor.excerptFor(t) : null),
+      { selector: target.selector, fingerprint: target.fingerprint || null });
+  }
   async measureAll() {
     return this.#call(() => (typeof window.__gcMonitorMeasureAll === 'function' ? window.__gcMonitorMeasureAll() : null));
   }
@@ -163,7 +179,8 @@ export class MonitorAgent {
 
   /**
    * A clip of the element, padded, within the viewport; the whole viewport
-   * when the element is gone or has no size.
+   * when the element is gone or has no size — or when the monitor is on the
+   * whole page.
    *
    * `mayScroll` brings the element into view first. Never while a run or a
    * recording holds the page: scrolling under the executor moves what it is
@@ -179,6 +196,8 @@ export class MonitorAgent {
     const t = { selector: target.selector, fingerprint: target.fingerprint || null };
     const shot = (opts) => page.screenshot({ type: 'png', timeout: 5000, caret: 'initial', ...opts });
     const viewportShot = async () => ({ png: await shot({}), kind: 'viewport', clip: null, ts });
+    // The whole page's clip is the viewport: what a person would see.
+    if (t.selector === PAGE_SELECTOR) { try { return await viewportShot(); } catch { return null; } }
     const box = (scroll) => this.#call(([tt, s]) => {
       const r = window.__gcMonitor ? window.__gcMonitor.resolveTarget(tt) : { el: null };
       if (!r.el) return null;

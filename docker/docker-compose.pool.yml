@@ -11,13 +11,13 @@
 #                   concurrent sessions with today's single-browser code, one
 #                   per replica. Caddy load-balances across them by service DNS.
 #
-#   contexts (M)  — pool.js (GC_POOL_MAX). Once the runner leases per-org
-#                   contexts from the pool instead of holding one shared page
-#                   (the seam marked in server.js near the `browser` singleton
-#                   and newSession), each replica carries M isolated sessions.
-#                   scripts/check-pool.js proves that primitive on a real
-#                   browser today; GC_POOL_MAX is read by the runner once the
-#                   seam is wired.
+#   contexts (M)  — pool.js (GC_POOL_MAX). The runner leases per-org contexts
+#                   from the pool for what runs with nobody at the console — a
+#                   schedule's suite run or sweep (server.js backgroundSession)
+#                   — so each replica carries M of those beside its console page.
+#                   The console page itself is still one shared page per
+#                   replica; leasing one per driver is the step after.
+#                   scripts/check-pool.js proves the primitive on a real browser.
 #
 # So: N replicas × M contexts. This override turns on N; pool.js is M.
 #

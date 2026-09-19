@@ -31,8 +31,8 @@ const throws = (fn) => { try { fn(); return null; } catch (err) { return err; } 
 // ---------------------------------------------------------------------------
 console.log('\n— the rules ————————————————————————————————————————————————');
 
-// Six: recording, runs, onboarding, origins, driving, and heal (the fixes layer).
-expect('a service name is every switch of that service', parseOff('runner').size === 7, [...parseOff('runner')].join(','));
+// Eight: recording, runs, schedules, onboarding, origins, driving, heal (the fixes layer) and chat.
+expect('a service name is every switch of that service', parseOff('runner').size === 8, [...parseOff('runner')].join(','));
 expect('* is every switch there is', parseOff('*').size === Object.keys(SWITCHES).length);
 const typo = throws(() => parseOff('runner.recordin'));
 expect('a switch nobody knows is refused, not ignored', typo && /runner\.recordin/.test(typo.message), typo?.message);

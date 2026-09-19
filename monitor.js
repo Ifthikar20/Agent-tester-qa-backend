@@ -1,7 +1,9 @@
 /**
  * Agentic monitoring — the engine, one per organisation, and its store.
  *
- * A monitor is an element on a page and a rule about it. The page agent
+ * A monitor is an element on a page and a rule about it — or the whole page
+ * (`:page`) and a rule about its layout or its words, judged by the diff of
+ * two page snapshots rather than by one element's numbers. The page agent
  * (monitor-page.js) reports a snapshot whenever the element's change
  * signature changes; this funnels those reports through a debounce, evaluates
  * them deterministically (monitor-evaluate.js), insists a new state is
@@ -34,14 +36,16 @@ import crypto from 'node:crypto';
 import { stateDir } from './org.js';
 import * as secrets from './secrets.js';
 import { redactWith } from './redact.js';
-import { evaluate, diff, summarize } from './monitor-evaluate.js';
-import { compileMock, judgeMock, compactSnapshot, sameDoc, violationKey, RULE_MAX, LABEL_MAX, SELECTOR_MAX } from './monitor-rules.js';
+import { evaluate, diff, summarize, changedKeys, isPageSnapshot } from './monitor-evaluate.js';
+import { compileMock, judgeMock, compactSnapshot, sameDoc, violationKey, RULE_MAX, LABEL_MAX, SELECTOR_MAX, PAGE_SELECTOR } from './monitor-rules.js';
 
-export { RULE_MAX, LABEL_MAX, SELECTOR_MAX };
+export { RULE_MAX, LABEL_MAX, SELECTOR_MAX, PAGE_SELECTOR };
 export const MONITORS_MAX = 50;
 export const INCIDENTS_MAX = 200;
 const FINGERPRINT_MAX = 4096;
 const SPEC_ERROR_MAX = 300;
+/** How much of an excerpt's markup is kept, per monitor and per incident; the model is shown up to the page's own cap. */
+const EXCERPT_KEEP = 4000;
 const JUDGE_MIN_INTERVAL_MS = 60000;
 const HEARTBEAT_MS = 2500;
 /**
@@ -52,6 +56,15 @@ const HEARTBEAT_MS = 2500;
  * change on a page that was already open is confirmed in half a second.
  */
 export const ARM_GRACE_MS = 6000;
+/**
+ * How long a new monitor on the whole page watches the page nobody touched
+ * before its baseline is settled: the blocks that changed meanwhile — a
+ * ticker, a clock, a carousel — are the page's own churn, learned into the
+ * spec's `ignore` and never reported. Three readings, half a second apart.
+ */
+export const PAGE_LEARN_MS = 500;
+export const PAGE_LEARN_READS = 3;
+const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); t.unref?.(); });
 /** A shot's name, as the gated route accepts it — and nothing with a slash or a dot in it. */
 export const SHOT_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,120}\.png$/;
 
@@ -63,6 +76,16 @@ let cfg = {
   resolver: null,
   budget: null,
   isIdle: () => true,
+  /** One question per monitor per this long; a check sets it to zero. */
+  judgeIntervalMs: JUDGE_MIN_INTERVAL_MS,
+  /** Somewhere to tell (notify.js send): an incident opening or resolving goes there too. Null tells nobody. */
+  notify: null,
+  /**
+   * The defect registry (defects.js incident): an incident is filed as a
+   * defect when it opens and closed when it resolves. (org, event, { incident,
+   * monitor, by }) → the defect's id, or null. Null files nothing.
+   */
+  defects: null,
 };
 /**
  * Given once by server.js: how to reach an organisation's sockets, which mind
@@ -86,6 +109,18 @@ const now = () => Date.now();
 const newRuntime = () => ({ debounce: null, pending: null, candidate: null, confirm: null, confirming: false, lastJudgeAt: 0, judgeTimer: null, judgeInFlight: false, tickTimer: null, tickPending: null, armedAt: 0 });
 const clearRuntime = (rt) => { if (!rt) return; clearTimeout(rt.debounce); clearTimeout(rt.confirm); clearTimeout(rt.judgeTimer); clearTimeout(rt.tickTimer); rt.debounce = rt.confirm = rt.judgeTimer = rt.tickTimer = null; rt.candidate = null; rt.pending = null; rt.tickPending = null; };
 const str = (v, max) => String(v ?? '').trim().slice(0, max);
+/** Whether a failing check is a judgment clause's proxy (monitor-rules.js normalizeSpec): it says the element changed, not that the rule broke. */
+const isJudgmentCheck = (spec, id) => !!(spec && Array.isArray(spec.checks) && spec.checks.find((c) => c.id === id && c.judgment));
+/** An excerpt as it is kept: the markup cut at a tag boundary to EXCERPT_KEEP. */
+function keepExcerpt(x) {
+  if (!x) return null;
+  let html = String(x.html ?? '');
+  if (html.length > EXCERPT_KEEP) {
+    const cut = html.lastIndexOf('>', EXCERPT_KEEP);
+    html = (cut > EXCERPT_KEEP / 2 ? html.slice(0, cut + 1) : html.slice(0, EXCERPT_KEEP)) + '…';
+  }
+  return { ...x, html };
+}
 
 class MonitorEngine {
   constructor(org) {
@@ -185,7 +220,22 @@ class MonitorEngine {
   /** A snapshot's text, redacted in place — it is a fresh object from the page. */
   cleanSnapshot(s) {
     if (s && typeof s.text === 'string') s.text = this.redact(s.text);
+    if (s && typeof s.title === 'string') s.title = this.redact(s.title);
+    // A page's blocks carry the page's words, block by block.
+    if (s && Array.isArray(s.blocks)) for (const b of s.blocks) if (b && typeof b.text === 'string') b.text = this.redact(b.text);
     return s;
+  }
+  /** An excerpt (core.js excerptOf), redacted string by string — markup and one-liners are page content too. */
+  cleanExcerpt(x) {
+    if (!x || typeof x !== 'object') return null;
+    const line = (v) => this.redact(String(v ?? '')).slice(0, 200);
+    return {
+      html: this.redact(String(x.html ?? '')),
+      path: Array.isArray(x.path) ? x.path.slice(0, 12).map(line) : [],
+      siblings: Array.isArray(x.siblings) ? x.siblings.slice(0, 8).map(line) : [],
+      children: Array.isArray(x.children) ? x.children.slice(0, 8).map(line) : [],
+      childCount: Number.isFinite(x.childCount) ? x.childCount : null,
+    };
   }
 
   // ---- lifecycle ----------------------------------------------------------------------
@@ -204,11 +254,29 @@ class MonitorEngine {
   emit(ev) { cfg.emitTo(this.org, ev); }
   say(level, msg) { this.emit({ t: 'log', level, msg }); }
   live() { return this.agent && this.agent.alive() ? this.agent : null; }
+  /**
+   * The incident, into the defect registry (cfg.defects) — filed as it opens,
+   * rewritten as it changes, closed as it resolves, and every open one of a
+   * monitor closed when the monitor goes. The id comes back onto the incident
+   * so a card and a notification can name the number. Failing at it must not
+   * cost the incident: said in the log, and the incident stands.
+   */
+  fileDefect(event, inc, m, by = null) {
+    if (!cfg.defects) return inc?.defect ?? null;
+    try {
+      const id = cfg.defects(this.org, event, { incident: inc, monitor: m, by }) ?? null;
+      if (inc && id) inc.defect = id;
+      return id;
+    } catch (err) {
+      cfg.log.error(`  monitoring: could not file the defect: ${err.message}`);
+      return inc?.defect ?? null;
+    }
+  }
 
   // ---- listings ------------------------------------------------------------------------
   status() {
     return {
-      counts: { monitors: this.monitors.size, open: [...this.incidents.values()].filter((i) => i.status === 'open').length },
+      counts: { monitors: this.monitors.size, open: [...this.incidents.values()].filter((i) => i.status !== 'resolved').length },
     };
   }
   onPage(m) {
@@ -242,7 +310,8 @@ class MonitorEngine {
   listIncidents(status, project = null) {
     const mine = project ? new Set([...this.monitors.values()].filter((m) => this.belongs(m, project)).map((m) => m.id)) : null;
     return [...this.incidents.values()]
-      .filter((i) => (!status || i.status === status) && (!mine || mine.has(i.monitorId)))
+      // `open` is everything unresolved: an incident still being judged is open in every sense a page counts.
+      .filter((i) => (!status || (status === 'open' ? i.status !== 'resolved' : i.status === status)) && (!mine || mine.has(i.monitorId)))
       .sort((a, b) => b.openedAt - a.openedAt);
   }
   incident(id) {
@@ -295,27 +364,46 @@ class MonitorEngine {
     const agent = this.live();
     const url = agent?.url();
     if (!agent || !url) throw refuse('Nothing is open yet — open a URL first', 409);
+    // The whole page: no fingerprint (there is nothing to find again), and
+    // the baseline is settled only after the page has been watched a moment
+    // — what changed while nobody touched it is what the page does on its own.
+    const isPage = selector === PAGE_SELECTOR;
+    if (isPage) fingerprint = null;
     const base = await agent.measure({ selector, fingerprint });
-    if (!base || !base.exists) throw refuse(`No element matches "${selector}" on the current page`, 422);
+    if (!base || !base.exists) throw refuse(isPage ? 'The page could not be measured' : `No element matches "${selector}" on the current page`, 422);
+    const volatile = new Set();
+    if (isPage && isPageSnapshot(base)) {
+      for (let i = 0; i < PAGE_LEARN_READS; i++) {
+        await sleep(PAGE_LEARN_MS);
+        const again = await agent.measure({ selector, fingerprint: null }).catch(() => null);
+        if (isPageSnapshot(again)) for (const k of changedKeys(base, again)) volatile.add(k);
+      }
+    }
     this.cleanSnapshot(base);
     if (fingerprint && typeof fingerprint.text === 'string') fingerprint = { ...fingerprint, text: this.redact(fingerprint.text) };
+    // The element's markup, for the compilers: what is really there, with the
+    // code taken out before it left the page (core.js excerptOf).
+    const excerpt = this.cleanExcerpt(await agent.excerpt({ selector, fingerprint }).catch(() => null));
     const m = {
-      id: newId('m'), label: this.redact(str(label, LABEL_MAX) || selector).slice(0, LABEL_MAX), url, suiteId,
+      id: newId('m'), label: this.redact(str(label, LABEL_MAX) || (isPage ? 'Whole page' : selector)).slice(0, LABEL_MAX), url, suiteId,
       selector, fingerprint: fingerprint || null, tag: str(tag, 40) || base.tag || null, ruleText,
-      spec: null, specSource: null, specError: null, baseline: base, baselineShot: null, last: base,
+      spec: null, specSource: null, specError: null, baseline: base, baselineShot: null, baselineExcerpt: keepExcerpt(excerpt), last: base,
       state: 'ok', openIncidentId: null, createdAt: now(), lastTickAt: null, lastVisitAt: null,
       stats: { ticks: 0, reports: 0, incidents: 0, judgeCalls: 0, visits: 0 },
     };
-    const element = { tag: m.tag, selector, label: m.label, textPreview: (base.text || '').slice(0, 120) };
+    const element = { tag: m.tag, selector, label: m.label, textPreview: (base.text || '').slice(0, 120), excerpt };
     m.spec = compileMock({ ruleText: m.ruleText, element, baseline: base });
-    m.specSource = cfg.llm.mode === 'claude' && cfg.resolver ? 'provisional' : 'mock';
+    // A page rule is the diff's to answer, not a model's to compile: the mock's spec is final.
+    if (m.spec.kind === 'page') { m.spec.ignore = [...volatile]; m.specSource = 'mock'; }
+    else m.specSource = cfg.llm.mode === 'claude' && cfg.resolver ? 'provisional' : 'mock';
     this.monitors.set(m.id, m);
     this.rt.set(m.id, newRuntime());
     const shot = await agent.screenshotElement(m, { mayScroll: cfg.isIdle() }).catch(() => null);
     if (shot) m.baselineShot = this.saveShot(`${m.id}-baseline`, shot.png);
     this.persist();
     this.emit({ t: 'monitor.changed', monitor: this.publicMonitor(m) });
-    this.say('info', `watching ${m.label}: ${m.spec.checks.map((c) => `${c.metric} ${c.op}${c.value == null ? '' : ` ${c.value}`}`).join(', ')}`);
+    const learned = m.spec.kind === 'page' ? ` (${base.counts?.blocks ?? 0} blocks${volatile.size ? `, ${volatile.size} that change on their own ignored` : ''})` : '';
+    this.say('info', `watching ${m.label}: ${m.spec.checks.map((c) => `${c.metric} ${c.op}${c.value == null ? '' : ` ${c.value}`}`).join(', ')}${learned}`);
     await agent.arm(m).catch(() => null);
     if (m.specSource === 'provisional') this.compileAsync(m, element);
     return m;
@@ -334,7 +422,12 @@ class MonitorEngine {
     if (!this.monitors.has(m.id)) return;
     if (spec) {
       m.spec = spec; m.specSource = 'claude'; m.specError = null;
-      this.say('info', `rule compiled by Claude for ${m.label}: ${spec.checks.map((c) => `${c.metric} ${c.op}${c.value == null ? '' : ` ${c.value}`}`).join(', ')}`);
+      const judged = spec.clauses.filter((c) => c.outcome === 'judgment').map((c) => `"${c.text}"`);
+      const lost = spec.clauses.filter((c) => c.outcome === 'not_understood').map((c) => `"${c.text}"`);
+      this.say('info', `rule compiled by Claude for ${m.label}: ${spec.checks.map((c) => `${c.metric} ${c.op}${c.value == null ? '' : ` ${c.value}`}`).join(', ')}${judged.length ? `; judged on change: ${judged.join(', ')}` : ''}${lost.length ? `; not understood: ${lost.join(', ')}` : ''}`);
+      // Said on its own, before the card mutates: the checks a person approved
+      // in the preview were the mock's, and these are not the same checks.
+      this.emit({ t: 'monitor.compiled', monitorId: m.id, source: 'claude', clauses: spec.clauses, checks: spec.checks, summary: spec.summary });
     } else {
       m.specSource = 'mock';
       m.specError = why.slice(0, SPEC_ERROR_MAX);
@@ -356,6 +449,8 @@ class MonitorEngine {
   async remove(id) {
     const m = this.get(id);
     clearRuntime(this.rt.get(id));
+    // Its open defects close with it, saying why (defects.js): a rule nobody watches any more is not a standing failure.
+    this.fileDefect('removed', null, m);
     // Its incidents go with it, clips included. They were evidence about a
     // rule nobody watches any more, and a page that reports on what is set
     // should not fill up with the history of what is not.
@@ -434,12 +529,14 @@ class MonitorEngine {
     if (desired === m.state) { rt.candidate = null; clearTimeout(rt.confirm); rt.confirm = null; return; }
     // Acknowledged (manually resolved) monitors stay quiet while the same checks keep failing.
     if (m.state === 'acknowledged' && desired !== 'ok' && violationKey(res) === m.ackKey) { rt.candidate = null; clearTimeout(rt.confirm); rt.confirm = null; return; }
-    // Missing just after arming is "not yet", and neither a second report
+    // Missing just after arming is "not yet" (any change, on a whole page), and neither a second report
     // that agrees nor the half-second re-measure gets to decide it; only the
     // measurement at the end of the grace does. Anything else — a violation,
     // or missing on a page that has been open a while — is confirmed as fast
     // as it always was.
-    const late = desired === 'missing' && rt.armedAt && now() - rt.armedAt < ARM_GRACE_MS;
+    // A whole page just armed is still arriving too: a block a framework
+    // renders a second later is late, not gone, so every verdict waits.
+    const late = rt.armedAt && now() - rt.armedAt < ARM_GRACE_MS && (desired === 'missing' || m.spec?.kind === 'page');
     if (rt.candidate && rt.candidate.desired === desired && reason !== 'recompiled') {
       if (!late) { this.confirm(m, desired, res, snap); return; }
       if (rt.confirm) return;
@@ -477,9 +574,13 @@ class MonitorEngine {
         if (m.openIncidentId) await this.resolve(m.openIncidentId, 'auto');
         this.say('info', `recovered: ${m.label} is back within its rule`);
       } else {
+        // The markup as it is now, for the incident and the judge: a removed
+        // node or a swapped class is evidence a clip alone may not show.
+        const agent = this.live();
+        const excerpt = agent ? this.cleanExcerpt(await agent.excerpt(m).catch(() => null)) : null;
         const open = m.openIncidentId ? this.incidents.get(m.openIncidentId) : null;
-        if (open && open.status === 'open') await this.updateIncident(m, open, res, snap, desired);
-        else await this.openIncident(m, res, snap, desired);
+        if (open && open.status !== 'resolved') await this.updateIncident(m, open, res, snap, desired, excerpt);
+        else await this.openIncident(m, res, snap, desired, excerpt);
       }
       this.persist();
       this.emit({ t: 'monitor.changed', monitor: this.publicMonitor(m) });
@@ -487,15 +588,21 @@ class MonitorEngine {
   }
 
   // ---- incidents -----------------------------------------------------------------------
-  async openIncident(m, res, snap, desired) {
+  async openIncident(m, res, snap, desired, excerpt = null) {
+    // Only a judgment clause's proxies failed: the element changed, and whether
+    // the rule broke is Claude's to say (JUDGE_DIRECT_SYSTEM). The incident
+    // opens as `judging` and the verdict makes it stand or resolves it; with
+    // no model it opens as any other, with a verdict that says what is missing.
+    const judgmentOnly = desired !== 'missing' && res.violations.length > 0 && res.violations.every((v) => isJudgmentCheck(m.spec, v.checkId));
+    const willJudge = judgmentOnly && cfg.llm.mode === 'claude' && !!cfg.resolver;
     const inc = {
       id: newId('i'), monitorId: m.id, monitorLabel: m.label, suiteId: m.suiteId ?? null, selector: m.selector, ruleText: m.ruleText,
-      type: desired === 'missing' ? 'missing' : 'violation', status: 'open',
+      type: desired === 'missing' ? 'missing' : 'violation', status: willJudge ? 'judging' : 'open', judgment: judgmentOnly,
       openedAt: now(), resolvedAt: null, resolvedBy: null,
       violations: res.violations,
-      before: { snapshot: compactSnapshot(m.baseline), screenshot: m.baselineShot },
-      after: { snapshot: compactSnapshot(snap), screenshot: null },
-      diff: diff(m.baseline, snap), verdict: null,
+      before: { snapshot: compactSnapshot(m.baseline), screenshot: m.baselineShot, excerpt: m.baselineExcerpt ?? null },
+      after: { snapshot: compactSnapshot(snap), screenshot: null, excerpt: keepExcerpt(excerpt) },
+      diff: diff(m.baseline, snap, m.spec), verdict: null,
     };
     let afterPng = null;
     const agent = this.live();
@@ -503,51 +610,67 @@ class MonitorEngine {
       const shot = await agent.screenshotElement(m, { mayScroll: cfg.isIdle() }).catch(() => null);
       if (shot) { afterPng = shot.png; inc.after.screenshot = this.saveShot(`${inc.id}-after`, shot.png); inc.after.screenshotKind = shot.kind; }
     }
-    inc.verdict = judgeMock({ label: m.label, selector: m.selector, ruleText: m.ruleText, violations: inc.violations, diff: inc.diff });
+    inc.verdict = judgeMock({ label: m.label, selector: m.selector, ruleText: m.ruleText, violations: inc.violations, diff: inc.diff, judgment: judgmentOnly });
     this.incidents.set(inc.id, inc);
     m.openIncidentId = inc.id;
     m.stats.incidents++;
+    // A defect, under the same numbers as a failed run's (defects.js), before
+    // anyone is told — so the event and the notification carry its number.
+    inc.defect = null;
+    this.fileDefect('opened', inc, m);
     this.prune();
     this.persist();
     this.emit({ t: 'incident.opened', incident: inc });
-    const headline = (inc.violations[0] && inc.violations[0].message) || 'The element changed';
+    const headline = (inc.violations[0] && inc.violations[0].message) || (m.spec?.kind === 'page' ? 'The page changed' : 'The element changed');
+    try { cfg.notify?.(this.org, 'incident', { id: inc.id, label: m.label, ruleText: m.ruleText, headline, severity: inc.verdict?.severity ?? null, page: m.url ?? null, url: m.url ?? null, defect: inc.defect ?? null }); }
+    catch (err) { cfg.log.error(`  monitoring: could not notify: ${err.message}`); }
     // A rule the element failed from the start — "must not exceed 10px" on a
     // 16px paragraph — is a rule to rewrite, not a change to chase; the
     // baseline itself says which this is.
     const brokenFromTheStart = !evaluate(m.spec, m.baseline, m.baseline).ok;
-    this.say('error', `${brokenFromTheStart ? 'already broken at creation' : 'incident'}: ${m.label} — ${headline}`);
+    if (willJudge) this.say('warn', `judging: ${m.label} changed — asking Claude whether "${m.spec.judgmentHint ?? m.ruleText}" still holds`);
+    else this.say('error', `${brokenFromTheStart ? 'already broken at creation' : 'incident'}: ${m.label} — ${headline}`);
     agent?.flash(m).catch(() => null);
-    this.scheduleJudge(m, inc, afterPng);
+    this.scheduleJudge(m, inc, afterPng, excerpt);
   }
-  async updateIncident(m, inc, res, snap, desired) {
+  async updateIncident(m, inc, res, snap, desired, excerpt = null) {
     const prevIds = inc.violations.map((v) => v.checkId).sort().join(',');
     const nextIds = res.violations.map((v) => v.checkId).sort().join(',');
     inc.violations = res.violations;
     inc.after.snapshot = compactSnapshot(snap);
-    inc.diff = diff(m.baseline, snap);
+    if (excerpt) inc.after.excerpt = keepExcerpt(excerpt);
+    inc.diff = diff(m.baseline, snap, m.spec);
     inc.type = desired === 'missing' ? 'missing' : 'violation';
     inc.updatedAt = now();
     const agent = this.live();
+    let afterPng = null;
     if (prevIds !== nextIds && agent) {
       const shot = await agent.screenshotElement(m, { mayScroll: cfg.isIdle() }).catch(() => null);
-      if (shot) { this.deleteShot(inc.after.screenshot); inc.after.screenshot = this.saveShot(`${inc.id}-after-${inc.updatedAt}`, shot.png); inc.after.screenshotKind = shot.kind; }
+      if (shot) { afterPng = shot.png; this.deleteShot(inc.after.screenshot); inc.after.screenshot = this.saveShot(`${inc.id}-after-${inc.updatedAt}`, shot.png); inc.after.screenshotKind = shot.kind; }
     }
-    if (!inc.verdict || inc.verdict.source === 'mock') inc.verdict = judgeMock({ label: m.label, selector: m.selector, ruleText: m.ruleText, violations: inc.violations, diff: inc.diff });
+    if (!inc.verdict || inc.verdict.source === 'mock') inc.verdict = judgeMock({ label: m.label, selector: m.selector, ruleText: m.ruleText, violations: inc.violations, diff: inc.diff, judgment: !!inc.judgment });
+    if (prevIds !== nextIds) this.fileDefect('updated', inc, m);
     this.emit({ t: 'incident.updated', incident: inc });
+    // A different failure inside the same incident is a new question.
+    if (prevIds !== nextIds) this.scheduleJudge(m, inc, afterPng, excerpt);
   }
   /**
    * Close an incident. `auto` is recovery; `manual` is "accept the current
-   * state": relative rules take the element as it is now for their new
-   * baseline, and absolute rules that still fail put the monitor into
-   * `acknowledged`, which stays quiet until the element changes again.
+   * state" (`who` says by whom), and `judge` is Claude saying the change was fine: for both, the
+   * element as it is now becomes the baseline — relative rules and judgment
+   * proxies take it as their new normal — and absolute rules that still fail
+   * put the monitor into `acknowledged`, which stays quiet until the element
+   * changes again.
    */
-  async resolve(incId, by) {
+  async resolve(incId, by, who = null) {
     const inc = this.incident(incId);
     const m = this.monitors.get(inc.monitorId);
-    if (inc.status === 'open') {
+    if (inc.status !== 'resolved') {
       inc.status = 'resolved'; inc.resolvedAt = now(); inc.resolvedBy = by;
       if (m && m.openIncidentId === inc.id) m.openIncidentId = null;
-      if (by === 'manual' && m) {
+      // Its defect closes with it; `who` is the person behind a manual resolve, for the activity.
+      this.fileDefect('resolved', inc, m ?? null, who ? { ...who, how: by } : { how: by });
+      if ((by === 'manual' || by === 'judge') && m) {
         const rt = this.rt.get(m.id);
         if (rt) { rt.candidate = null; clearTimeout(rt.confirm); rt.confirm = null; clearTimeout(rt.debounce); rt.debounce = null; rt.pending = null; }
         if (m.last && m.last.exists) {
@@ -556,6 +679,7 @@ class MonitorEngine {
           if (agent) {
             const shot = await agent.screenshotElement(m, { mayScroll: cfg.isIdle() }).catch(() => null);
             if (shot) { this.deleteShot(m.baselineShot); m.baselineShot = this.saveShot(`${m.id}-baseline-${now()}`, shot.png); }
+            m.baselineExcerpt = keepExcerpt(this.cleanExcerpt(await agent.excerpt(m).catch(() => null))) ?? m.baselineExcerpt ?? null;
           }
         }
         if (m.state !== 'paused') {
@@ -567,6 +691,8 @@ class MonitorEngine {
       }
       this.persist();
       this.emit({ t: 'incident.resolved', incident: inc });
+      try { cfg.notify?.(this.org, 'incident', { id: inc.id, status: 'resolved', label: inc.monitorLabel, ruleText: inc.ruleText, by: by ?? null, page: m?.url ?? null, url: m?.url ?? null, defect: inc.defect ?? null }); }
+      catch (err) { cfg.log.error(`  monitoring: could not notify: ${err.message}`); }
     }
     return inc;
   }
@@ -574,7 +700,7 @@ class MonitorEngine {
   prune() {
     if (this.incidents.size <= INCIDENTS_MAX) return;
     const byAge = [...this.incidents.values()].sort((a, b) => a.openedAt - b.openedAt);
-    const drop = [...byAge.filter((i) => i.status !== 'open'), ...byAge.filter((i) => i.status === 'open')];
+    const drop = [...byAge.filter((i) => i.status === 'resolved'), ...byAge.filter((i) => i.status !== 'resolved')];
     for (const inc of drop) {
       if (this.incidents.size <= INCIDENTS_MAX) break;
       this.incidents.delete(inc.id);
@@ -583,18 +709,22 @@ class MonitorEngine {
   }
 
   // ---- the judge -----------------------------------------------------------------------------
-  scheduleJudge(m, inc, afterPng) {
+  scheduleJudge(m, inc, afterPng, afterExcerpt = null) {
     if (cfg.llm.mode !== 'claude' || !cfg.resolver) return;
     const rt = this.rt.get(m.id);
     if (!rt) return;
-    const wait = Math.max(0, JUDGE_MIN_INTERVAL_MS - (now() - rt.lastJudgeAt));
+    const wait = Math.max(0, cfg.judgeIntervalMs - (now() - rt.lastJudgeAt));
     clearTimeout(rt.judgeTimer);
-    rt.judgeTimer = setTimeout(() => this.runJudge(m, inc, afterPng), wait);
+    rt.judgeTimer = setTimeout(() => this.runJudge(m, inc, afterPng, afterExcerpt), wait);
   }
-  async runJudge(m, inc, afterPng) {
+  async runJudge(m, inc, afterPng, afterExcerpt = null) {
     const rt = this.rt.get(m.id);
     if (!rt || rt.judgeInFlight || !this.incidents.has(inc.id) || !cfg.resolver) return;
-    if (cfg.budget && !cfg.budget.take()) { this.say('warn', `no verdict from Claude for ${m.label}: the daily AI budget is spent`); return; }
+    if (cfg.budget && !cfg.budget.take()) {
+      this.say('warn', `no verdict from Claude for ${m.label}: the daily AI budget is spent`);
+      this.unjudged(inc, 'the daily AI budget is spent');
+      return;
+    }
     rt.judgeInFlight = true;
     rt.lastJudgeAt = now();
     m.stats.judgeCalls++;
@@ -604,19 +734,31 @@ class MonitorEngine {
       const v = await cfg.resolver.judge({
         label: m.label, selector: m.selector, ruleText: m.ruleText, specSummary: m.spec && m.spec.summary, judgmentHint: m.spec && m.spec.judgmentHint,
         violations: inc.violations, diff: inc.diff, beforePng, afterPng: after, elapsedMs: inc.openedAt - m.createdAt,
+        beforeExcerpt: m.baselineExcerpt ?? null, afterExcerpt: afterExcerpt ?? inc.after?.excerpt ?? null,
+        direct: !!inc.judgment,
       });
       if (!this.incidents.has(inc.id)) return;
+      const first = (s) => String(s ?? '').split(/(?<=\.)\s/)[0];
       if (v) {
         inc.verdict = v;
-        this.say('info', `Claude on ${m.label}: ${v.severity} severity, ${v.violation ? 'a real violation' : 'a false alarm'}`);
-        if (m.spec && m.spec.needsLlmJudgment && v.violation === false && inc.status === 'open') {
-          await this.resolve(inc.id, 'judge');
-          m.state = 'ok';
-          this.emit({ t: 'monitor.changed', monitor: this.publicMonitor(m) });
+        if (inc.status === 'judging' || (m.spec && m.spec.needsLlmJudgment && inc.status !== 'resolved')) {
+          if (v.violation) {
+            // A judged change that broke the rule: the incident stands, in Claude's words.
+            inc.status = 'open';
+            this.say('error', `incident: ${m.label} — ${first(v.explanation)}`);
+          } else {
+            // Judged fine: the element as it is now becomes the baseline, and the
+            // same state is not asked about again (resolve, 'judge').
+            this.say('info', `judged fine: ${m.label} — ${first(v.explanation)}`);
+            await this.resolve(inc.id, 'judge');
+          }
+        } else {
+          this.say('info', `Claude on ${m.label}: ${v.severity} severity, ${v.violation ? 'a real violation' : 'a false alarm'}`);
         }
       } else {
         const why = String(cfg.resolver.unavailable || 'unavailable');
-        inc.verdict = { ...(inc.verdict || judgeMock({ label: m.label, selector: m.selector, ruleText: m.ruleText, violations: inc.violations, diff: inc.diff })), source: 'error', error: why, at: now() };
+        inc.verdict = { ...(inc.verdict || judgeMock({ label: m.label, selector: m.selector, ruleText: m.ruleText, violations: inc.violations, diff: inc.diff, judgment: !!inc.judgment })), source: 'error', error: why, at: now() };
+        this.unjudged(inc, why);
         if (why === 'AuthenticationError') this.switchToMock('Claude rejected the runner’s credentials; rules are compiled and incidents judged by the mock from here on');
         else this.say('warn', `no verdict from Claude for ${m.label}: ${why}`);
       }
@@ -625,6 +767,15 @@ class MonitorEngine {
       this.persist();
       if (this.incidents.has(inc.id)) this.emit({ t: 'incident.updated', incident: inc });
     }
+  }
+
+  /** A judging incident nobody could judge stands as an ordinary one, saying why: never silence. */
+  unjudged(inc, why) {
+    if (inc.status !== 'judging') return;
+    inc.status = 'open';
+    inc.verdict = { ...(inc.verdict || {}), unjudged: String(why).slice(0, 200), at: now() };
+    this.persist();
+    this.emit({ t: 'incident.updated', incident: inc });
   }
 
   // ---- the heartbeat -----------------------------------------------------------------------

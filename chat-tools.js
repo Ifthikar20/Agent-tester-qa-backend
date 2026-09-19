@@ -39,12 +39,24 @@
  * browser and change what the organisation keeps, so they answer
  * `needsConfirmation` with a proposal id and stop; a person presses the
  * button.
+ *
+ * Three read what the person handed over rather than what the runner keeps:
+ * `attachment` reads a file attached to the turn (chat-import.js),
+ * `translate_code` turns test code into checks the runner can run
+ * (chat-translate.js) — proposing, never running — and `chart` shapes a
+ * chart from the records or from a table (chat-charts.js) for the page to
+ * draw under the reply. A file's words are the person's own, and ride in
+ * the untrusted block like a page's do.
  */
 import { betaTool } from '@anthropic-ai/sdk/helpers/beta/json-schema';
 import { normalizeUrl } from './origins.js';
 import { redactWith } from './redact.js';
 import { originOf, pageCheckFlow } from './suites.js';
 import { EntitlementError, RunnerBusy } from './tenancy.js';
+import { parseAction } from './vocabulary.js';
+import { checkColumns, chartableColumns } from './chat-import.js';
+import { CHECKS_MAX, compileCheck, detectFramework, frameworkWord, originOfCheck, translate } from './chat-translate.js';
+import { bySuite, defectsBy, describeChart, monitorsByState, runsPerDay, tableChart } from './chat-charts.js';
 
 // This file is copied as it is into the other runner (README "Two front
 // ends, one IR"), which has neither defects.js nor switches.js: the one
@@ -71,7 +83,14 @@ export function canonicalId(input) {
  */
 export const TOOL_NAMES = Object.freeze([
   'run_history', 'defects', 'defect', 'suites', 'suite', 'find', 'pages_scanned', 'monitoring', 'runner_state',
-  'run_case', 'run_suite', 'run_page_check', 'scan_page', 'quickstart',
+  'run_case', 'run_suite', 'run_page_check', 'scan_page', 'plan_page_tests', 'quickstart', 'docs',
+  'attachment', 'translate_code', 'chart',
+]);
+
+/** What `chart` can draw, from the records or from an attached table. */
+export const CHART_WHATS = Object.freeze([
+  'runs_per_day', 'pass_rate_by_suite', 'runs_by_suite', 'defects_by_severity', 'defects_by_status',
+  'cases_by_suite', 'pages_by_suite', 'monitors_by_state', 'file',
 ]);
 
 // ---- ids ---------------------------------------------------------------------------------
@@ -114,6 +133,8 @@ export function refusalOf(err) {
   if (err instanceof RunnerBusy) return { refused: 'runner_busy', org: err.org };
   if (err?.name === 'SwitchedOff') return { refused: 'switched_off', switch: err.key };
   if (err?.status === 409) return { refused: 'busy', error: String(err.message ?? '') };
+  // A refusal that names itself (chat.js: a second proposal in one turn).
+  if (typeof err?.refused === 'string') return { refused: err.refused, error: String(err.message ?? '').slice(0, 200) };
   return { refused: 'error', error: String(err?.message ?? err).slice(0, 200) };
 }
 
@@ -326,6 +347,17 @@ const SPECS = Object.freeze({
       properties: { suiteId: { type: 'string', description: 'The suite id, from suites or find.' } },
     }),
   }),
+  docs: Object.freeze({
+    name: 'docs',
+    description: 'Search ghostclick\'s own documentation — how to record a test, what a setting, switch or plan does, why the runner refused an origin or a step, how to deploy, sign in or keep a secret — and get the best-matching sections with the file and heading each came from. For questions about the product itself, never for this organisation\'s data.',
+    inputSchema: Object.freeze({
+      type: 'object', additionalProperties: false, required: ['query'],
+      properties: {
+        query: { type: 'string', description: 'The question, or its key words.' },
+        limit: { type: 'integer', description: 'How many sections, at most 5.' },
+      },
+    }),
+  }),
   find: Object.freeze({
     name: 'find',
     description: 'Search this organisation\'s suites, pages and cases by name, path or flow text and get the best matches with a score from 0 to 1. Call this FIRST whenever the person names something in words rather than by id.',
@@ -397,6 +429,55 @@ const SPECS = Object.freeze({
       },
     }),
   }),
+  plan_page_tests: Object.freeze({
+    name: 'plan_page_tests',
+    description: 'PROPOSE drafting test cases for a page: the runner opens the page, reads its controls, writes up to four candidate cases and shows them for the person to tick and run; nothing is run or saved without a press. It answers needsConfirmation: describe what would happen in one sentence and stop. Offered only where this organisation allows it.',
+    inputSchema: Object.freeze({
+      type: 'object', additionalProperties: false, required: ['suiteId', 'pageId'],
+      properties: {
+        suiteId: { type: 'string', description: 'The suite the page belongs to.' },
+        pageId: { type: 'string', description: 'The page to draft tests for, from find or suite.' },
+        focus: { type: 'string', description: 'What the person asked to have tested on it, in their words, when they said.' },
+        count: { type: 'integer', description: 'How many cases they asked for, 1 to 4, when they said.' },
+      },
+    }),
+  }),
+  attachment: Object.freeze({
+    name: 'attachment',
+    description: 'Read a file the person attached to this conversation (a runner note names them): a table\'s columns, row count and first rows, or a code file\'s framework and an excerpt. Tables are CSV, TSV, JSON or a spreadsheet. Call it before describing or charting a file.',
+    inputSchema: Object.freeze({
+      type: 'object', additionalProperties: false, required: [],
+      properties: {
+        name: { type: 'string', description: 'The file\'s name as the note gave it. Omit for the most recent one.' },
+        rows: { type: 'integer', description: 'How many rows of a table to read, at most 40. Default 20.' },
+      },
+    }),
+  }),
+  translate_code: Object.freeze({
+    name: 'translate_code',
+    description: 'PROPOSE running test code as checks: a Playwright, Cypress, Selenium or Puppeteer test the person attached or pasted — or a table whose rows are steps — is translated into this runner\'s own checks, each validated like a saved case. Nothing runs without the person ticking the checks and pressing Run. It answers needsConfirmation with how many checks it made and what it could not carry: describe that in one sentence each and stop.',
+    inputSchema: Object.freeze({
+      type: 'object', additionalProperties: false, required: [],
+      properties: {
+        name: { type: 'string', description: 'The attached file to translate. Omit for the most recent code file, or when the code is in the person\'s message.' },
+        suiteId: { type: 'string', description: 'The suite the checks belong to, when the person named one — its origin completes a relative address and the checks can be kept in it.' },
+      },
+    }),
+  }),
+  chart: Object.freeze({
+    name: 'chart',
+    description: 'Draw a chart under the reply from this organisation\'s records — runs per day, the pass rate or the runs by suite, defects by severity or status, cases or pages by suite, monitors by state — or from a table the person attached (what: file, with the columns they named). The chart is drawn by the page; say in one sentence what it shows.',
+    inputSchema: Object.freeze({
+      type: 'object', additionalProperties: false, required: ['what'],
+      properties: {
+        what: { type: 'string', enum: ['runs_per_day', 'pass_rate_by_suite', 'runs_by_suite', 'defects_by_severity', 'defects_by_status', 'cases_by_suite', 'pages_by_suite', 'monitors_by_state', 'file'], description: 'Which chart.' },
+        days: { type: 'integer', description: 'For runs: how many days back, 1 to 30. Default 14.' },
+        x: { type: 'string', description: 'For a file: the column of labels. Default the first text column.' },
+        y: { type: 'array', items: { type: 'string' }, description: 'For a file: the columns of numbers, at most four. Default every numeric column.' },
+        name: { type: 'string', description: 'For a file: which attached file. Default the most recent table.' },
+      },
+    }),
+  }),
   quickstart: Object.freeze({
     name: 'quickstart',
     description: 'PROPOSE making a suite from a URL: it creates the suite, opens the page, records its targets and runs a first check, so it answers needsConfirmation and a person presses the button. Describe what would happen in one sentence and stop.',
@@ -431,8 +512,17 @@ class BadInput extends Error {
  *   runner, `byName` for the mock mind (its `run` gives back the result object
  *   rather than the string), `calls` for the UI and the turn's record.
  */
-export function makeTools({ space, ent, switches = null, org, actions, redact, propose, onCall = () => {}, now = Date.now }) {
+export function makeTools({ space, ent, switches = null, org, actions, redact, propose, onCall = () => {}, now = Date.now, attachments = [], text = '' }) {
   const calls = [];
+  // What the person handed this conversation (chat-import.js): the files of
+  // this turn and the ones still remembered, newest last.
+  const attached = Array.isArray(attachments) ? attachments : [];
+  const attachedBy = (name, kinds = null) => {
+    const list = kinds ? attached.filter((a) => kinds.includes(a.kind)) : attached;
+    if (name) return list.find((a) => a.name === name) ?? attached.find((a) => a.name === name) ?? null;
+    return list[list.length - 1] ?? null;
+  };
+  const minutesLeft = (a) => Math.max(0, Math.round(((a.expiresAt ?? 0) - now()) / 60000));
   const byName = {};
   const tools = [];
   const clean = (t, max = 240) => (t == null ? null : String(redact(t)).slice(0, max));
@@ -440,6 +530,12 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
   // store: either way, the name is what a person reads.
   const nameOf = (x) => (x == null ? null : typeof x === 'object' ? (x.name ?? x.id ?? null) : x);
   const defectsOf = () => actions.defects(space, ent);
+  // Drafting tests is offered only where the runner says so: the switch that
+  // gates a live page read, and — with a model as the mind — the
+  // organisation's consent to a model reading its pages (server.js plans).
+  const plansOf = () => (typeof actions.plans === 'function' ? actions.plans(space, switches) : null);
+  // The documentation (docs-index.js) is offered where the checkout has any.
+  const docsOf = () => (typeof actions.docs === 'function' ? actions.docs(space) : null);
 
   // A page or a case, found or named as missing — every run tool starts here.
   const suiteOf = (suiteId) => {
@@ -478,6 +574,10 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
   const TOOLS = {
     run_history: {
       label: () => 'read the run history',
+      view: ({ facts, unsafe }) => ({
+        kind: 'runs', days: facts.days, totals: facts.totals, suites: facts.suites.slice(0, 8),
+        latest: facts.latest.slice(0, 10).map((r, i) => ({ ...r, suite: unsafe.latest[i]?.suite ?? null, caseName: unsafe.latest[i]?.caseName ?? null, error: unsafe.latest[i]?.error ?? null })),
+      }),
       validate: (a) => ({
         days: int(a.days, 1, 30, 14),
         suiteId: a.suiteId == null ? null : (isSuiteId(a.suiteId) ? String(a.suiteId) : null),
@@ -502,6 +602,10 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
 
     defects: {
       label: () => 'read the defect list',
+      view: ({ facts, unsafe }) => ({
+        kind: 'defects', status: facts.status, totals: facts.totals,
+        rows: facts.rows.slice(0, 10).map((r, i) => ({ ...r, title: unsafe.rows[i]?.title ?? null })),
+      }),
       validate: (a) => ({
         status: STATUSES.includes(a.status) ? a.status : 'open',
         limit: int(a.limit, 1, 25, 10),
@@ -523,6 +627,11 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
 
     defect: {
       label: (a) => `read ${canonicalId(a.id) ?? 'a defect'}`,
+      view: ({ facts, unsafe }) => ({
+        kind: 'defect', ...facts, title: unsafe.title, target: unsafe.target,
+        caseNames: unsafe.cases.slice(0, 6), suiteNames: unsafe.suites.slice(0, 6),
+        runs: facts.runs.map((r, i) => ({ at: r.at, caseName: unsafe.runs[i]?.caseName ?? null, error: unsafe.runs[i]?.error ?? null })),
+      }),
       validate: (a) => {
         const id = canonicalId(a.id);
         if (!id) throw new BadInput(`"${a.id}" is not a defect number — they look like DEF-2609-007`);
@@ -550,6 +659,7 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
 
     suites: {
       label: () => 'listed the suites',
+      view: ({ facts, unsafe }) => ({ kind: 'suites', rows: facts.suites.slice(0, 12).map((s, i) => ({ ...s, name: unsafe.suites[i]?.name ?? s.id })) }),
       validate: () => ({}),
       summary: ({ facts }) => `${facts.suites.length} suite${facts.suites.length === 1 ? '' : 's'}`,
       execute: () => {
@@ -563,6 +673,14 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
 
     suite: {
       label: (a) => `opened "${nameIn(a.suiteId, null)}"`,
+      view: ({ facts, unsafe }) => {
+        const pageName = new Map(facts.pages.map((p, i) => [p.id, unsafe.pages[i]?.name ?? p.path]));
+        return {
+          kind: 'suite', id: facts.id, name: unsafe.name, origin: facts.origin, allowed: facts.allowed,
+          pages: facts.pages.slice(0, 12).map((p, i) => ({ ...p, name: unsafe.pages[i]?.name ?? p.path })),
+          cases: facts.cases.slice(0, 12).map((c, i) => ({ ...c, name: unsafe.cases[i]?.name ?? c.id, page: c.pageId ? pageName.get(c.pageId) ?? null : null })),
+        };
+      },
       validate: (a) => {
         if (!isSuiteId(a.suiteId)) throw new BadInput(`"${a.suiteId}" is not a suite id — take one from suites or find`);
         return { suiteId: String(a.suiteId) };
@@ -583,6 +701,32 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
             cases: s.cases.map((c) => ({ id: c.id, name: clean(c.name, 80), flow: clean(c.flow, 600) })),
           },
         };
+      },
+    },
+
+    docs: {
+      label: (a) => `looked up the docs for "${String(a.query ?? '').slice(0, 60)}"`,
+      validate: (a) => {
+        const query = String(a.query ?? '').trim().slice(0, 200);
+        if (!query) throw new BadInput('docs needs a query — the question, or its key words');
+        return { query, limit: int(a.limit, 1, 5, 3) };
+      },
+      summary: ({ facts }) => (facts.sections.length
+        ? `${facts.sections.length} section${facts.sections.length === 1 ? '' : 's'}: ${facts.sections.map((s) => s.heading).join(', ')}`
+        : 'nothing in the docs matched'),
+      execute: ({ query, limit }) => {
+        const hits = docsOf().search(query, limit);
+        // The documentation is the runner's own words, not a site's: it goes
+        // to the model as facts it may read, each section with the file and
+        // heading it came from, and the same two land on the reply as its
+        // sources (chat.js) so a person can see where the answer was read.
+        const sections = hits.map((h) => ({
+          file: h.section.file, heading: h.section.heading, under: h.section.path.join(' › ') || null,
+          matched: h.matched, headed: h.headed, terms: h.terms, text: h.section.text,
+          // The section's opening, when the part that matched was a later one.
+          ...(h.lead ? { lead: h.lead.text } : {}),
+        }));
+        return { facts: { query, sections }, unsafe: null, sources: hits.map((h) => ({ file: h.section.file, heading: h.section.heading })) };
       },
     },
 
@@ -611,6 +755,7 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
 
     pages_scanned: {
       label: () => 'read what has been scanned',
+      view: ({ facts, unsafe }) => ({ kind: 'pages', rows: facts.pages.slice(0, 12).map((p, i) => ({ ...p, suite: unsafe.pages[i]?.suite ?? null, name: unsafe.pages[i]?.name ?? null, url: unsafe.pages[i]?.url ?? null })) }),
       validate: (a) => ({ limit: int(a.limit, 1, 20, 10) }),
       summary: ({ facts }) => `${facts.pages.length} page${facts.pages.length === 1 ? '' : 's'}`,
       execute: ({ limit }) => {
@@ -631,6 +776,11 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
 
     monitoring: {
       label: () => 'read the monitors',
+      view: ({ facts, unsafe }) => ({
+        kind: 'monitoring', counts: facts.counts,
+        monitors: facts.monitors.slice(0, 12).map((m, i) => ({ ...m, label: unsafe.monitors[i]?.label ?? null })),
+        incidents: facts.incidents.slice(0, 8).map((x, i) => ({ ...x, explanation: unsafe.incidents[i]?.explanation ?? null })),
+      }),
       validate: () => ({}),
       summary: ({ facts }) => `${facts.counts.monitors} monitors, ${facts.counts.open} open`,
       execute: () => {
@@ -754,6 +904,23 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
       },
     },
 
+    plan_page_tests: {
+      label: (a) => `proposed drafting tests for "${nameIn(a.suiteId, a.pageId)}"`,
+      validate: (a) => {
+        if (!isSuiteId(a.suiteId)) throw new BadInput(`"${a.suiteId}" is not a suite id — take one from find`);
+        if (!isPageId(a.pageId)) throw new BadInput(`"${a.pageId}" is not a page id — they look like pg_1a2b3c4d5e6f`);
+        const count = a.count == null ? null : Math.max(1, Math.min(4, Math.round(Number(a.count)) || 3));
+        return { suiteId: String(a.suiteId), pageId: String(a.pageId), focus: a.focus == null ? '' : String(a.focus).slice(0, 200), count };
+      },
+      summary: ({ proposal }) => `proposed ${proposal.id}`,
+      execute: ({ suiteId, pageId, focus, count }) => {
+        const suite = suiteOf(suiteId);
+        const page = pageOf(suite, pageId);
+        const proposal = propose({ kind: 'plan_page', args: { suiteId, pageId, focus, count }, label: `read "${clean(page.name, 80)}" and draft tests for it` });
+        return { facts: { needsConfirmation: true, proposal: { id: proposal.id, kind: proposal.kind, label: proposal.label } }, unsafe: null, proposal };
+      },
+    },
+
     scan_page: {
       label: (a) => `proposed a scan of "${nameIn(a.suiteId, a.pageId)}"`,
       validate: (a) => {
@@ -785,7 +952,171 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
         return { facts: { needsConfirmation: true, proposal: { id: proposal.id, kind: proposal.kind, label: proposal.label } }, unsafe: null, proposal };
       },
     },
+    attachment: {
+      label: (a) => `read "${String(a.name ?? 'the attached file').slice(0, 60)}"`,
+      view: ({ view }) => view ?? null,
+      validate: (a) => ({ name: a.name == null ? null : String(a.name).slice(0, 120), rows: int(a.rows, 1, 40, 20) }),
+      summary: ({ facts }) => (facts.error ? facts.error : facts.kind === 'table' ? `${facts.rows} rows × ${facts.columns} columns` : `${facts.kind}, ${facts.lines ?? 0} lines`),
+      execute: ({ name, rows }) => {
+        const a = attachedBy(name);
+        if (!a) return { facts: { error: attached.length ? `no attached file called "${name}" — the files are ${attached.map((x) => x.name).join(', ')}` : 'nothing is attached to this conversation — attach a file with the paperclip, or paste it' }, unsafe: null };
+        const base = { name: clean(a.name, 120), kind: a.kind, size: a.size, keptForMinutes: minutesLeft(a), ...(a.framework ? { framework: a.framework } : {}) };
+        if (a.table) {
+          const t = a.table;
+          const sample = t.rows.slice(0, rows).map((r) => r.map((c) => clean(c, 80)));
+          const cols = t.columns.map((c) => ({ name: clean(c.name, 48), type: c.type }));
+          return {
+            facts: { ...base, rows: t.rows.length, columns: t.columns.length, truncated: !!t.truncated, ...(t.sheet ? { sheet: clean(t.sheet, 40), sheets: t.sheets } : {}), chartable: chartableColumns(t).y.length > 0, checks: !!checkColumns(t) },
+            unsafe: { columns: cols, sample },
+            view: { kind: 'table', name: base.name, columns: cols, rows: t.rows.slice(0, 40).map((r) => r.map((c) => clean(c, 80))), total: t.rows.length, ...(t.sheet ? { sheet: clean(t.sheet, 40) } : {}) },
+          };
+        }
+        // A final newline ends the last line rather than starting an empty one (chat-import.js attachmentMeta counts the same way).
+        const lines = String(a.text ?? '').replace(/\r?\n$/, '').split('\n');
+        return { facts: { ...base, lines: lines.length }, unsafe: { excerpt: clean(lines.slice(0, 120).join('\n'), 4000) } };
+      },
+    },
+
+    translate_code: {
+      label: (a) => (a.name ? `translated "${String(a.name).slice(0, 60)}"` : 'translated the code'),
+      validate: (a) => ({
+        name: a.name == null ? null : String(a.name).slice(0, 120),
+        suiteId: a.suiteId == null ? null : (isSuiteId(a.suiteId) ? String(a.suiteId) : null),
+      }),
+      summary: ({ facts, proposal }) => (proposal ? `${facts.checks.length} check${facts.checks.length === 1 ? '' : 's'} from ${facts.framework}${facts.dropped ? `, ${facts.dropped} dropped` : ''}` : facts.why ?? 'nothing to run'),
+      execute: ({ name, suiteId }) => {
+        // What to translate: the named file, else the newest code or flow
+        // file, else a table whose rows are steps, else the message itself.
+        let source = attachedBy(name, ['code', 'flow']) ?? (name ? attachedBy(name) : null);
+        if (source && source.kind === 'table') source = null;
+        let fromTable = null;
+        if (!source) { const t = attachedBy(name, ['table']); if (t && checkColumns(t.table)) fromTable = t; }
+        const words = String(text ?? '');
+        if (!source && !fromTable && detectFramework(words)) source = { name: 'the message', kind: 'code', text: words };
+        if (!source && !fromTable) return { facts: { checks: [], why: attached.length ? 'the attached files hold no test code and no table of steps' : 'no test code was attached or pasted — Playwright, Cypress, Selenium, Puppeteer or the flow language' }, unsafe: null };
+        const checkFlow = actions.checkFlow(space);
+        const suites = space.suites.list();
+        const chosen = suiteId ? suiteOf(suiteId) : null;
+        const originOfSuite = (s) => { try { return originOf(space.suites.get(s.id)); } catch { return s.origin ?? null; } };
+        const suiteFor = (check) => {
+          if (chosen) return chosen;
+          const o = originOfCheck(check);
+          const hit = o ? suites.find((s) => originOfSuite(s) === o) : null;
+          if (hit) return space.suites.get(hit.id);
+          // A relative address is completed by the one suite there is — or by
+          // the one origin every suite shares, which is just as unambiguous.
+          const origins = new Set(suites.map(originOfSuite).filter(Boolean));
+          return suites.length === 1 || origins.size === 1 ? space.suites.get(suites[0].id) : null;
+        };
+        let r;
+        if (fromTable) {
+          const t = fromTable.table;
+          const cols = checkColumns(t);
+          const checks = t.rows.slice(0, CHECKS_MAX).map((row, i) => {
+            const flow = String(row[cols.flow] ?? '');
+            const nm = cols.name >= 0 ? String(row[cols.name] ?? '') : '';
+            const url = cols.url >= 0 ? String(row[cols.url] ?? '') : '';
+            const fw = detectFramework(flow);
+            if (fw && fw !== 'flow') { const one = translate(flow, { name: nm || `Row ${i + 1}` }); const c = one.checks[0]; return c ? { ...c, name: nm || c.name } : { name: nm || `Row ${i + 1}`, steps: [], notes: [], dropped: [{ line: 'the row', why: one.why ?? 'nothing the runner can carry' }] }; }
+            if (fw === 'flow') return { name: nm || `Row ${i + 1}`, flow, steps: null, notes: [], dropped: [] };
+            // Steps written one per line, in the language's own words (click 'Send' : button).
+            const lines = flow.split(/\r?\n|;/).map((l) => l.trim()).filter(Boolean);
+            const steps = [];
+            const dropped = [];
+            if (url) steps.push({ op: 'goto', url });
+            for (const l of lines) { try { const step = parseActionLine(l); if (step) steps.push(step); else dropped.push({ line: l.slice(0, 160), why: 'not a step the runner knows' }); } catch (err) { dropped.push({ line: l.slice(0, 160), why: err.message.slice(0, 120) }); } }
+            return { name: nm || `Row ${i + 1}`, steps, notes: [], dropped };
+          });
+          r = { framework: 'table', checks, dropped: [], skipped: 0, extra: Math.max(0, t.rows.length - CHECKS_MAX) };
+        } else {
+          r = translate(source.text, { name: String(source.name).replace(/\.[a-z0-9]+$/i, '') });
+        }
+        if (!r.framework) return { facts: { checks: [], why: r.why }, unsafe: { name: clean(source?.name ?? fromTable?.name, 120) } };
+        const kept = [];
+        const droppedChecks = [];
+        for (const c of r.checks) {
+          const suite = suiteFor(c);
+          const out = compileCheck(c, { suiteName: suite ? suite.name : 'Imported', base: suite ? originOf(suite) : null, checkFlow });
+          const notes = [...(c.notes ?? []), ...(c.dropped ?? []).map((d) => `left out: ${d.why}`)];
+          if (!out.ok) { droppedChecks.push({ name: c.name, why: out.why }); continue; }
+          kept.push({ id: `dc${kept.length + 1}`, name: c.name, steps: out.steps.length, flow: out.flow, suiteId: suite?.id ?? null, suite: suite?.name ?? null, why: notes.join('; ').slice(0, 200), notes, guessed: notes.some((n) => /guessed/.test(n)) });
+          if (kept.length >= CHECKS_MAX) break;
+        }
+        const lines = [...(r.dropped ?? []), ...r.checks.flatMap((c) => c.dropped ?? [])].slice(0, 12);
+        const from = r.framework === 'table' ? 'a table' : frameworkWord(r.framework);
+        const facts = {
+          framework: r.framework, source: clean(source?.name ?? fromTable?.name, 120),
+          checks: kept.map((c) => ({ id: c.id, steps: c.steps, suiteId: c.suiteId, guessed: c.guessed })),
+          dropped: droppedChecks.length, untranslated: lines.length, skipped: r.skipped ?? 0, extra: r.extra ?? 0,
+        };
+        const unsafe = {
+          checks: kept.map((c) => ({ id: c.id, name: clean(c.name, 80), suite: c.suite ? clean(c.suite, 80) : null, notes: c.notes.map((n) => clean(n, 160)) })),
+          dropped: droppedChecks.map((d) => ({ name: clean(d.name, 80), why: clean(d.why, 200) })),
+          lines: lines.map((d) => ({ line: clean(d.line, 160), why: clean(d.why, 160) })),
+        };
+        if (!kept.length) return { facts: { ...facts, why: `nothing in ${facts.source} could be carried across` }, unsafe };
+        const proposal = propose({
+          kind: 'run_import',
+          args: { from: r.framework, cases: kept.map((c) => ({ id: c.id, name: c.name, flow: c.flow, suiteId: c.suiteId, suite: c.suite })) },
+          items: kept.map((c) => ({ id: c.id, name: clean(c.name, 80), steps: c.steps, flow: clean(c.flow, 2000), why: clean(c.why, 200) })),
+          label: `run ${kept.length} check${kept.length === 1 ? '' : 's'} translated from ${from}`,
+        });
+        return { facts: { ...facts, needsConfirmation: true, proposal: { id: proposal.id, kind: proposal.kind, label: proposal.label } }, unsafe, proposal };
+      },
+    },
+
+    chart: {
+      label: (a) => `charted ${String(a.what ?? 'the records').replace(/_/g, ' ')}`,
+      view: ({ view }) => view ?? null,
+      validate: (a) => {
+        if (!CHART_WHATS.includes(a.what)) throw new BadInput(`"${a.what}" is not a chart — one of ${CHART_WHATS.join(', ')}`);
+        const ys = Array.isArray(a.y) ? a.y.filter((v) => typeof v === 'string').slice(0, 4) : typeof a.y === 'string' ? [a.y] : null;
+        return { what: a.what, days: int(a.days, 1, 30, 14), x: a.x == null ? null : String(a.x).slice(0, 80), y: ys && ys.length ? ys.map((v) => v.slice(0, 80)) : null, name: a.name == null ? null : String(a.name).slice(0, 120) };
+      },
+      summary: ({ facts }) => (facts.error ? facts.error : `${facts.points} point${facts.points === 1 ? '' : 's'}, ${facts.series.length} series`),
+      execute: ({ what, days, x, y, name }) => {
+        let spec = null;
+        let extra = {};
+        if (what === 'runs_per_day') spec = runsPerDay(actions.history(space, ent).summary(days, null).days);
+        else if (what === 'pass_rate_by_suite' || what === 'runs_by_suite') {
+          const s = actions.history(space, ent).summary(days, null);
+          spec = bySuite(s.suites.map((r) => ({ ...r, suite: clean(r.suite, 48) })), { metric: what === 'pass_rate_by_suite' ? 'passRate' : 'runs' });
+        } else if (what === 'defects_by_severity' || what === 'defects_by_status') {
+          const d = defectsOf();
+          if (!d) return { facts: { error: 'this runner files no defects — ask for runs instead' }, unsafe: null };
+          const rows = d.list('all');
+          if (what === 'defects_by_severity' && rows.some((r) => r.severity)) spec = defectsBy('severity', { rows });
+          else { spec = defectsBy('status', { totals: d.totals() }); if (what === 'defects_by_severity') extra = { note: 'no defect here has a severity, so they are counted by status' }; }
+        } else if (what === 'cases_by_suite' || what === 'pages_by_suite') {
+          spec = bySuite(space.suites.list().map((s) => ({ name: clean(s.name, 48), cases: s.cases, pages: s.pages })), { metric: what === 'cases_by_suite' ? 'cases' : 'pages' });
+        } else if (what === 'monitors_by_state') spec = monitorsByState(space.monitors.list());
+        else {
+          const a = attachedBy(name, ['table']);
+          if (!a) return { facts: { error: attached.length ? 'none of the attached files is a table' : 'no table is attached — attach a CSV, TSV, JSON or spreadsheet' }, unsafe: null };
+          const r = tableChart(a.table, { x, y });
+          if (r.why) return { facts: { error: r.why }, unsafe: { name: clean(a.name, 120) } };
+          spec = r.spec;
+          spec.labels = spec.labels.map((l) => clean(l, 48));
+          spec.series = spec.series.map((s) => ({ ...s, name: clean(s.name, 48) }));
+          spec.title = clean(spec.title, 80);
+          extra = { file: clean(a.name, 120), x: clean(r.x, 48), y: r.y.map((v) => clean(v, 48)) };
+        }
+        const described = describeChart(spec);
+        return {
+          facts: { what, points: spec.labels.length, series: described.map((s) => ({ total: s.total, topValue: s.topValue })), unit: spec.unit, ...(extra.note ? { note: extra.note } : {}) },
+          unsafe: { title: spec.title, subtitle: spec.subtitle, series: described.map((s) => ({ name: s.name, top: s.top })), ...(extra.file ? { file: extra.file, x: extra.x, y: extra.y } : {}) },
+          view: { ...spec, ...(extra.note ? { note: extra.note } : {}) },
+        };
+      },
+    },
   };
+
+  /** A step written in the language's own words, as a table's cell may hold one. */
+  function parseActionLine(line) {
+    let m;
+    if ((m = line.match(/^(?:goto|open|visit)\s+(\S+)$/i))) return { op: 'goto', url: m[1] };
+    return parseAction(line);
+  }
 
   // ---- the wrapper every tool shares -----------------------------------------------------------
   let n = 0;
@@ -828,6 +1159,11 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
     if (result.runs) record.runs = result.runs;
     if (refused) record.refused = refused;
     if (result.proposal) record.proposal = result.proposal;
+    if (result.sources) record.sources = result.sources;
+    // What the tool read, shaped for the page to draw (chat.js `data`): rows and
+    // numbers only, names already cleaned, never a decision. A view that
+    // cannot be shaped is no view; the reply is still the reply.
+    if (!refused && t.view) { try { record.view = t.view(result); } catch { /* decoration */ } }
     calls.push(record);
     onCall({ id, name, label, state: refused ? 'error' : 'done', summary });
     return result;
@@ -837,7 +1173,7 @@ export function makeTools({ space, ent, switches = null, org, actions, redact, p
     // A runner with no defect store has no defect tools rather than two that
     // answer "not here": the list of names is the product's, the tools are
     // this deployment's.
-    const adapter = name === 'defects' || name === 'defect' ? defectsOf() : true;
+    const adapter = name === 'defects' || name === 'defect' ? defectsOf() : name === 'plan_page_tests' ? plansOf() : name === 'docs' ? docsOf() : true;
     if (!adapter) continue;
     if (name === 'defect' && !adapter.byId) continue;
     const spec = SPECS[name];

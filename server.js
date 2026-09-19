@@ -27,23 +27,28 @@ import { discover, links } from './targets.js';
 import { targetRefresher, watchDom } from './domwatch.js';
 import { parse } from './parse.js';
 import { parseFlow, flatten, toFlow } from './flow.js';
-import { readHealEnv, TRACE_MAX } from './heal.js';
+import { HARMFUL, readHealEnv, TRACE_MAX } from './heal.js';
 import { createResolver, findApiKey } from './resolver.js';
-import { StepNotes } from './understand.js';
+import { StepNotes, captureStep } from './understand.js';
 import { NoSuchFix, SAVED_KINDS, STATUSES as FIX_STATUSES, StaleFix, occurrenceOf, changesCase } from './fixes.js';
 import { LANGUAGE_VERSION } from './vocabulary.js';
 import { toMermaid } from './diagram.js';
 import { Recorder } from './recorder.js';
 import { NavigationLog } from './navlog.js';
 import * as monitoring from './monitor.js';
+import * as schedules from './schedules.js';
+import { BrowserPool, PoolFull } from './pool.js';
+import * as notify from './notify.js';
 import { MonitorAgent } from './monitor-page.js';
 // Aliased: resolver.js (automatic fixes) exports the same two names, and each
 // layer keeps its own copy of the key lookup and its own client.
-import { findApiKey as findMonitorApiKey, createResolver as createMonitorResolver, createBudget, MODEL as MONITOR_MODEL } from './monitor-resolver.js';
+import { createResolver as createMonitorResolver, createBudget, MODEL as MONITOR_MODEL } from './monitor-resolver.js';
 import { llmModeFrom, compactSnapshot, previewSpec } from './monitor-rules.js';
 import { redactWith } from './redact.js';
 import * as chat from './chat.js';
-import { findApiKey as findChatApiKey, createResolver as createChatResolver, chatModeFrom, MODEL as CHAT_MODEL } from './chat-resolver.js';
+import * as chatPlan from './chat-plan.js';
+import * as docsIndex from './docs-index.js';
+import { createResolver as createChatResolver, chatModeFrom, MODEL as CHAT_MODEL } from './chat-resolver.js';
 import { redactSecrets } from './heal.js';
 
 const require = createRequire(import.meta.url);
@@ -121,26 +126,30 @@ if (SWITCH_ERROR || LIMIT_ERROR || LOG_ERROR || HEAL_ENV.error) {
   process.exit(1);
 }
 /**
+ * ONE key for the three layers that may call a model — the fixes
+ * (resolver.js), agentic monitoring (monitor-resolver.js) and the chat
+ * (chat-resolver.js) — read ONCE, here: the environment, else
+ * ANTHROPIC_API_KEY alone out of .env.local. Then it is taken out of the
+ * environment, once: Playwright starts the browser with this process's
+ * environment, and the browser is the part of the runner that renders pages
+ * other people choose. Each layer holds the key only inside its resolver;
+ * nothing prints it — every banner line says "key found" and where.
+ *
+ * It used to be read three times. Monitoring's read came AFTER the fixes
+ * layer had emptied the environment, so a deployed runner — the environment
+ * only, no .env.local — was always the mock compiler whatever key was set.
+ * scripts/check-keys.js keeps that from coming back: the three layers see
+ * the key, and the browser does not.
+ */
+const API_KEY = findApiKey({ env: process.env, root: fileURLToPath(new URL('./', import.meta.url)) });
+delete process.env.ANTHROPIC_API_KEY;
+/**
  * The model behind GC_HEAL=ai (resolver.js): one resolver for the process,
  * made whether or not this deployment runs ai, because whether a key is here
  * is something the banner and /api/state report either way.
- *
- * The key is found once (the environment, else ANTHROPIC_API_KEY alone out of
- * .env.local) and held only inside the resolver. It is then taken out of the
- * environment: Playwright starts the browser with this process's environment,
- * and the browser is the part of the runner that renders pages other people
- * choose. Nothing prints it — the banner says "key found" and where.
  */
-/**
- * The chat's key (chat-resolver.js), read HERE — before the fixes layer just
- * below takes ANTHROPIC_API_KEY out of the environment — and only read: the
- * delete stays where it is, so the browser is started without the key as
- * before. Held inside the resolver alone; the banner says where it came from.
- */
-const CHAT_KEY = findChatApiKey({ env: process.env, root: fileURLToPath(new URL('./', import.meta.url)) });
 const AI = (() => {
-  const { key, source } = findApiKey({ env: process.env, root: fileURLToPath(new URL('./', import.meta.url)) });
-  delete process.env.ANTHROPIC_API_KEY;
+  const { key, source } = API_KEY;
   // Held only where it can be used: a deployment that does not run ai reports
   // whether a key is there and keeps nothing of it in memory.
   // Two clients over the one key: a run's questions and a recording's go out
@@ -171,16 +180,10 @@ const CDP_URL = (process.env.GC_CDP_URL ?? '').trim();
  * Agentic monitoring's mind (monitor-rules.js, monitor-resolver.js): Claude
  * when a key is here, the mock compiler and judge otherwise, and
  * GC_MONITOR_LLM to say so explicitly — a word the runner does not know stops
- * it here, never read as off.
- *
- * The key is found once (the environment, else ANTHROPIC_API_KEY alone out of
- * .env.local) and held only inside the resolver. It is then taken OUT of the
- * environment: Playwright starts the browser with this process's environment,
- * and the browser is the part of the runner that renders pages other people
- * choose. Nothing that prints ever sees the key, only where it came from.
+ * it here, never read as off. The key is the one read above, held only
+ * inside the resolver; the banner says where it came from, never what it is.
  */
-const MONITOR_KEY = findMonitorApiKey({ env: process.env, root: fileURLToPath(new URL('./', import.meta.url)) });
-delete process.env.ANTHROPIC_API_KEY;
+const MONITOR_KEY = API_KEY;
 const MONITOR_LLM = llmModeFrom({ env: process.env, haveKey: Boolean(MONITOR_KEY.key) });
 if (MONITOR_LLM.error) {
   console.error(`\n  ${MONITOR_LLM.error}\n`);
@@ -201,6 +204,7 @@ const monitorBudget = createBudget({ max: MONITOR_AI_PER_DAY });
  * off. The budget is the process's, in memory: a ceiling against a runaway
  * conversation, not billing.
  */
+const CHAT_KEY = API_KEY;
 const CHAT = chatModeFrom({ env: process.env, haveKey: Boolean(CHAT_KEY.key) });
 if (CHAT.error) {
   console.error(`\n  ${CHAT.error}\n`);
@@ -212,6 +216,15 @@ if (!Number.isInteger(CHAT_AI_PER_DAY) || CHAT_AI_PER_DAY < 0) {
   process.exit(1);
 }
 const chatResolver = CHAT.mode === 'claude' ? createChatResolver({ apiKey: CHAT_KEY.key }) : null;
+
+/**
+ * The documentation beside this file, cut into sections for the chat's `docs`
+ * tool (docs-index.js): read once here, never written. A checkout deployed
+ * without its markdown gets a chat that cannot answer questions about the
+ * product, and the banner says so. Read here, with the other boot-time reads, because
+ * the banner below names it before the chat is configured.
+ */
+const DOCS = docsIndex.load(fileURLToPath(new URL('./', import.meta.url)));
 const chatBudget = createBudget({ max: CHAT_AI_PER_DAY });
 
 /**
@@ -264,6 +277,10 @@ let notes = null;
 let recordRev = 0;
 let recordedSteps = [];   // the steps the revision was counted on, to tell a new one from the same steps again
 let running = false;
+/** What runs with nobody at the console (schedules.js), up once the browser is. */
+let scheduler = null;
+/** Pooled contexts for that work (pool.js), one per organisation; made with the browser. */
+let pool = null;
 /**
  * The rest of the driven session, and why these are `let` rather than `const`.
  *
@@ -586,7 +603,7 @@ app.use('/app', (req, res, next) => {
  */
 app.get('/healthz', (_req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.status(browserReady ? 200 : 503).json({ ok: browserReady, browser: browserReady, busy: running });
+  res.status(browserReady ? 200 : 503).json({ ok: browserReady, browser: browserReady, busy: running, pool: pool ? pool.stats() : null });
 });
 
 /**
@@ -769,6 +786,7 @@ app.delete('/api/origins', switched('runner.origins'));
 app.post(['/api/fixes/:id/accept', '/api/fixes/:id/reject'], switched('runner.heal'));
 app.put('/api/settings/heal', switched('runner.heal'));
 app.post('/api/chat/turns', switched('runner.chat'));
+app.post('/api/chat/stop', switched('runner.chat'));
 
 /**
  * Step-up: is this token fresh enough for the one action that demands it?
@@ -1099,12 +1117,24 @@ const stateFor = (space, ent, switches) => {
 function healStateFor(space, claims, switches) {
   const on = switches.on('runner.heal');
   const mode = on ? HEAL_ENV.mode : 'off';
-  const enabled = space.healSetting.get().ai === true;
+  const setting = space.healSetting.get();
+  const enabled = setting.ai === true;
   const reason = HEAL_ENV.mode !== 'ai' ? 'deployment'
     : !on ? 'switch'
       : !AI.have ? 'key'
         : !enabled ? 'organisation' : null;
-  return { mode, ai: { enabled, available: mode === 'ai' && AI.have, reason }, canManage: tenancy.manages(claims) };
+  // Drafting tests from a page read (chat-plan.js) is its own consent, with
+  // its own gates: the chat's mind, the onboarding switch (a live read rewrites
+  // the page's targets), and the organisation's yes. The rules draft without
+  // any of them; a model drafts only with all of them.
+  const planOn = switches.on('runner.onboarding');
+  const planReason = CHAT.mode !== 'claude' ? 'key' : !planOn ? 'switch' : setting.plan !== true ? 'organisation' : null;
+  return {
+    mode,
+    ai: { enabled, available: mode === 'ai' && AI.have, reason },
+    plan: { enabled: setting.plan === true, available: CHAT.mode === 'claude' && planOn, reason: planReason },
+    canManage: tenancy.manages(claims),
+  };
 }
 
 /** The mode one run actually gets: ai only when nothing above is missing, and safe in its place. */
@@ -1320,6 +1350,128 @@ async function scanPageOf({ suite, pg, space }) {
   }
 }
 
+/**
+ * The page as a drafted test sees it (chat-plan.js): its controls and links,
+ * as a scan records them, and its accessibility snapshot (understand.js
+ * captureStep: typed values stripped, secrets redacted, capped) — under ONE
+ * lock, because a capture taken after scanPageOf returns describes a page
+ * another run may already have left. `navigate: false` reads the page a
+ * failed run left open, without moving it; nothing is stored then. `capture`
+ * is off when no model will read the page, so nothing is captured for nothing.
+ */
+async function readPageOf({ suite, pg, space, navigate = true, capture = true }) {
+  await take(space.org);
+  if (running) throw Object.assign(new Error('A run is in progress'), { status: 409 });
+
+  running = true;
+  try {
+    if (navigate) await OPS.goto(page, { url: pg.url }, { cursor, emit, nav, onNavigate: publishTargets, origins: space.origins });
+    const targets = await discover(page);
+    const linked = await links(page).catch(() => []);
+    const saved = navigate ? space.suites.updatePage(suite.id, pg.id, { targets, linked }) : null;
+    const snap = capture ? await captureStep(page, { secretValues: secretValuesOf(space) }) : null;
+    if (navigate) emit({ t: 'log', level: 'info', msg: `read ${pg.url} — ${targets.length} targets, ${linked.length} links` });
+    return { url: page.url(), targets, links: linked, capture: snap, page: saved };
+  } finally {
+    running = false;
+    armRelease();
+    await publishTargets();
+  }
+}
+
+/** Which mind drafts and revises for this organisation: the model only with a key, the chat set to it, and the organisation's consent. */
+const planMindFor = (space) => (CHAT.mode === 'claude' && chatResolver && space.healSetting.get().plan === true ? 'claude' : 'rules');
+const pagePathOf = (u) => { try { return new URL(u).pathname; } catch { return null; } };
+
+/**
+ * Candidates for a page (chat-plan.js): read it, draft them — the model when
+ * it may, the rules otherwise — and compile each through the gates. Nothing
+ * runs, nothing is saved; the candidates go back to the chat as a proposal.
+ */
+async function planPageOf({ suite, pg, focus = '', count = null, space, ent, switches }) {
+  switches?.demand?.('runner.onboarding');
+  const mind = planMindFor(space);
+  const read = await readPageOf({ suite, pg, space, navigate: true, capture: mind === 'claude' });
+  const values = secretValuesOf(space);
+  const menu = chatPlan.menuFrom(read, { redact: (s) => redactSecrets(s, values) });
+  menu.pagePath = pagePathOf(pg.url);
+  const checkFlow = checkFlowFor(space);
+  const wanted = Math.max(1, Math.min(chatPlan.MAX_CANDIDATES, Number(count) || chatPlan.DEFAULT_CANDIDATES));
+  let drafted = null;
+  let source = 'rules';
+  if (mind === 'claude') {
+    if (!chatBudget.take()) emit({ t: 'log', level: 'warn', msg: 'the day\'s AI budget is spent; the rules drafted the cases instead' });
+    else {
+      const { text } = chatPlan.composeDraft({ suiteName: suite.name, page: pg, read, menu, focus, count: wanted });
+      const answer = await chatResolver.draft({ text, menu });
+      if (answer) { drafted = chatPlan.candidatesFrom(answer, menu); source = 'claude'; }
+      else emit({ t: 'log', level: 'warn', msg: `the model did not draft (${chatResolver.unavailable ?? 'no answer'}); the rules drafted the cases instead` });
+    }
+  }
+  if (!drafted) drafted = chatPlan.draftByRules({ read, suite, page: pg, menu }, { harmful: HARMFUL, count: wanted });
+  const candidates = drafted.slice(0, wanted).map((c, i) => chatPlan.compile(c, { id: chatPlan.candidateId(i), menu, page: pg, suiteName: suite.name, checkFlow }));
+  for (const c of candidates) {
+    if (!c.ok) emit({ t: 'log', level: 'info', msg: `drafted "${c.name}" dropped: ${c.dropped}` });
+  }
+  return {
+    url: read.url, targets: read.targets.length, links: read.links.length, dropped: menu.dropped, mind: source,
+    consent: space.healSetting.get().plan === true, fingerprint: read.capture?.fingerprint ?? null, candidates,
+  };
+}
+
+/**
+ * Run the ticked drafts (chat-plan.js runPlanLoop). Every attempt is an
+ * ordinary run() marked a draft — kept in the history, counted against the
+ * plan, absent from every total and from the defect registry — and the
+ * batch rides suite.start/suite.end like a suite. A wrong case is revised
+ * once: mechanically from the runner's own words, or by the model when the
+ * organisation lets one read its pages. A case that no longer validates (the
+ * allowlist moved since it was drafted) is an outcome, not a throw.
+ */
+async function runDraftsOf({ suite, pg, cases, fingerprint = null, space, ent, switches, stopped = () => false, onProgress = () => {} }) {
+  switches?.demand?.('runner.runs');
+  if (!cases.length) throw new Error('No drafted checks to run');
+  ent.check('runs.per_day', space.history.today(), cases.length);
+  const checkFlow = checkFlowFor(space);
+  const values = secretValuesOf(space);
+  const redact = (s) => redactSecrets(s, values);
+  const menuOf = (read) => { const m = chatPlan.menuFrom(read, { redact }); m.pagePath = pagePathOf(pg.url); return m; };
+  const mind = planMindFor(space);
+  const ready = [];
+  for (const c of cases) {
+    try {
+      const plan = checkFlow(String(c.flow ?? ''));
+      ready.push({ id: c.id, name: c.name, why: c.why ?? '', steps: plan.steps, flow: String(c.flow), fingerprint });
+    } catch (err) {
+      ready.push({ id: c.id, name: c.name, flow: c.flow ?? null, invalid: err.message });
+    }
+  }
+  const label = `${suite.name} · drafts`;
+  emit({ t: 'suite.start', suite: label, cases: ready.length });
+  const r = await chatPlan.runPlanLoop({
+    cases: ready.filter((c) => !c.invalid),
+    run: async (steps, meta) => {
+      const plan = { suite: `${suite.name} · ${meta.name}`, steps };
+      emit({ t: 'diagram', kind: 'plan', mermaid: toMermaid(plan) });
+      return run(plan, { suiteId: suite.id, caseId: null, caseName: meta.attempt > 1 ? `${meta.name} (attempt ${meta.attempt})` : meta.name, draft: true, attempt: meta.attempt, space, ent, switches })
+        .catch((err) => ({ ok: false, passed: 0, total: 0, error: err.message }));
+    },
+    read: () => readPageOf({ suite, pg, space, navigate: false, capture: true }),
+    revise: mind === 'claude' ? async ({ text, menu }) => (chatBudget.take() ? chatResolver.revise({ text, menu }) : null) : null,
+    compile: (c, menu) => chatPlan.compile(c, { id: c.id ?? 'dc', menu, page: pg, suiteName: suite.name, checkFlow }),
+    menuOf,
+    composeRevise: (x) => chatPlan.composeRevise({ suiteName: suite.name, page: pg, ...x }),
+    stopped,
+    onProgress,
+  });
+  for (const c of ready.filter((x) => x.invalid)) {
+    r.outcomes.push({ id: c.id, name: c.name, ok: false, verdict: 'needs_a_person', hint: `no longer valid: ${c.invalid}`, attempts: [], revised: false, revision: null, cite: null, flow: c.flow, steps: null });
+  }
+  r.total = r.outcomes.length;
+  emit({ t: 'suite.end', suite: label, passed: r.passed, total: r.total });
+  return r;
+}
+
 app.post('/api/suites/:id/cases', (req, res) => {
   try { sendOk(res, { case: req.space.suites.addCase(req.params.id, req.body ?? {}, checkFlowFor(req.space)) }); }
   catch (err) { fail(res, err); }
@@ -1382,7 +1534,11 @@ app.get('/api/settings/heal', (req, res) => res.json(healStateFor(req.space, req
 app.put('/api/settings/heal', (req, res) => {
   try {
     tenancy.requireManager(req.user);
-    req.space.healSetting.set({ ai: req.body?.ai });
+    const patch = {
+      ...(typeof req.body?.ai === 'boolean' ? { ai: req.body.ai } : {}),
+      ...(typeof req.body?.plan === 'boolean' ? { plan: req.body.plan } : {}),
+    };
+    req.space.healSetting.set(patch);
     res.json(healStateFor(req.space, req.user, req.switches));
   } catch (err) { fail(res, err); }
 });
@@ -1419,15 +1575,22 @@ app.post('/api/suites/:id/run', async (req, res) => {
  * refused before case one, not discovered halfway. And the plan before the
  * lock: a run the plan refuses never takes the browser.
  */
-async function runCasesOf({ suite, wanted, pace = PACE, space, ent, switches }) {
+async function runCasesOf({ suite, wanted, pace = PACE, space, ent, switches, scheduled = false, session = null }) {
   if (!wanted.length) throw new Error('This suite has no cases to run');
   ent.check('runs.per_day', space.history.today(), wanted.length);
-  await take(space.org);
-  if (running) throw Object.assign(new Error('A run is in progress'), { status: 409 });
+  // On a pooled session (a schedule's) the console's lock is not taken: the
+  // suite runs on the organisation's own page, beside whatever the console does.
+  if (session) {
+    if (session.running) throw Object.assign(new Error('A run is in progress'), { status: 409 });
+  } else {
+    await take(space.org);
+    if (running) throw Object.assign(new Error('A run is in progress'), { status: 409 });
+  }
+  const say = session ? session.emit : emit;
 
   const checkFlow = checkFlowFor(space);
 
-  emit({ t: 'suite.start', suite: suite.name, cases: wanted.length });
+  say({ t: 'suite.start', suite: suite.name, cases: wanted.length });
   const outcomes = [];
   for (const c of wanted) {
     let plan;
@@ -1436,21 +1599,72 @@ async function runCasesOf({ suite, wanted, pace = PACE, space, ent, switches }) 
     } catch (err) {
       // An unparseable case is a failed case, not a dead suite.
       outcomes.push({ case: c.id, name: c.name, ok: false, error: err.message });
-      emit({ t: 'log', level: 'error', msg: `${c.name}: ${err.message}` });
+      say({ t: 'log', level: 'error', msg: `${c.name}: ${err.message}` });
       continue;
     }
     plan.suite = `${suite.name} · ${c.name}`;
-    emit({ t: 'diagram', kind: 'plan', mermaid: toMermaid(plan) });
+    say({ t: 'diagram', kind: 'plan', mermaid: toMermaid(plan) });
     // Express 4 does not catch a rejection from an async handler, so an
     // unexpected throw here would take the process with it rather than failing
     // one case. A suite run survives a bad case.
-    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name, pace, space, ent, switches })
+    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name, pace, space, ent, switches, scheduled, session })
       .catch((err) => ({ ok: false, passed: 0, total: 0, error: err.message }));
     outcomes.push({ case: c.id, name: c.name, ...r });
   }
   const passed = outcomes.filter((o) => o.ok).length;
-  emit({ t: 'suite.end', suite: suite.name, passed, total: outcomes.length });
+  say({ t: 'suite.end', suite: suite.name, passed, total: outcomes.length });
   return { suite: suite.id, passed, total: outcomes.length, outcomes };
+}
+
+/**
+ * What a schedule does when its time comes (schedules.js, Scheduler.fire):
+ * the run the Run suite button makes, or a sweep of every page this
+ * organisation has a monitor on — opened one after another so the monitors
+ * arm and measure, the way Check now opens one. Under the plan and the
+ * switches the schedule was saved with. A Deferred means the browser is
+ * held; the engine tries again next tick, and says so if the slot passes.
+ */
+async function fireSchedule(org, s) {
+  const space = tenancy.workspace(org);
+  const claims = s.claims ?? null;
+  if (claims && tenancy.stale(claims)) return { ok: false, error: 'the plan changed since this schedule was saved — save it again' };
+  const ent = tenancy.entitlements(claims);
+  const sw = switchesFor(claims);
+  try { sw.demand('runner.schedules'); } catch (err) { return { ok: false, error: err.message }; }
+  // The organisation's own pooled page (backgroundSession): a schedule never
+  // takes the console's, so it runs beside whatever a person is doing there.
+  const session = await backgroundSession(org);
+  if (session.running) throw new schedules.Deferred("this organisation's scheduled work is still running");
+  if (s.kind === 'suite') {
+    const suite = space.suites.get(s.suiteId);
+    if (!suite.cases.length) return { ok: false, error: 'the suite has no cases to run' };
+    const origin = originOf(suite);
+    if (!space.origins.has(origin)) return { ok: false, error: `${origin} is not allowed — allow it under Origins & vault` };
+    const r = await runCasesOf({ suite, wanted: suite.cases, space, ent, switches: sw, scheduled: true, session });
+    return { ok: r.passed === r.total, passed: r.passed, total: r.total };
+  }
+  const urls = [...new Set(space.monitors.list().filter((m) => m.state !== 'paused' && m.url).map((m) => m.url))];
+  if (!urls.length) return { ok: true, pages: 0, of: 0, note: 'nothing to sweep: no monitors' };
+  let opened = 0;
+  const errors = [];
+  session.running = true;
+  try {
+    for (const url of urls) {
+      let origin;
+      try { origin = new URL(url).origin; } catch { errors.push(`${url}: not an address`); continue; }
+      if (!space.origins.has(origin)) { errors.push(`${url}: ${origin} is not allowed`); continue; }
+      try {
+        await OPS.goto(session.page, { url }, { cursor: session.cursor, emit: session.emit, nav: session.nav, origins: space.origins });
+        opened++;
+      } catch (err) { errors.push(`${url}: ${String(err.message).split('\n')[0]}`); continue; }
+      // The document arms its monitors on load; each gets this long to be measured (monitor.js ARM_GRACE_MS).
+      await sleep(monitoring.ARM_GRACE_MS + 1500);
+      pool?.touch(org);
+    }
+  } finally { session.running = false; }
+  session.emit({ t: 'log', level: 'info', msg: `swept ${opened} of ${urls.length} monitored page${urls.length === 1 ? '' : 's'}` });
+  const open = space.monitors.listIncidents('open').length;
+  return { ok: errors.length === 0, pages: opened, of: urls.length, openIncidents: open, ...(errors.length ? { error: errors.slice(0, 3).join('; ') } : {}) };
 }
 
 /**
@@ -1624,6 +1838,36 @@ app.post('/api/monitors/preview', (req, res) => {
   if (!spec) return res.status(400).json({ ok: false, error: 'ruleText is required' });
   res.json({ ok: true, spec });
 });
+/**
+ * The same sentence, compiled by Claude on request — one call, from the
+ * daily budget — so a person sees what the model makes of it BEFORE saving,
+ * where the preview above is the mock's instant reading. Nothing is kept.
+ * The element's markup excerpt is read off the open page when the picked
+ * element is on it, as it would be for the monitor itself. The mock's spec
+ * rides along with a refusal, so the panel always has something to show.
+ */
+app.post('/api/monitors/compile', async (req, res) => {
+  const body = req.body ?? {};
+  const mock = previewSpec(body);
+  if (!mock) return res.status(400).json({ ok: false, error: 'ruleText is required' });
+  if (monitoring.llmState().mode !== 'claude' || !monitorResolver) {
+    return res.status(409).json({ ok: false, error: 'no_model', message: 'This runner compiles rules with the mock compiler only — set ANTHROPIC_API_KEY for Claude', spec: mock });
+  }
+  if (!monitorBudget.take()) return res.status(429).json({ ok: false, error: 'budget', message: 'The daily AI budget is spent; the rules compiled it instead', spec: mock });
+  const engine = monitorsOf(req);
+  const selector = String(body.selector ?? '').slice(0, monitoring.SELECTOR_MAX);
+  const onPage = driver.sees(req.space.org) && monitorAgent?.alive() && !!currentUrl();
+  const excerpt = onPage && selector ? engine.cleanExcerpt(await monitorAgent.excerpt({ selector, fingerprint: body.fingerprint ?? null }).catch(() => null)) : null;
+  const base = body.baseline && typeof body.baseline === 'object' && !Array.isArray(body.baseline) ? engine.cleanSnapshot({ ...body.baseline }) : null;
+  const element = {
+    tag: String(body.tag ?? base?.tag ?? '').slice(0, 40), selector,
+    label: engine.redact(String(body.label ?? '')).slice(0, monitoring.LABEL_MAX),
+    textPreview: String(base?.text ?? '').slice(0, 120), excerpt,
+  };
+  const spec = await monitorResolver.compile({ ruleText: String(body.ruleText).slice(0, monitoring.RULE_MAX), element, baseline: base });
+  if (!spec) return res.status(503).json({ ok: false, error: 'unavailable', message: `Claude did not answer: ${monitorResolver.unavailable ?? 'unavailable'}`, spec: mock });
+  res.json({ ok: true, spec });
+});
 app.post('/api/monitors', async (req, res) => {
   if (!pageIsOurs(req, res)) return;
   try {
@@ -1654,6 +1898,77 @@ app.post('/api/monitors/:id/resume', async (req, res) => {
   try { const engine = monitorsOf(req); const m = await engine.resume(req.params.id); sendOk(res, { monitor: engine.publicMonitor(m) }); }
   catch (err) { fail(res, err); }
 });
+// ---- notifications: where an incident, a failed run or a defect is told (notify.js) ---------
+app.get('/api/notify', (req, res) => {
+  sendOk(res, { channels: req.space.notify.list(), events: notify.EVENTS, kinds: notify.KINDS, smtp: notify.smtpConfigured() });
+});
+app.post('/api/notify/channels', (req, res) => {
+  try { tenancy.requireManager(req.user); } catch (err) { return fail(res, err); }
+  const b = req.body ?? {};
+  try { sendOk(res, { channel: req.space.notify.create({ kind: b.kind, name: b.name, url: b.url, to: b.to, secret: b.secret, events: b.events }) }); }
+  catch (err) { fail(res, err); }
+});
+app.patch('/api/notify/channels/:id', (req, res) => {
+  try { tenancy.requireManager(req.user); } catch (err) { return fail(res, err); }
+  const b = req.body ?? {};
+  try { sendOk(res, { channel: req.space.notify.update(req.params.id, { name: b.name, events: b.events, enabled: b.enabled, url: b.url, to: b.to, secret: b.secret }) }); }
+  catch (err) { fail(res, err); }
+});
+app.delete('/api/notify/channels/:id', (req, res) => {
+  try { tenancy.requireManager(req.user); } catch (err) { return fail(res, err); }
+  try { sendOk(res, { channel: req.space.notify.remove(req.params.id) }); }
+  catch (err) { fail(res, err); }
+});
+app.post('/api/notify/channels/:id/test', async (req, res) => {
+  try { tenancy.requireManager(req.user); } catch (err) { return fail(res, err); }
+  try { sendOk(res, { result: await notify.test(req.space.org, req.params.id) }); }
+  catch (err) { fail(res, err); }
+});
+
+// ---- schedules: suites run and monitored pages swept on a cadence (schedules.js) ------------
+app.get('/api/schedules', (req, res) => {
+  sendOk(res, { schedules: req.space.schedules.list(req.query.suite ? String(req.query.suite) : null) });
+});
+app.post('/api/schedules', switched('runner.schedules'));
+app.post('/api/schedules', (req, res) => {
+  const space = req.space;
+  const b = req.body ?? {};
+  try {
+    if (b.kind === 'suite') space.suites.get(String(b.suiteId ?? ''));   // this organisation's, or "no suite"
+    req.ent.check('schedules.max', space.schedules.list().length);
+    const schedule = space.schedules.create({ kind: b.kind, suiteId: b.suiteId, cron: b.cron, name: b.name, claims: req.user ?? null, by: req.user?.email ?? null });
+    scheduler?.watch(space.org);
+    emitTo(space.org, { t: 'schedules.changed' });
+    sendOk(res, { schedule });
+  } catch (err) { fail(res, err, err instanceof NoSuchSuite ? 404 : 400); }
+});
+app.patch('/api/schedules/:id', (req, res) => {
+  const b = req.body ?? {};
+  try {
+    const schedule = req.space.schedules.update(req.params.id, { cron: b.cron, enabled: b.enabled, name: b.name });
+    emitTo(req.space.org, { t: 'schedules.changed' });
+    sendOk(res, { schedule });
+  } catch (err) { fail(res, err, err instanceof schedules.NoSuchSchedule ? 404 : 400); }
+});
+app.delete('/api/schedules/:id', (req, res) => {
+  try {
+    const schedule = req.space.schedules.remove(req.params.id);
+    emitTo(req.space.org, { t: 'schedules.changed' });
+    sendOk(res, { schedule });
+  } catch (err) { fail(res, err, err instanceof schedules.NoSuchSchedule ? 404 : 400); }
+});
+app.post('/api/schedules/:id/run', switched('runner.schedules'));
+app.post('/api/schedules/:id/run', (req, res) => {
+  const space = req.space;
+  let s;
+  try { s = space.schedules.get(req.params.id); } catch (err) { return fail(res, err, 404); }
+  if (!scheduler) return fail(res, new Error('the scheduler is not up yet'), 503);
+  if (scheduler.firing) return fail(res, new Error('a schedule is already firing — try again when it has ended'), 409);
+  // A fire may take minutes: answered now, reported on the socket (schedule.fired) when it ends.
+  scheduler.runNow(space.org, s.id).catch((err) => emitTo(space.org, { t: 'log', level: 'error', msg: `schedule "${s.name}": ${err.message}` }));
+  res.status(202).json({ ok: true, firing: true, id: s.id });
+});
+
 app.get('/api/incidents', (req, res) => {
   const status = ['open', 'resolved'].includes(req.query.status) ? req.query.status : null;
   try { res.json({ ok: true, incidents: monitorsOf(req).listIncidents(status, projectOf(req)) }); }
@@ -1663,7 +1978,7 @@ app.get('/api/incidents', (req, res) => {
 app.post('/api/incidents/:id/resolve', async (req, res) => {
   try {
     const engine = monitorsOf(req);
-    const inc = await engine.resolve(req.params.id, 'manual');
+    const inc = await engine.resolve(req.params.id, 'manual', req.user ? { sub: req.user.sub ?? null, email: req.user.email ?? null } : null);
     const m = engine.monitors.get(inc.monitorId);
     sendOk(res, { incident: inc, monitor: m ? engine.publicMonitor(m) : null });
   } catch (err) { fail(res, err); }
@@ -1713,6 +2028,14 @@ app.post('/api/chat/turns', (req, res) => {
     const turn = chat.turn({ ...(req.body ?? {}), space: req.space, ent: req.ent, switches: req.switches, by: req.user?.sub ?? LOCAL });
     res.status(202).json({ ok: true, conversationId: turn.conversationId, turnId: turn.id });
   } catch (err) { fail(res, err); }
+});
+/**
+ * Stop the reply being written: a run of drafted cases ends after the
+ * attempt in flight (chat.js stop). A run cannot be broken off mid-step, so
+ * this is "no more", never "now" — and the reply says how far it got.
+ */
+app.post('/api/chat/stop', (req, res) => {
+  try { sendOk(res, { stopping: chat.stop(req.space) }); } catch (err) { fail(res, err); }
 });
 /**
  * Redirect shapes worth testing, for the bundled demo.
@@ -1909,6 +2232,7 @@ console.log(`\n  ghostclick  ->  http://localhost:${PORT}` +
             `\n  monitoring  ->  ${MONITOR_LLM.mode === 'claude'
               ? `Claude (${MONITOR_MODEL}) compiles rules and judges incidents — key from ${MONITOR_KEY.source}, at most ${monitorBudget.max} calls a day (GC_MONITOR_AI_MAX_PER_DAY)`
               : `the mock compiler and judge${MONITOR_KEY.key ? ' (GC_MONITOR_LLM=mock)' : ' — set ANTHROPIC_API_KEY for Claude'}`}` +
+            `\n  docs        ->  ${DOCS.sections.length ? `${DOCS.sections.length} sections of ${DOCS.files.join(', ')}, for the chat` : 'no markdown beside server.js — the chat cannot answer questions about the product'}` +
             `\n  chat        ->  ${CHAT.mode === 'claude'
               ? `Claude (${CHAT_MODEL}) answers from the organisation's own stores and runs its saved cases — key from ${CHAT_KEY.source}, at most ${chatBudget.max} calls a day (GC_CHAT_AI_MAX_PER_DAY)`
               : `the mock mind — rules over the same tools${CHAT_KEY.key ? ' (GC_CHAT=mock)' : ' — set ANTHROPIC_API_KEY for Claude'}`}` +
@@ -1973,8 +2297,63 @@ const browser = CDP_URL
 // favour of PoolFull when the box is at capacity. GC_POOL_MAX sizes it; the
 // attach path (a browser IS one identity) stays capacity 1 and scales by
 // replicas instead (docker/docker-compose.pool.yml). scripts/check-pool.js
-// proves the pool on a real browser. Left as a seam, not switched on here,
-// because the screencast rewrite is a change to make deliberately, not blind.
+// proves the pool on a real browser. The console's page stays this singleton,
+// screencast and all; what is wired to the pool is the work nobody watches:
+// a schedule's suite run or sweep leases the organisation's own context
+// (backgroundSession below), so it runs beside a person driving, never in
+// their place. Giving every driver a lease of their own is the step after.
+if (!CDP_URL) {
+  pool = new BrowserPool(browser, { max: Math.max(1, Number(process.env.GC_POOL_MAX) || 2), idleMs: 5 * 60_000, viewport: VIEW });
+}
+
+/**
+ * A pooled session for an organisation's scheduled work: its own context and
+ * page, wired with what a run needs — the reach rule, a cursor, a navigation
+ * log, and a monitoring agent reporting into the organisation's engine — and
+ * nothing a person needs: no screencast, no recorder, no target panel. Made
+ * once per lease and kept on it; the lease closes itself after five idle
+ * minutes (pool.js) and the session goes with it. Its events reach the
+ * organisation's sockets marked `background`, so the console does not draw
+ * them as its own run. A full pool is a Deferred: the schedule waits.
+ */
+async function backgroundSession(org) {
+  if (!pool) throw new schedules.Deferred('scheduled work needs the launched browser, not an attached one');
+  const space = tenancy.workspace(org);
+  let lease;
+  try { lease = await pool.acquire(org, { storageState: space.session.state(space.origins.list()) ?? undefined }); }
+  catch (err) { if (err instanceof PoolFull) throw new schedules.Deferred(err.message); throw err; }
+  if (lease.session) { pool.touch(org); return lease.session; }
+  const say = (ev) => emitTo(org, { ...ev, background: true });
+  const { page: pg, context } = lease;
+  // The same rule the console's page lives under (reach.js): a page may
+  // navigate where the allowlist says, and fetch only what reach permits.
+  if (BLOCK_PRIVATE) {
+    await context.route('**/*', async (route) => {
+      const url = route.request().url();
+      const why = await blocked(url);
+      if (!why) return route.continue();
+      say({ t: 'log', level: 'error', msg: `blocked ${url} — ${why}` });
+      return route.abort('blockedbyclient');
+    });
+  }
+  const bgCdp = await context.newCDPSession(pg);
+  // A cursor that draws nowhere: the pointer events are the console's canvas's, and this page has none.
+  const bgCursor = new VirtualCursor(bgCdp, () => {});
+  const bgNav = new NavigationLog(pg, { onNavigation: (n) => say({ t: 'nav', ...n }) });
+  bgNav.attach();
+  const engine = space.monitors;
+  const bgAgent = new MonitorAgent(pg, {
+    owner: org,
+    listFor: (href) => engine.monitorsForPage(href),
+    onReport: (r) => engine.ingest(r),
+    onVisit: (href, list) => { if (list.length) engine.visited(href, list.map((m) => m.id)); },
+    onError: (msg) => say({ t: 'log', level: 'error', msg }),
+  });
+  await bgAgent.attach();
+  const session = { org, page: pg, cursor: bgCursor, nav: bgNav, agent: bgAgent, emit: say, running: false, background: true };
+  lease.session = session;
+  return session;
+}
 
 /**
  * Broadcast is per organisation (docs/AUTH.md §9.6 [websocket-3]).
@@ -2377,6 +2756,8 @@ async function newSession() {
         snapshot,
         label: engine.redact(String(info.label ?? '')).slice(0, monitoring.LABEL_MAX),
         url: info.url ?? currentUrl(),
+        // Where it sits — its ancestors, outermost first (core.js pathOf) — so the panel can say.
+        path: Array.isArray(info.path) ? info.path.slice(0, 12).map((s) => engine.redact(String(s)).slice(0, 80)) : [],
         // What the page could not read about it, if anything (picker.js select).
         readError: info.readError ? String(info.readError).slice(0, 200) : null,
       });
@@ -2503,8 +2884,28 @@ async function resetSession() {
  * run or a recording holds it otherwise, and a screenshot must not scroll
  * under them.
  */
+notify.configure({
+  log: console,
+  // The same reach rule a page lives under: a channel may not point inside the container's network on a gated runner.
+  mayReach: BLOCK_PRIVATE ? (url) => blocked(url) : null,
+  redactFor: (org) => (text) => tenancy.workspace(org).monitors.redact(text),
+});
 monitoring.configure({
   emitTo,
+  notify: (org, event, data) => { notify.send(org, event, data); },
+  // An incident is a defect too (defects.js incident): filed as it opens,
+  // closed as it resolves, under the same numbers as a failed run's — and
+  // said in the log and on the sockets the way a run's filing is. The
+  // incident's own notification carries the number, so none is sent here.
+  defects: (org, event, data) => {
+    const space = tenancy.workspace(org);
+    let suiteName = null;
+    if (data.monitor?.suiteId) { try { suiteName = space.suites.get(String(data.monitor.suiteId))?.name ?? null; } catch { suiteName = null; } }
+    const { id, changes } = space.defects.incident(event, { ...data, suiteName });
+    for (const ch of changes) emitTo(org, { t: 'log', level: ch.kind === 'closed' ? 'info' : 'warn', msg: `${ch.id} ${ch.kind}: ${ch.title}` });
+    if (changes.length) emitTo(org, { t: 'defects.changed', changes });
+    return id;
+  },
   log: console,
   llm: { mode: MONITOR_LLM.mode, model: MONITOR_LLM.mode === 'claude' ? MONITOR_MODEL : null, key: { have: Boolean(MONITOR_KEY.key), from: MONITOR_KEY.source } },
   resolver: monitorResolver,
@@ -2534,6 +2935,15 @@ chat.configure({
     runPlan: run,
     scanPage: scanPageOf,
     quickstart: quickstartOf,
+    // Drafted tests (chat-plan.js). `plans` says whether the tool exists for
+    // an organisation at all: the onboarding switch, and — with a model as
+    // the mind — its consent to a model reading its pages.
+    readPage: readPageOf,
+    planPage: planPageOf,
+    runDrafts: runDraftsOf,
+    plans: (space, switches) => ((switches ? switches.on('runner.onboarding') : true) && (CHAT.mode !== 'claude' || space.healSetting.get().plan === true) ? { mind: planMindFor(space) } : null),
+    // The documentation: a tool only where the checkout has any.
+    docs: () => (DOCS.sections.length ? DOCS : null),
   },
 });
 
@@ -2566,12 +2976,20 @@ const vaultFor = (space, ent) => ({
  *   the history records it as such rather than inventing a home for it.
  *   `space` and `ent` are the calling organisation's workspace and plan;
  *   absent, the laptop's.
- * @returns {{ok:boolean, passed:number, total:number, error:string|null}}
+ * @param meta.draft a drafted case nobody has accepted yet (chat-plan.js): the
+ *   run is kept in the history and counts against the plan, but files no defect
+ *   and moves no total. `attempt` numbers a re-run of the same draft.
+ * @returns {{ok:boolean, passed:number, total:number, error:string|null, errorFull:string|null, why:object|null}}
  */
 async function run(plan, meta = {}) {
   const space = meta.space ?? local;
   const ent = meta.ent ?? tenancy.entitlements(null);
-  if (running) {
+  // A pooled session (backgroundSession) runs the plan on its own page, so a
+  // schedule never takes the console's; without one, this is the console's run.
+  const bg = meta.session ?? null;
+  const pg = bg ? bg.page : page;
+  const say = bg ? bg.emit : emit;
+  if (bg ? bg.running : running) {
     // An error, not a warning. A refused run does nothing visible, so if this
     // is quiet the only symptom is a button that appears not to work.
     emitTo(space.org, { t: 'log', level: 'error', msg: 'A run is already in progress — wait for it to finish' });
@@ -2580,7 +2998,9 @@ async function run(plan, meta = {}) {
   // A plan with no `goto` of its own is only allowed to run on a page this
   // organisation already holds — checked BEFORE the lock, so a refused plan
   // does not take the browser away from whoever has it.
-  const stray = unanchored(plan, space);
+  const stray = bg
+    ? (plan.steps[0]?.op === 'goto' ? null : { error: 'a scheduled run opens a page of its own — it starts with a goto' })
+    : unanchored(plan, space);
   if (stray) {
     emitTo(space.org, { t: 'log', level: 'error', msg: stray.error });
     if (stray.origin) emitTo(space.org, { t: 'needs.origin', origin: stray.origin, url: stray.url });
@@ -2594,17 +3014,17 @@ async function run(plan, meta = {}) {
   const heal = healFor(plan, meta, space);
   try {
     ent.check('runs.per_day', space.history.today());
-    await take(space.org);
+    if (!bg) await take(space.org);
   } catch (err) {
     emitTo(space.org, { t: 'refused', of: 'run', ...refusal(err) });
     emitTo(space.org, { t: 'log', level: 'error', msg: err.message });
     return { ok: false, passed: 0, total: 0, error: err.message };
   }
-  running = true;
-  const wasRecording = recorder.recording;
-  recorder.recording = false;
+  if (bg) bg.running = true; else running = true;
+  const wasRecording = bg ? false : recorder.recording;
+  if (!bg) recorder.recording = false;
   // A run's clicks must reach the page: an active pick would swallow them.
-  if (monitorAgent?.picking) {
+  if (!bg && monitorAgent?.picking) {
     await monitorAgent.stopPicker().catch(() => null);
     if (monitorAgent.owner) emitTo(monitorAgent.owner, { t: 'monitor.pick', on: false });
   }
@@ -2613,11 +3033,12 @@ async function run(plan, meta = {}) {
   // A run can be told how much of itself to perform. Unset means this server's
   // default, so nothing that does not ask is affected.
   const ctx = {
-    cursor, emit, nav, onNavigate: publishTargets, pace: paceOf(meta.pace, PACE),
+    cursor: bg ? bg.cursor : cursor, emit: say, nav: bg ? bg.nav : nav, onNavigate: bg ? null : publishTargets, pace: paceOf(meta.pace, PACE),
     origins: space.origins, vault: vaultFor(space, ent),
     heal,
   };
-  emit({ t: 'run.start', total: plan.steps.length, suite: plan.suite, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName });
+  const attempt = Number(meta.attempt) > 1 ? { attempt: Number(meta.attempt) } : {};
+  say({ t: 'run.start', total: plan.steps.length, suite: plan.suite, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName, ...attempt, ...(meta.scheduled ? { scheduled: true } : {}) });
 
   // Everything from here to the finally must be able to throw without wedging
   // the executor. It used to clear the lock on the happy path only, so a
@@ -2627,36 +3048,36 @@ async function run(plan, meta = {}) {
   // what that looks like from the outside.
   try {
     for (const [i, step] of plan.steps.entries()) {
-      emit({ t: 'step.start', i, step });
+      say({ t: 'step.start', i, step });
       ctx.heal.step = i;
       ctx.heal.taken = [];
       ctx.heal.trace = [];
       const t0 = Date.now();
       try {
-        await OPS[step.op](page, step, ctx);
+        await OPS[step.op](pg, step, ctx);
         // The fixes this step needed, if any; each went out as step.heal first.
         const fixed = ctx.heal.taken.length ? { fixes: ctx.heal.taken } : {};
         // And how it was worked out, when anything had to be; each entry went out as step.trace first.
         const traced = ctx.heal.trace.length ? { trace: ctx.heal.trace } : {};
         results.push({ i, ok: true, ms: Date.now() - t0, ...fixed, ...traced });
-        emit({ t: 'step.pass', i, ms: Date.now() - t0, ...fixed, ...traced });
+        say({ t: 'step.pass', i, ms: Date.now() - t0, ...fixed, ...traced });
       } catch (err) {
         const ms = Date.now() - t0;
         // A step that fails on a page Turnstile guards has usually failed
         // because of it, and nothing in its own message could say so.
-        const error = turnstile.explain(err.message, page);
+        const error = turnstile.explain(err.message, pg);
         // Why, from the model, for a failure no fix may change (ops.js
         // explainFailure) — not for a plan refusal or a Turnstile page, whose
         // own words already say why. Asked before step.fail, so the verdict
         // carries it; `ms` is the step's own time, not the model's.
         const why = err instanceof tenancy.EntitlementError || error !== err.message
-          ? null : await explainFailure(page, step, ctx, err).catch(() => null);
+          ? null : await explainFailure(pg, step, ctx, err).catch(() => null);
         const traced = ctx.heal.trace.length ? { trace: ctx.heal.trace } : {};
         const explained = why ? { why } : {};
         results.push({ i, ok: false, ms, error, ...traced, ...explained });
-        emit({ t: 'step.fail', i, ms, error, ...traced, ...explained });
+        say({ t: 'step.fail', i, ms, error, ...traced, ...explained });
         // A step the plan refused is a plan refusal, not a broken page.
-        if (err instanceof tenancy.EntitlementError) emit({ t: 'refused', of: 'run', ...refusal(err) });
+        if (err instanceof tenancy.EntitlementError) say({ t: 'refused', of: 'run', ...refusal(err) });
         break;
       }
       await sleep(120);
@@ -2673,6 +3094,8 @@ async function run(plan, meta = {}) {
       ms: results.reduce((a, r) => a + (r.ms ?? 0), 0),
       results,
       steps: plan.steps,
+      draft: meta.draft === true,
+      scheduled: meta.scheduled === true,
     });
     space.history.prune(ent.limit('history.retention_days'));
     // What this run filed, closed or reopened (defects.js), said in the log as
@@ -2681,35 +3104,47 @@ async function run(plan, meta = {}) {
     // below, failing at it must not cost the run its verdict.
     let defect = null;
     try {
-      for (const c of space.defects.sync(space.history.list())) {
-        emit({ t: 'log', level: c.kind === 'closed' ? 'info' : 'warn', msg: `${c.id} ${c.kind}: ${c.title}` });
+      const changes = space.defects.sync(space.history.list());
+      for (const c of changes) {
+        say({ t: 'log', level: c.kind === 'closed' ? 'info' : 'warn', msg: `${c.id} ${c.kind}: ${c.title}` });
+        // A defect filed or reopened is told (notify.js): queued, never waited for.
+        if (c.kind === 'filed' || c.kind === 'reopened') notify.send(space.org, 'defect', { kind: c.kind, id: c.id, title: c.title, suite: plan.suite });
       }
+      // And the Defects page, open in a tab somewhere, reloads its list.
+      if (changes.length) emitTo(space.org, { t: 'defects.changed', changes });
       defect = space.defects.idFor(entry);
     } catch (err) {
-      emit({ t: 'log', level: 'error', msg: `could not file the defect: ${err.message}` });
+      say({ t: 'log', level: 'error', msg: `could not file the defect: ${err.message}` });
+    }
+    // And a failed run, with the step it stopped on and the defect it went under.
+    if (!ok) {
+      notify.send(space.org, 'run_failed', { suite: plan.suite, caseName: meta.caseName ?? null, passed, total: results.length, error: entry.error, step: entry.step, doing: entry.target ?? null, defect, scheduled: meta.scheduled === true, page: entry.url, url: entry.url });
     }
     // Same function, same IR — with outcomes folded in, the plan diagram
     // becomes the run report. Drawing it is a nicety; failing to draw it must
     // not cost you the run's verdict.
     try {
-      emit({ t: 'diagram', kind: 'report', mermaid: toMermaid(plan, { results }) });
+      say({ t: 'diagram', kind: 'report', mermaid: toMermaid(plan, { results }) });
     } catch (err) {
-      emit({ t: 'log', level: 'error', msg: `could not draw the report: ${err.message}` });
+      say({ t: 'log', level: 'error', msg: `could not draw the report: ${err.message}` });
     }
-    await publishTargets();
+    if (!bg) await publishTargets();
     // The failing step and what it was doing, so a caller can say "stopped at
-    // click 'Login'" without reading the history back (the chat does).
-    return { ok, passed, total: results.length, error: entry.error, fixed: entry.fixed, defect, step: entry.step, target: entry.target };
+    // click 'Login'" without reading the history back (the chat does). The
+    // history keeps the error's first line; `errorFull` is the whole of it —
+    // the lines that name a replacement target or a late arrival (ops.js
+    // explainMissing) are what a drafted case's revision reads — and `why` is
+    // the model's verdict when one was asked (chat-plan.js).
+    const failed = results.find((r) => !r.ok) ?? null;
+    return { ok, passed, total: results.length, error: entry.error, errorFull: failed?.error ?? null, why: failed?.why ?? null, fixed: entry.fixed, defect, step: entry.step, target: entry.target };
   } finally {
     // Clear the lock BEFORE announcing the end. run.end means "you may start
     // another run"; emitting it while still locked makes a caller that runs
     // back-to-back scripts hang on a silently refused second run.
-    running = false;
-    recorder.recording = wasRecording;
-    driver.touch(space.org);
-    armRelease();
-    emit({ t: 'run.end', ok: results.every((r) => r.ok) && results.length > 0, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName,
-      fixed: results.reduce((n, r) => n + (r.fixes?.length ?? 0), 0) });
+    if (bg) bg.running = false;
+    else { running = false; recorder.recording = wasRecording; driver.touch(space.org); armRelease(); }
+    say({ t: 'run.end', ok: results.every((r) => r.ok) && results.length > 0, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName,
+      fixed: results.reduce((n, r) => n + (r.fixes?.length ?? 0), 0), ...(Number(meta.attempt) > 1 ? { attempt: Number(meta.attempt) } : {}) });
   }
 }
 
@@ -3344,5 +3779,9 @@ process.on('unhandledRejection', (err) => {
   try { emit({ t: 'log', level: 'error', msg: `internal error: ${err?.message ?? err}` }); } catch {}
 });
 
-process.on('SIGINT', async () => { monitoring.flushAll(); await browser.close(); process.exit(0); });
-process.on('SIGTERM', async () => { monitoring.flushAll(); await browser.close(); process.exit(0); });
+// ---- schedules: what runs with nobody at the console (schedules.js) -------------------------
+scheduler = new schedules.Scheduler({ fire: fireSchedule, emit: emitTo, log: console }).start();
+console.log(`  schedules   ${scheduler.known.size ? [...scheduler.known].map((o) => `${o}: ${tenancy.workspace(o).schedules.list().length}`).join(', ') : 'none yet'}`);
+
+process.on('SIGINT', async () => { scheduler?.stop(); monitoring.flushAll(); await notify.drain(); await pool?.drain().catch(() => {}); await browser.close(); process.exit(0); });
+process.on('SIGTERM', async () => { scheduler?.stop(); monitoring.flushAll(); await notify.drain(); await pool?.drain().catch(() => {}); await browser.close(); process.exit(0); });

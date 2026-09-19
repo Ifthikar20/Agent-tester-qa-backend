@@ -112,6 +112,7 @@
     <button type="button" data-fault="hide">Hide submit</button>
     <button type="button" data-fault="add-row">Add table row</button>
     <button type="button" data-fault="remove-row">Remove table row</button>
+    <button type="button" data-fault="swap">Swap class</button>
     <button type="button" data-fault="remove-late">Remove estimate</button>
     <button type="button" class="reset" data-fault="reset">Reset all</button>
   </div>
@@ -148,6 +149,8 @@
   }
   var faults = {
     grow: function (on) { hero.classList.toggle('f-grow', on); },
+    // A class with no style: the markup changes and nothing measurable does — what a judgment clause is for.
+    swap: function (on) { hero.classList.toggle('f-swapped', on); },
     text: function (on) { hero.classList.toggle('f-text', on); hero.firstChild.textContent = on ? 'Every order, every carrier, one dashboard. (copy changed by a deploy nobody reviewed)' : heroText; },
     hide: function (on) { submit.classList.toggle('f-hide', on); },
     'add-row': function (on) {

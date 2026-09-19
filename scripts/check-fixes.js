@@ -292,7 +292,7 @@ try {
   // -- state ------------------------------------------------------------------
   const state = (await call(A, '/api/state')).body.heal;
   check('/api/state carries heal in the contract\'s shape',
-    JSON.stringify(state) === JSON.stringify({ mode: 'ai', ai: { enabled: false, available: true, reason: 'organisation' }, canManage: true }),
+    JSON.stringify(state) === JSON.stringify({ mode: 'ai', ai: { enabled: false, available: true, reason: 'organisation' }, plan: { enabled: false, available: true, reason: 'organisation' }, canManage: true }),
     JSON.stringify(state));
   const memberState = (await call(M, '/api/settings/heal')).body;
   check('GET /api/settings/heal answers a member, who cannot manage it', memberState.mode === 'ai' && memberState.canManage === false);
@@ -316,9 +316,21 @@ try {
   const optIn = await call(B, '/api/settings/heal', { method: 'PUT', body: { ai: true } });
   const file = join(ROOT, '.ghostclick', 'check-fix-b', 'heal.json');
   check('an owner opts in, and the model is then available to that organisation only',
-    optIn.status === 200 && JSON.stringify(optIn.body) === JSON.stringify({ mode: 'ai', ai: { enabled: true, available: true, reason: null }, canManage: true }) &&
+    optIn.status === 200 && JSON.stringify(optIn.body) === JSON.stringify({ mode: 'ai', ai: { enabled: true, available: true, reason: null }, plan: { enabled: false, available: true, reason: 'organisation' }, canManage: true }) &&
     existsSync(file) && JSON.parse(readFileSync(file, 'utf8')).ai === true && (await call(A, '/api/state')).body.heal.ai.enabled === false,
     JSON.stringify(optIn.body));
+  // Two consents, independent: drafting tests from a page read (chat-plan.js)
+  // is its own yes, and a file written before it existed reads as no.
+  const planIn = await call(B, '/api/settings/heal', { method: 'PUT', body: { plan: true } });
+  const aiOff = await call(B, '/api/settings/heal', { method: 'PUT', body: { ai: false } });
+  const kept = JSON.parse(readFileSync(file, 'utf8'));
+  check('drafting tests is its own consent, kept beside the other',
+    planIn.status === 200 && planIn.body.plan.enabled === true && planIn.body.plan.reason === null && planIn.body.ai.enabled === true
+    && aiOff.status === 200 && aiOff.body.ai.enabled === false && aiOff.body.plan.enabled === true && kept.ai === false && kept.plan === true,
+    JSON.stringify([planIn.body?.plan, aiOff.body?.ai, kept]));
+  const neither = await call(B, '/api/settings/heal', { method: 'PUT', body: { plan: 'yes' } });
+  check('plan must be a boolean too', neither.status === 400 && /true or false/.test(neither.body.error ?? ''));
+  await call(B, '/api/settings/heal', { method: 'PUT', body: { ai: true, plan: false } });
 
   // -- a run of a saved case, whose fix becomes a suggestion -------------------
   await call(A, '/api/origins', { method: 'POST', body: { origin: BASE } });
