@@ -21,6 +21,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { PAGE_SELECTOR } from './monitor-rules.js';
 
 const part = (name) => readFileSync(fileURLToPath(new URL(`./monitor/page/${name}`, import.meta.url)), 'utf8');
 
@@ -178,7 +179,8 @@ export class MonitorAgent {
 
   /**
    * A clip of the element, padded, within the viewport; the whole viewport
-   * when the element is gone or has no size.
+   * when the element is gone or has no size — or when the monitor is on the
+   * whole page.
    *
    * `mayScroll` brings the element into view first. Never while a run or a
    * recording holds the page: scrolling under the executor moves what it is
@@ -194,6 +196,8 @@ export class MonitorAgent {
     const t = { selector: target.selector, fingerprint: target.fingerprint || null };
     const shot = (opts) => page.screenshot({ type: 'png', timeout: 5000, caret: 'initial', ...opts });
     const viewportShot = async () => ({ png: await shot({}), kind: 'viewport', clip: null, ts });
+    // The whole page's clip is the viewport: what a person would see.
+    if (t.selector === PAGE_SELECTOR) { try { return await viewportShot(); } catch { return null; } }
     const box = (scroll) => this.#call(([tt, s]) => {
       const r = window.__gcMonitor ? window.__gcMonitor.resolveTarget(tt) : { el: null };
       if (!r.el) return null;

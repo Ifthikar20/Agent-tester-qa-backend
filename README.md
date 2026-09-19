@@ -1038,6 +1038,47 @@ armed monitor gives it six seconds (`ARM_GRACE_MS`) to arrive before a missing
 incident opens, where a change on a page that has been open a while is
 confirmed in half a second, as before.
 
+### Watching the whole page
+
+Sometimes the question is not "did the hero grow" but "did anything change".
+**Watch the whole page**, beside Pick element, makes a monitor on the reserved
+selector `:page`: not one element's numbers but the page's *blocks* — every
+heading, paragraph, list item, link, button, cell and label, a field's
+placeholder, an image's alt, and the boxes that arrange them (nav, main,
+sections, forms, tables) — each with where it sits and what it says. Two of
+those snapshots diffed say what was **added**, what was **removed**, what
+**moved** or was resized, and what was **reworded**, and that list is the
+incident: the exact totals as chips, the first few of each named
+(`added td “#10046”`, `section#faq down 40px`, `p “Every order…” → “Every
+order… (copy changed by a deploy…)”`), a before and after clip of the
+viewport, and a verdict that says the same in a sentence. Over the API it is
+`POST /api/monitors` with `"selector": ":page"`.
+
+The rule is one of three things — *the layout must not change*, *the text must
+not change*, or *nothing on the page may change* — and a number of pixels
+loosens how far a block may drift before it has moved (`no block may move by
+more than 12px`; the default is 4). A sentence the compiler cannot place ("the
+page must stay on brand") watches for any change and leaves the verdict to a
+reviewer, the way a judgment clause on an element does.
+
+What it deliberately does not report: a class that changes nothing visible (a
+page monitor is not a markup hash); a move under the tolerance; where a fixed
+or sticky block is, which depends on the scroll; a snapshot taken at another
+viewport width, which is a different layout rather than a change; and whatever
+the page changes **on its own**. While the monitor is made the runner watches
+the page for a second and a half, and the blocks that changed with nobody
+touching it — a ticker, a clock, a carousel — are learned into the spec's
+`ignore` and never reported. A counter that grows a digit wider and pushes
+its neighbour along is still a move; the pixel phrase, or **Resolve & accept
+current state**, is the answer. Everything else about a monitor holds: the
+confirm-before-alert funnel, six seconds of grace after a visit for blocks
+that arrive late (any verdict waits, not only "missing"), sweeps on a schedule,
+notifications, **Check now**. A snapshot keeps up to 400 blocks; the API and
+the cards carry the count, the store keeps the blocks. `npm run
+check:monitoring` walks it: the ticker learned, a swapped class ignored, the
+reworded hero caught by the words rule, a new table row caught by the layout
+rule with the cells named and the sections below it moved down.
+
 Two things worth knowing about the security model. A monitor's selector is data
 handed to `querySelector` inside a script the RUNNER installs; the flow
 language still has no evaluate and no selector, and the page never gets a way

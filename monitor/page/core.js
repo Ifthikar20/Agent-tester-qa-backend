@@ -10,6 +10,9 @@
 // and a page nobody is monitoring must be left exactly as it was — the overlay
 // host is created the first time it is needed (a pick, a flash).
 //
+// A monitor's target is an element — or the reserved selector `:page`, which
+// is the document itself measured as blocks (measurePage).
+//
 // Everything the page hands the runner goes through bindings the runner
 // exposed (`__gcMonitorReport`, `__gcMonitorSelected`, `__gcMonitorList`); with
 // none of them present this logs to the console and does nothing else.
@@ -128,6 +131,157 @@ function rowCountOf(el) {
 }
 function missingSnapshot() { return { exists: false, ts: Date.now(), url: location.href, sig: 'missing' }; }
 
+// ---- the whole page ----------------------------------------------------------
+// A monitor on `:page` watches everything at once. Not one element's numbers:
+// the page's BLOCKS — every piece of text a person can read (headings,
+// paragraphs, list items, links, buttons, cells, labels, a field's placeholder,
+// an image's alt) and the boxes that arrange them (nav, main, sections, forms,
+// tables) — each with where it sits and what it says. Two of these snapshots
+// diffed (monitor-evaluate.js diffPage) say what was added, what went, what
+// moved and what was reworded: "any UI change", once it has to be a list.
+// Capped, so a long page costs a bounded report; a block's address is its
+// place in the tree, so a row added at the bottom is one added block and not
+// a page that changed entirely.
+const PAGE_SELECTOR = ':page';
+const PAGE_BLOCKS_MAX = 400;
+const PAGE_CANDIDATES_MAX = 4000;
+const PAGE_TEXT_MAX = 80;
+const PAGE_GRID = 4;      // the signature's quantum: a move smaller than this is not a report
+const TEXT_TAGS = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li', 'a', 'button', 'label', 'summary', 'blockquote', 'pre', 'figcaption', 'dt', 'dd', 'th', 'td', 'legend', 'caption', 'input', 'select', 'textarea', 'img'];
+const BOX_TAGS = ['nav', 'main', 'header', 'footer', 'aside', 'section', 'article', 'form', 'table', 'dialog'];
+// Words that live in a bare div or span (a card's title, a counter, a badge)
+// count when the element carries text of its own and no text block above it.
+const LOOSE_TAGS = ['div', 'span', 'b', 'strong', 'em', 'i', 'small', 'code', 'time', 'mark'];
+const TEXT_SELECTOR = TEXT_TAGS.join(',');
+const BLOCK_SELECTOR = TEXT_SELECTOR + ',' + BOX_TAGS.join(',') + ',' + LOOSE_TAGS.join(',');
+const BOX_SET = new Set(BOX_TAGS);
+const LOOSE_SET = new Set(LOOSE_TAGS);
+const FIELD_SET = new Set(['input', 'select', 'textarea']);
+
+/** What a block says — never a field's value, which is somebody's data. */
+function blockText(el, tag) {
+  if (FIELD_SET.has(tag)) return collapse(el.getAttribute('placeholder') || el.getAttribute('aria-label') || el.getAttribute('name') || el.getAttribute('type') || '');
+  if (tag === 'img') return collapse(el.getAttribute('alt') || '');
+  var t = collapse(el.textContent);
+  if (!t && (tag === 'button' || tag === 'a')) t = collapse(el.getAttribute('aria-label') || el.getAttribute('title') || '');
+  return t;
+}
+function ownText(el) {
+  for (var n = el.firstChild; n; n = n.nextSibling) if (n.nodeType === 3 && /\S/.test(n.nodeValue)) return true;
+  return false;
+}
+/**
+ * The page as blocks. `k` is a block's address (its path in the tree, hashed),
+ * `t` its tag, `x y w h` its box in document coordinates — viewport ones for
+ * a fixed or sticky block (`f`), whose place depends on the scroll — `text`
+ * its first words and `th` a hash of all of them. `sig` changes when any
+ * block appears, goes, moves by the grid or says something else, and not
+ * otherwise, so a page that repaints but does not differ costs nothing.
+ */
+function measurePage() {
+  var ts = Date.now(), url = location.href;
+  var body = document.body;
+  if (!body) return missingSnapshot();
+  var sx = window.scrollX, sy = window.scrollY;
+  var paths = new Map(), stuckOf = new Map();
+  function pathOfEl(el) {
+    if (!el || el === document.documentElement) return '';
+    var have = paths.get(el);
+    if (have != null) return have;
+    var seg = el === body ? 'body' : tagOf(el) + ':' + nthOfType(el);
+    var up = el.parentElement ? pathOfEl(el.parentElement) : '';
+    var out = up ? up + '>' + seg : seg;
+    paths.set(el, out);
+    return out;
+  }
+  function stuck(el) {
+    if (!el || el === document.documentElement) return false;
+    var have = stuckOf.get(el);
+    if (have != null) return have;
+    var pos = getComputedStyle(el).position;
+    var out = pos === 'fixed' || pos === 'sticky' || stuck(el.parentElement);
+    stuckOf.set(el, out);
+    return out;
+  }
+  var candidates = body.querySelectorAll(BLOCK_SELECTOR);
+  var n = candidates.length;
+  var truncated = n > PAGE_CANDIDATES_MAX;
+  if (truncated) n = PAGE_CANDIDATES_MAX;
+  var byEl = new Map();
+  var order = [];
+  for (var i = 0; i < n; i++) {
+    var el = candidates[i];
+    if (isOurs(el)) continue;
+    var tag = tagOf(el);
+    var isBox = BOX_SET.has(tag);
+    if (LOOSE_SET.has(tag)) {
+      // Its own words, and no text block above it that already carries them.
+      if (!ownText(el)) continue;
+      var above = el.parentElement, carried = false;
+      while (above && above !== body) { if (byEl.has(above) && byEl.get(above).text != null) { carried = true; break; } above = above.parentElement; }
+      if (carried || (el.parentElement && el.parentElement.closest(TEXT_SELECTOR))) continue;
+    }
+    var r = el.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) continue;
+    var text = isBox ? '' : blockText(el, tag);
+    if (!isBox && !text && tag !== 'img' && !FIELD_SET.has(tag)) continue;
+    var f = stuck(el);
+    var blk = { k: '', t: tag, x: ri(f ? r.left : r.left + sx), y: ri(f ? r.top : r.top + sy), w: ri(r.width), h: ri(r.height) };
+    if (f) blk.f = 1;
+    if (el.id) blk.id = String(el.id).slice(0, 40);
+    if (!isBox) { blk.text = text.slice(0, PAGE_TEXT_MAX); blk.th = fnv1a(text); }
+    byEl.set(el, blk);
+    order.push(el);
+  }
+  // A wrapper — a cell or a list item whose only words are its one link's —
+  // is one block, the outer one, not two.
+  var kept = [];
+  for (var j = 0; j < order.length; j++) {
+    var e = order[j], b = byEl.get(e);
+    if (b.text != null) {
+      var cur = e.parentElement, dup = false;
+      while (cur && cur !== body) {
+        var outer = byEl.get(cur);
+        if (outer && outer.text != null) { dup = outer.th === b.th; break; }
+        cur = cur.parentElement;
+      }
+      if (dup) continue;
+    }
+    b.k = fnv1a(pathOfEl(e));
+    kept.push(b);
+    if (kept.length >= PAGE_BLOCKS_MAX) { truncated = truncated || j + 1 < order.length; break; }
+  }
+  var parts = [];
+  for (var q = 0; q < kept.length; q++) {
+    var kb = kept[q];
+    parts.push(kb.k + ':' + (kb.f ? 'f' : Math.round(kb.x / PAGE_GRID) + ',' + Math.round(kb.y / PAGE_GRID)) + ',' + Math.round(kb.w / PAGE_GRID) + 'x' + Math.round(kb.h / PAGE_GRID) + (kb.th ? ':' + kb.th : ''));
+  }
+  var shape = fnv1a(parts.join('|'));
+  var de = document.documentElement;
+  var docW = Math.max(de.scrollWidth, body.scrollWidth, window.innerWidth), docH = Math.max(de.scrollHeight, body.scrollHeight, window.innerHeight);
+  var text = collapse(body.innerText != null ? body.innerText : body.textContent);
+  return {
+    ts: ts, url: url, exists: true, visible: true, inViewport: true, kind: 'page',
+    tag: 'page', id: '', classes: [], positioning: 'static',
+    rect: { x: 0, y: 0, w: docW, h: docH }, docRect: { x: 0, y: 0, w: docW, h: docH }, styles: {}, metrics: { fontSizePx: null, lineHeightPx: null, opacity: 1 },
+    title: collapse(document.title).slice(0, 200), text: text.slice(0, 2000), textLength: text.length,
+    counts: { children: body.childElementCount, descendants: body.getElementsByTagName('*').length, rows: null, openDetails: body.querySelectorAll('details[open]').length, blocks: kept.length },
+    htmlHash: shape, blocks: kept, truncated: truncated,
+    env: { innerWidth: window.innerWidth, innerHeight: window.innerHeight, dpr: window.devicePixelRatio || 1, scrollX: r1(sx), scrollY: r1(sy) },
+    sig: 'page|' + kept.length + '|' + shape,
+  };
+}
+/** One line per block — the page's outline, which is what a page's "markup excerpt" is. */
+function outlineOf(snap, max) {
+  var out = [];
+  var list = (snap && snap.blocks) || [];
+  for (var i = 0; i < list.length && out.length < max; i++) {
+    var b = list[i];
+    out.push(b.t + (b.id ? '#' + b.id : '') + (b.text ? ' "' + b.text + '"' : '') + ' @' + b.x + ',' + b.y + ' ' + b.w + 'x' + b.h + (b.f ? ' fixed' : ''));
+  }
+  return out;
+}
+
 /**
  * Everything the evaluator can ask about an element, in one read, plus `sig`:
  * the change signature. A report goes out only when the signature changes, so
@@ -141,6 +295,7 @@ function missingSnapshot() { return { exists: false, ts: Date.now(), url: locati
 function measure(el) {
   const ts = Date.now(), url = location.href;
   if (!el || !el.isConnected) return missingSnapshot();
+  if (el === document.documentElement) return measurePage();
   const r = el.getBoundingClientRect();
   const cs = getComputedStyle(el);
   const rect = { x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height) };
@@ -271,6 +426,7 @@ function findByFingerprint(fp) {
 function resolveTarget(target) {
   const selector = typeof target === 'string' ? target : target && target.selector;
   const fp = typeof target === 'string' ? null : target && target.fingerprint;
+  if (selector === PAGE_SELECTOR) return { el: document.documentElement, by: 'page' };
   let el = null, by = 'selector';
   if (selector) { try { el = document.querySelector(selector); } catch (_) { el = null; } }
   if (el && isOurs(el)) el = null;
@@ -315,6 +471,13 @@ function pathOf(el) {
  * confirmed — never on every report, so no markup rides the wire per change.
  */
 function excerptOf(el) {
+  if (el === document.documentElement) {
+    const snap = measurePage();
+    const lines = outlineOf(snap, 120);
+    const boxes = [];
+    for (const b of snap.blocks || []) if (b.text == null && boxes.length < EXCERPT_AROUND) boxes.push(b.t + (b.id ? '#' + b.id : '') + ' ' + b.w + 'x' + b.h);
+    return { html: lines.join('\n'), path: [], siblings: [], children: boxes, childCount: (snap.blocks || []).length };
+  }
   const one = (e) => { const t = collapse(e.innerText != null ? e.innerText : e.textContent).slice(0, 40); return describe(e) + (t ? ' "' + t + '"' : ''); };
   const around = (list) => Array.from(list || []).filter((e) => e !== el && !isOurs(e)).slice(0, EXCERPT_AROUND).map(one);
   return {
@@ -331,6 +494,8 @@ function excerptFor(target) {
 }
 
 GM.measure = measure;
+GM.measurePage = measurePage;
+GM.PAGE_SELECTOR = PAGE_SELECTOR;
 GM.measureFor = measureFor;
 GM.resolveTarget = resolveTarget;
 GM.buildSelector = buildSelector;

@@ -16,6 +16,11 @@
  * proxies meanwhile) or `not_understood` — so a panel can say which words
  * took, before the monitor exists.
  *
+ * A rule about the whole page (`:page`, compilePageRule) is the one kind
+ * neither compiler reads word by word: it can only be about the layout or the
+ * words, and the diff of two page snapshots answers it (monitor-evaluate.js
+ * diffPage).
+ *
  * Two compilers produce that shape. The mock one below is regular expressions
  * over English: instant, offline, and what every deployment has — it
  * understands the phrasing README's table lists, and it is what a monitor runs
@@ -30,7 +35,7 @@
  * closed JSON schemas the model is asked to fill live in monitor-resolver.js,
  * and the shape is enforced here by hand.
  */
-import { METRICS, OPS, METRIC_LABELS, METRIC_UNITS, NUMERIC_METRICS, metric, coerce } from './monitor-evaluate.js';
+import { METRICS, OPS, METRIC_LABELS, METRIC_UNITS, NUMERIC_METRICS, PAGE_TOLERANCE_PX, metric, coerce, describePageDiff } from './monitor-evaluate.js';
 
 export const SEVERITIES = ['low', 'medium', 'high'];
 export const CLAUSE_OUTCOMES = ['checks', 'judgment', 'not_understood'];
@@ -171,6 +176,8 @@ export function llmModeFrom({ env = process.env, haveKey = false } = {}) {
 export const RULE_MAX = 500;
 export const LABEL_MAX = 80;
 export const SELECTOR_MAX = 1000;
+/** The reserved selector of a monitor on the whole page (core.js measurePage). */
+export const PAGE_SELECTOR = ':page';
 
 /**
  * The checks a rule would compile to, for a panel to show BEFORE the monitor
@@ -196,11 +203,13 @@ export function sameDoc(a, b) {
   if (!a || !b) return false;
   try { const ua = new URL(a), ub = new URL(b); return ua.origin === ub.origin && ua.pathname.replace(/\/+$/, '') === ub.pathname.replace(/\/+$/, ''); } catch { return a === b; }
 }
-/** A snapshot as an incident keeps it: the text cut to what a card can show. */
+/** A snapshot as an incident keeps it and a card sees it: the text cut short, a page's blocks left out. */
 export function compactSnapshot(s) {
   if (!s) return null;
   const out = Object.assign({}, s);
   if (typeof out.text === 'string' && out.text.length > 500) out.text = out.text.slice(0, 500) + '…';
+  // A page's blocks stay in the store, where the next diff needs them; a card and an incident get the count.
+  if (Array.isArray(out.blocks)) delete out.blocks;
   return out;
 }
 /** Which checks are failing, as one string — so "the same failure" is a comparison. */
@@ -289,6 +298,7 @@ const DIMS = /(-?\d+(?:\.\d+)?)\s*(?:px|pixels?)?\s*(?:by|x|×)\s*(-?\d+(?:\.\d+
  * with needsLlmJudgment set, which is honest about what it could not read.
  */
 export function compileMock({ ruleText, element, baseline }) {
+  if ((element && element.tag === 'page') || (baseline && baseline.kind === 'page')) return compilePageRule(ruleText);
   const text = String(ruleText || '').toLowerCase().replace(/\s+/g, ' ').trim();
   // The rule is read in lower case, but a quoted phrase is compared as the
   // engineer wrote it — "Checkout" stays "Checkout" on the card.
@@ -478,6 +488,42 @@ export function compileMock({ ruleText, element, baseline }) {
   return normalizeSpec({ summary: '', checks: usable.length ? usable : checks, clauses: clauseRows, needsLlmJudgment, judgmentHint: needsLlmJudgment ? (judged.join('; ') || ruleText) : null }, 'mock');
 }
 
+// ---- the whole page ----------------------------------------------------------------------
+const PAGE_LAYOUT_WORDS = /\b(layout|layouts|position|positions|positioned|move|moves|moved|moving|shift|shifts|shifted|size|sizes|sized|resize|resized|align|aligned|alignment|spacing|gap|gaps|overlap|overlaps|structure|arrangement|arranged|place|places|placement|design|look|looks|appearance|visual|visually|render|renders|rendering|style|styles|styling|box|boxes|section|sections|element|elements|block|blocks|shape|geometry|jump|jumps|reflow)\b/;
+const PAGE_TEXT_WORDS = /\b(text|texts|copy|wording|words|content|contents|label|labels|caption|captions|heading|headings|title|titles|say|says|said|read|reads|spelling|typo|typos|number|numbers|price|prices|sentence|sentences|paragraph|paragraphs|string|strings|reworded|rewritten|written|message|messages)\b/;
+const PAGE_ANY_WORDS = /\b(nothing|anything|any|everything|whole|entire|all|page|screen|ui|change|changes|changed|different|same|as is|as-is|stable|unchanged|identical|regress|regression|regressions|break|breaks|broken)\b/;
+const PAGE_MESSAGES = {
+  layout: (tol) => `The layout must not change: nothing added, removed, moved or resized by more than ${tol}px`,
+  content: () => 'The words must not change: nothing reworded, added or removed',
+};
+/**
+ * A rule about the whole page. It can say one of three things — the layout
+ * must hold, the words must hold, or nothing may change — and a number of
+ * pixels loosens how far a block may drift before it has moved. Anything
+ * else ("the page must still look professional") is watched for any change
+ * and left to a reviewer, the way a judgment clause on an element is. The
+ * spec is its own shape (`kind: 'page'`): the evaluator answers it with
+ * diffPage, never with a metric of one element, and `ignore` is filled in by
+ * the engine with the blocks the page changes on its own.
+ */
+export function compilePageRule(ruleText) {
+  const raw = String(ruleText || '').replace(/\s+/g, ' ').trim().slice(0, RULE_MAX);
+  const text = raw.toLowerCase();
+  const layout = PAGE_LAYOUT_WORDS.test(text);
+  const words = PAGE_TEXT_WORDS.test(text);
+  const understood = layout || words || PAGE_ANY_WORDS.test(text) || hasNegation(text);
+  const which = layout && !words ? ['layout'] : words && !layout ? ['content'] : ['layout', 'content'];
+  const px = text.match(/(\d+(?:\.\d+)?)\s*(?:px|pixels?)\b/);
+  const tolerance = px ? Math.max(0, Math.min(200, parseFloat(px[1]))) : PAGE_TOLERANCE_PX;
+  const checks = which.map((m) => ({ id: m, metric: m, op: 'unchanged', value: null, min: null, max: null, tolerance: null, compareToBaseline: true, message: PAGE_MESSAGES[m](tolerance), judgment: !understood }));
+  const clauses = [{ text: raw.slice(0, CLAUSE_MAX), outcome: understood ? 'checks' : 'judgment', checkIds: checks.map((c) => c.id) }];
+  const what = which.length === 2 ? 'Nothing on the page may change: not its layout, not its words' : which[0] === 'layout' ? 'The page’s layout must not change' : 'The page’s words must not change';
+  return {
+    kind: 'page', summary: `${what} (moves under ${tolerance}px and whatever changes on its own are ignored)`.slice(0, 160),
+    checks, clauses, needsLlmJudgment: !understood, judgmentHint: understood ? null : raw.slice(0, 500), source: 'mock', tolerance, ignore: [],
+  };
+}
+
 // ---- the mock judge ------------------------------------------------------------------------
 function pct(a, b) {
   if (typeof a !== 'number' || typeof b !== 'number' || a === 0) return null;
@@ -488,8 +534,9 @@ export function judgeMock({ label, selector, ruleText, violations, diff, judgmen
   // Only a judgment clause's proxies failed: the element changed, and whether
   // the rule still holds is a question the mock cannot answer. Said so.
   if (judgment) {
-    const changed = Object.entries(diff || {}).filter(([k]) => k !== 'htmlChanged').slice(0, 4).map(([k, val]) => (Array.isArray(val) ? METRIC_LABELS[k] + ' ' + val[0] + ' → ' + val[1] : k));
-    const what = [diff && diff.htmlChanged ? 'its markup changed' : null, changed.length ? changed.join(', ') : null].filter(Boolean).join('; ') || 'it changed';
+    const page = diff && diff.pageChanges ? [describePageDiff(diff.pageChanges, 'layout'), describePageDiff(diff.pageChanges, 'content')].filter((t) => t !== 'nothing measurable').join('; ') : null;
+    const changed = Object.entries(diff || {}).filter(([k]) => k !== 'htmlChanged' && k !== 'pageChanges').slice(0, 4).map(([k, val]) => (Array.isArray(val) ? METRIC_LABELS[k] + ' ' + val[0] + ' → ' + val[1] : k));
+    const what = [page, diff && diff.htmlChanged ? 'its markup changed' : null, changed.length ? changed.join(', ') : null].filter(Boolean).join('; ') || 'it changed';
     return {
       violation: true, severity: 'medium',
       explanation: '"' + label + '" (' + selector + ') changed under the rule "' + ruleText + '": ' + what + '. Whether the rule still holds is a judgment, not a number — set ANTHROPIC_API_KEY and Claude decides from the markup and the clips on each confirmed change; until then every change is reported.',
@@ -497,10 +544,14 @@ export function judgeMock({ label, selector, ruleText, violations, diff, judgmen
     };
   }
   const v = (violations && violations[0]) || { metric: 'exists', message: 'The element changed', actual: null, expected: null, baseline: null };
-  const others = Object.entries(diff || {}).filter(([k]) => k !== v.metric && k !== 'htmlChanged').slice(0, 4).map(([k, val]) => (Array.isArray(val) ? METRIC_LABELS[k] + ' ' + val[0] + ' → ' + val[1] : k));
+  const others = Object.entries(diff || {}).filter(([k]) => k !== v.metric && k !== 'htmlChanged' && k !== 'pageChanges').slice(0, 4).map(([k, val]) => (Array.isArray(val) ? METRIC_LABELS[k] + ' ' + val[0] + ' → ' + val[1] : k));
   let severity = 'low';
   if (v.metric === 'exists' || v.metric === 'visible') severity = 'high';
-  else {
+  else if (v.metric === 'layout' || v.metric === 'content') {
+    // Something went or many things moved is worse than one thing reworded.
+    const t = (diff && diff.pageChanges && diff.pageChanges.totals) || {};
+    severity = (t.removed || 0) > 0 || (t.added || 0) + (t.moved || 0) >= 10 ? 'high' : 'medium';
+  } else {
     const change = pct(Number(v.baseline), Number(v.actual));
     if (change != null && change >= 0.5) severity = 'high';
     else if (change != null && change >= 0.2) severity = 'medium';
@@ -512,6 +563,8 @@ export function judgeMock({ label, selector, ruleText, violations, diff, judgmen
   if (v.metric === 'exists') explanation += 'The element can no longer be found on the page.';
   else if (v.metric === 'visible') explanation += 'The element is ' + (v.actual === false ? 'no longer visible' : 'visible although it should be hidden') + '.';
   else if (v.metric === 'htmlHash') explanation += 'Its markup changed.';
+  else if (v.metric === 'layout') explanation += 'The layout changed: ' + v.actual + '.';
+  else if (v.metric === 'content') explanation += 'The words changed: ' + v.actual + '.';
   else explanation += 'Its ' + metricLabel + ' is now ' + v.actual + unit + ' but the rule expects ' + v.expected + (v.baseline != null ? ' (baseline ' + v.baseline + unit + ')' : '') + '.';
   if (others.length) explanation += ' Side effects: ' + others.join(', ') + '.';
   if (violations && violations.length > 1) explanation += ' ' + (violations.length - 1) + ' other check' + (violations.length > 2 ? 's' : '') + ' failed as well.';

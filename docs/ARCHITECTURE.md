@@ -527,21 +527,22 @@ rewrites the case, keeping the `%% via` evidence). Nothing edits a case on its o
 
 ## 9. Agentic monitoring
 
-A monitor is an element on a page and a rule about it, in plain English. The pipeline is the
-proof of concept's, ported and made multi-tenant:
+A monitor is an element on a page and a rule about it, in plain English — or the whole page
+(`:page`) and a rule about its layout or its words. The pipeline is the proof of concept's, ported
+and made multi-tenant:
 
 ```mermaid
 flowchart LR
   subgraph page["inside the driven page · monitor/page/"]
     picker["picker.js<br/>hover outline, click to choose"]
     watcher["watcher.js<br/>ResizeObserver + MutationObserver"]
-    core["core.js<br/>measure(): the snapshot<br/>excerptOf(): sanitised markup"]
+    core["core.js<br/>measure(): the snapshot<br/>measurePage(): the blocks<br/>excerptOf(): sanitised markup"]
     san["sanitize.js"]
   end
   subgraph runner["the runner"]
     agent["monitor-page.js<br/>MonitorAgent: bundle, inject, #call"]
     engine["monitor.js<br/>ingest → debounce → confirm"]
-    ev["monitor-evaluate.js<br/>metric, op, tolerance"]
+    ev["monitor-evaluate.js<br/>metric, op, tolerance<br/>diffPage(): added, removed, moved, reworded"]
     rules["monitor-rules.js<br/>compileMock · checkSpec · judgeMock"]
     res["monitor-resolver.js<br/>compile · judge (Claude)"]
     store[("monitors.json<br/>monitor-shots/")]
@@ -599,6 +600,24 @@ flowchart LR
    judgment clause opens as `judging` and is settled by the verdict: a violation stands as `open`
    in Claude's words, a no resolves it by the judge and adopts the element as it is now as the
    baseline, and no answer leaves it `open` saying why, never silence.
+6. **The whole page** is the same pipeline with a different snapshot. `:page` resolves to the
+   document, and `measurePage` (core.js) reports its blocks instead of one element's numbers:
+   every readable piece of text (headings, paragraphs, list items, links, buttons, cells, labels,
+   a field's placeholder, an image's alt) and the boxes that arrange them (nav, main, sections,
+   forms, tables), each keyed by its place in the tree with its box in document coordinates
+   (viewport ones for a fixed or sticky block) and a hash of its words, capped at 400. The
+   signature changes only when a block appears, goes, moves by the 4px grid or says something
+   else. `compilePageRule` (monitor-rules.js) reads the rule as one of three things — the layout,
+   the words, or both — with an optional pixel tolerance, into a spec of `kind: 'page'`; a sentence
+   it cannot place becomes a judgment clause over both. `diffPage` (monitor-evaluate.js) answers
+   it: what was added, removed, moved or resized past the tolerance, or reworded, as exact totals
+   and capped samples, which is the incident's `diff.pageChanges` and the verdict's sentence. Two
+   things keep it quiet: at creation the engine reads the page three more times over a second and
+   a half and learns the blocks that changed with nobody touching it (`changedKeys`) into the
+   spec's `ignore`; and after a visit a page monitor's every verdict, not only "missing", waits
+   out `ARM_GRACE_MS` for blocks that arrive late. A snapshot at another viewport width is skipped,
+   not failed. The store keeps the blocks; `compactSnapshot` leaves them out of the API and the
+   events, which carry the count.
 
 ```mermaid
 stateDiagram-v2
@@ -838,6 +857,10 @@ install with `--require-hashes`.
   is rebuilt from the words and a tool is simply called again.
 - **The mock compiler understands a fixed phrasing table.** A clause outside it is marked not
   understood before the monitor is saved; Claude, when a key is set, reads anything.
+- **A whole-page monitor reports what a person could see, at the runner's viewport.** Up to 400
+  blocks, moves under the tolerance forgiven, a fixed block's position ignored, and what the page
+  changes on its own learned at creation — a counter that later grows a digit wider and pushes its
+  neighbour is still a move, and the rule's pixel phrase or an accepted state is the answer.
 - **Request limits are per process.** A second runner behind the same edge would need them in
   Redis (`limits.js`).
 - What is deliberately not here yet, and the seven things that will bite you, are the README's

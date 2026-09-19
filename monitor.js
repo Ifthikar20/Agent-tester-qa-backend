@@ -1,7 +1,9 @@
 /**
  * Agentic monitoring — the engine, one per organisation, and its store.
  *
- * A monitor is an element on a page and a rule about it. The page agent
+ * A monitor is an element on a page and a rule about it — or the whole page
+ * (`:page`) and a rule about its layout or its words, judged by the diff of
+ * two page snapshots rather than by one element's numbers. The page agent
  * (monitor-page.js) reports a snapshot whenever the element's change
  * signature changes; this funnels those reports through a debounce, evaluates
  * them deterministically (monitor-evaluate.js), insists a new state is
@@ -34,10 +36,10 @@ import crypto from 'node:crypto';
 import { stateDir } from './org.js';
 import * as secrets from './secrets.js';
 import { redactWith } from './redact.js';
-import { evaluate, diff, summarize } from './monitor-evaluate.js';
-import { compileMock, judgeMock, compactSnapshot, sameDoc, violationKey, RULE_MAX, LABEL_MAX, SELECTOR_MAX } from './monitor-rules.js';
+import { evaluate, diff, summarize, changedKeys, isPageSnapshot } from './monitor-evaluate.js';
+import { compileMock, judgeMock, compactSnapshot, sameDoc, violationKey, RULE_MAX, LABEL_MAX, SELECTOR_MAX, PAGE_SELECTOR } from './monitor-rules.js';
 
-export { RULE_MAX, LABEL_MAX, SELECTOR_MAX };
+export { RULE_MAX, LABEL_MAX, SELECTOR_MAX, PAGE_SELECTOR };
 export const MONITORS_MAX = 50;
 export const INCIDENTS_MAX = 200;
 const FINGERPRINT_MAX = 4096;
@@ -54,6 +56,15 @@ const HEARTBEAT_MS = 2500;
  * change on a page that was already open is confirmed in half a second.
  */
 export const ARM_GRACE_MS = 6000;
+/**
+ * How long a new monitor on the whole page watches the page nobody touched
+ * before its baseline is settled: the blocks that changed meanwhile — a
+ * ticker, a clock, a carousel — are the page's own churn, learned into the
+ * spec's `ignore` and never reported. Three readings, half a second apart.
+ */
+export const PAGE_LEARN_MS = 500;
+export const PAGE_LEARN_READS = 3;
+const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); t.unref?.(); });
 /** A shot's name, as the gated route accepts it — and nothing with a slash or a dot in it. */
 export const SHOT_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,120}\.png$/;
 
@@ -203,6 +214,9 @@ class MonitorEngine {
   /** A snapshot's text, redacted in place — it is a fresh object from the page. */
   cleanSnapshot(s) {
     if (s && typeof s.text === 'string') s.text = this.redact(s.text);
+    if (s && typeof s.title === 'string') s.title = this.redact(s.title);
+    // A page's blocks carry the page's words, block by block.
+    if (s && Array.isArray(s.blocks)) for (const b of s.blocks) if (b && typeof b.text === 'string') b.text = this.redact(b.text);
     return s;
   }
   /** An excerpt (core.js excerptOf), redacted string by string — markup and one-liners are page content too. */
@@ -326,15 +340,28 @@ class MonitorEngine {
     const agent = this.live();
     const url = agent?.url();
     if (!agent || !url) throw refuse('Nothing is open yet — open a URL first', 409);
+    // The whole page: no fingerprint (there is nothing to find again), and
+    // the baseline is settled only after the page has been watched a moment
+    // — what changed while nobody touched it is what the page does on its own.
+    const isPage = selector === PAGE_SELECTOR;
+    if (isPage) fingerprint = null;
     const base = await agent.measure({ selector, fingerprint });
-    if (!base || !base.exists) throw refuse(`No element matches "${selector}" on the current page`, 422);
+    if (!base || !base.exists) throw refuse(isPage ? 'The page could not be measured' : `No element matches "${selector}" on the current page`, 422);
+    const volatile = new Set();
+    if (isPage && isPageSnapshot(base)) {
+      for (let i = 0; i < PAGE_LEARN_READS; i++) {
+        await sleep(PAGE_LEARN_MS);
+        const again = await agent.measure({ selector, fingerprint: null }).catch(() => null);
+        if (isPageSnapshot(again)) for (const k of changedKeys(base, again)) volatile.add(k);
+      }
+    }
     this.cleanSnapshot(base);
     if (fingerprint && typeof fingerprint.text === 'string') fingerprint = { ...fingerprint, text: this.redact(fingerprint.text) };
     // The element's markup, for the compilers: what is really there, with the
     // code taken out before it left the page (core.js excerptOf).
     const excerpt = this.cleanExcerpt(await agent.excerpt({ selector, fingerprint }).catch(() => null));
     const m = {
-      id: newId('m'), label: this.redact(str(label, LABEL_MAX) || selector).slice(0, LABEL_MAX), url, suiteId,
+      id: newId('m'), label: this.redact(str(label, LABEL_MAX) || (isPage ? 'Whole page' : selector)).slice(0, LABEL_MAX), url, suiteId,
       selector, fingerprint: fingerprint || null, tag: str(tag, 40) || base.tag || null, ruleText,
       spec: null, specSource: null, specError: null, baseline: base, baselineShot: null, baselineExcerpt: keepExcerpt(excerpt), last: base,
       state: 'ok', openIncidentId: null, createdAt: now(), lastTickAt: null, lastVisitAt: null,
@@ -342,14 +369,17 @@ class MonitorEngine {
     };
     const element = { tag: m.tag, selector, label: m.label, textPreview: (base.text || '').slice(0, 120), excerpt };
     m.spec = compileMock({ ruleText: m.ruleText, element, baseline: base });
-    m.specSource = cfg.llm.mode === 'claude' && cfg.resolver ? 'provisional' : 'mock';
+    // A page rule is the diff's to answer, not a model's to compile: the mock's spec is final.
+    if (m.spec.kind === 'page') { m.spec.ignore = [...volatile]; m.specSource = 'mock'; }
+    else m.specSource = cfg.llm.mode === 'claude' && cfg.resolver ? 'provisional' : 'mock';
     this.monitors.set(m.id, m);
     this.rt.set(m.id, newRuntime());
     const shot = await agent.screenshotElement(m, { mayScroll: cfg.isIdle() }).catch(() => null);
     if (shot) m.baselineShot = this.saveShot(`${m.id}-baseline`, shot.png);
     this.persist();
     this.emit({ t: 'monitor.changed', monitor: this.publicMonitor(m) });
-    this.say('info', `watching ${m.label}: ${m.spec.checks.map((c) => `${c.metric} ${c.op}${c.value == null ? '' : ` ${c.value}`}`).join(', ')}`);
+    const learned = m.spec.kind === 'page' ? ` (${base.counts?.blocks ?? 0} blocks${volatile.size ? `, ${volatile.size} that change on their own ignored` : ''})` : '';
+    this.say('info', `watching ${m.label}: ${m.spec.checks.map((c) => `${c.metric} ${c.op}${c.value == null ? '' : ` ${c.value}`}`).join(', ')}${learned}`);
     await agent.arm(m).catch(() => null);
     if (m.specSource === 'provisional') this.compileAsync(m, element);
     return m;
@@ -473,12 +503,14 @@ class MonitorEngine {
     if (desired === m.state) { rt.candidate = null; clearTimeout(rt.confirm); rt.confirm = null; return; }
     // Acknowledged (manually resolved) monitors stay quiet while the same checks keep failing.
     if (m.state === 'acknowledged' && desired !== 'ok' && violationKey(res) === m.ackKey) { rt.candidate = null; clearTimeout(rt.confirm); rt.confirm = null; return; }
-    // Missing just after arming is "not yet", and neither a second report
+    // Missing just after arming is "not yet" (any change, on a whole page), and neither a second report
     // that agrees nor the half-second re-measure gets to decide it; only the
     // measurement at the end of the grace does. Anything else — a violation,
     // or missing on a page that has been open a while — is confirmed as fast
     // as it always was.
-    const late = desired === 'missing' && rt.armedAt && now() - rt.armedAt < ARM_GRACE_MS;
+    // A whole page just armed is still arriving too: a block a framework
+    // renders a second later is late, not gone, so every verdict waits.
+    const late = rt.armedAt && now() - rt.armedAt < ARM_GRACE_MS && (desired === 'missing' || m.spec?.kind === 'page');
     if (rt.candidate && rt.candidate.desired === desired && reason !== 'recompiled') {
       if (!late) { this.confirm(m, desired, res, snap); return; }
       if (rt.confirm) return;
@@ -544,7 +576,7 @@ class MonitorEngine {
       violations: res.violations,
       before: { snapshot: compactSnapshot(m.baseline), screenshot: m.baselineShot, excerpt: m.baselineExcerpt ?? null },
       after: { snapshot: compactSnapshot(snap), screenshot: null, excerpt: keepExcerpt(excerpt) },
-      diff: diff(m.baseline, snap), verdict: null,
+      diff: diff(m.baseline, snap, m.spec), verdict: null,
     };
     let afterPng = null;
     const agent = this.live();
@@ -559,7 +591,7 @@ class MonitorEngine {
     this.prune();
     this.persist();
     this.emit({ t: 'incident.opened', incident: inc });
-    const headline = (inc.violations[0] && inc.violations[0].message) || 'The element changed';
+    const headline = (inc.violations[0] && inc.violations[0].message) || (m.spec?.kind === 'page' ? 'The page changed' : 'The element changed');
     try { cfg.notify?.(this.org, 'incident', { id: inc.id, label: m.label, ruleText: m.ruleText, headline, severity: inc.verdict?.severity ?? null, page: m.url ?? null, url: m.url ?? null }); }
     catch (err) { cfg.log.error(`  monitoring: could not notify: ${err.message}`); }
     // A rule the element failed from the start — "must not exceed 10px" on a
@@ -577,7 +609,7 @@ class MonitorEngine {
     inc.violations = res.violations;
     inc.after.snapshot = compactSnapshot(snap);
     if (excerpt) inc.after.excerpt = keepExcerpt(excerpt);
-    inc.diff = diff(m.baseline, snap);
+    inc.diff = diff(m.baseline, snap, m.spec);
     inc.type = desired === 'missing' ? 'missing' : 'violation';
     inc.updatedAt = now();
     const agent = this.live();
