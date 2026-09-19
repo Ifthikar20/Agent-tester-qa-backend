@@ -22,6 +22,7 @@
  *
  *   1  the matcher              "the contact us page" -> the case, then the page
  *   2  the mock mind            the sentences, and the tool calls behind them
+ *   2c the files               a table described and charted, code translated into checks, the records charted
  *   3  the request              what goes on the wire, and what must not
  *   4  answers that are not     null, with the reason named
  *   5  which mind               GC_CHAT, every word
@@ -476,6 +477,135 @@ console.log('\n— 2b · a proposal with items, and a draft run —————�
     if (registry) assert.deepEqual(registry.list().map((d) => d.id), OUR_DEFECTS);
   });
   store.remove(cv.id);
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n— 2c · files, code and charts ——————————————————————');
+{
+  const { acceptAttachments } = await import('../chat-import.js');
+  const withFiles = (list, text = '') => {
+    const { items, rejected } = acceptAttachments(list);
+    assert.deepEqual(rejected, []);
+    const held = items.map((a) => ({ ...a, at: NOW, expiresAt: NOW + 30 * 60_000 }));
+    const k = makeTools({ space, ent, switches: null, org: ORG, actions, redact, propose, onCall: (e) => events.push(e), now, attachments: held, text });
+    return { ...k, held };
+  };
+  const CSV = 'suite,runs,passed\nAcme,12,11\nHarbour,3,1\n';
+  const PW = `import { test, expect } from '@playwright/test';
+test('contact loads', async ({ page }) => {
+  await page.goto('https://acme.example/contact-us');
+  await page.getByLabel('Password').fill('hunter2-never-kept');
+  await expect(page.getByText('Talk to us')).toBeVisible();
+  await page.getByRole('checkbox', { name: 'Yearly' }).check();
+});
+test('pricing', async ({ page }) => {
+  await page.goto('/pricing');
+  await expect(page).toHaveURL(/pricing/);
+});`;
+
+  await check('a table attached is described, with what can be done next', async () => {
+    const { byName, held, calls } = withFiles([{ name: 'runs.csv', encoding: 'text', data: CSV }]);
+    const a = await answerMock({ text: 'What is in this file?', byName, propose, now, attachments: held, held });
+    assert.match(a.text, /^runs\.csv: 2 rows × 3 columns — suite \(text\), runs \(number\), passed \(number\)\./, a.text);
+    assert.match(a.text, /Ask me to chart a column by another/);
+    assert.deepEqual(a.offers.map((o) => o.text), ['chart runs.csv']);
+    assert.equal(calls.at(-1).name, 'attachment');
+    assert.equal(calls.at(-1).view.kind, 'table');
+    assert.deepEqual(calls.at(-1).view.rows[0], ['Acme', '12', '11']);
+  });
+  await check('a chart of the file: the first text column as X, the numbers as series', async () => {
+    const { byName, held, calls } = withFiles([{ name: 'runs.csv', encoding: 'text', data: CSV }]);
+    const a = await answerMock({ text: 'chart runs.csv', byName, propose, now, attachments: [], held });
+    assert.match(a.text, /^Here is runs, passed by suite \(2 rows\): runs: 15 in all, most on Acme \(12\); passed: 12 in all, most on Acme \(11\)\./, a.text);
+    const view = calls.at(-1).view;
+    assert.equal(view.kind, 'chart');
+    assert.deepEqual(view.labels, ['Acme', 'Harbour']);
+    assert.deepEqual(view.series.map((s) => s.name), ['runs', 'passed']);
+    const named = await answerMock({ text: 'plot passed by suite from the file', byName, propose, now, attachments: [], held });
+    assert.match(named.text, /^Here is passed by suite/, named.text);
+  });
+  await check('a chart of the records: runs per day, for the days asked', async () => {
+    const { byName, calls } = kit();
+    const a = await answerMock({ text: 'chart the runs per day for the last 7 days', byName, propose, now });
+    assert.match(a.text, /^Here is Runs per day \(the last 7 days\): Passed: \d+ in all/, a.text);
+    const view = calls.at(-1).view;
+    assert.equal(view.kind, 'chart');
+    assert.equal(view.labels.length, 7);
+    assert.deepEqual(view.series.map((s) => s.role), ['pass', 'fail']);
+    assert.equal(view.stacked, true);
+    const rate = await answerMock({ text: 'graph the pass rate by suite', byName, propose, now });
+    assert.match(rate.text, /^Here is Pass rate by suite/, rate.text);
+    assert.equal(calls.at(-1).view.unit, '%');
+  });
+  if (!registry) skip('a chart of the defects by status', 'no defects.js on this runner');
+  else await check('a chart of the defects by status', async () => {
+    const { byName, calls } = kit();
+    const a = await answerMock({ text: 'chart the defects by status', byName, propose, now });
+    assert.match(a.text, /^Here is Defects by status/, a.text);
+    assert.ok(calls.at(-1).view.labels.includes('open'));
+  });
+  await check('test code attached becomes checks to tick, never a run; the password never leaves', async () => {
+    const before = proposals.length;
+    const { byName, held, calls } = withFiles([{ name: 'contact.spec.ts', encoding: 'text', data: PW }]);
+    seen.runPlan.length = 0;
+    const a = await answerMock({ text: 'Turn this into checks', byName, propose, now, attachments: held, held });
+    assert.match(a.text, /^Translated 2 checks from Playwright: contact loads \(3 steps\), pricing \(2 steps\)\./, a.text);
+    assert.match(a.text, /Could not carry: .*ticking a checkbox is not in the language yet/);
+    assert.match(a.text, /Note: typed from the vault as \$PASSWORD/);
+    assert.match(a.text, /Tick the ones to run/);
+    assert.deepEqual(seen.runPlan, [], 'nothing ran');
+    assert.equal(proposals.length, before + 1);
+    const p = proposals.at(-1);
+    assert.equal(p.kind, 'run_import');
+    assert.equal(p.args.cases.length, 2);
+    assert.equal(p.args.cases[0].suiteId, suite.id, 'the suite is found by the origin it opens');
+    assert.match(p.args.cases[0].flow, /fill 'Password' : label = \$PASSWORD/);
+    assert.match(p.args.cases[1].flow, /n0\(\("https:\/\/acme\.example\/pricing"\)\)/, 'a relative address is completed by the suite');
+    assert.ok(!JSON.stringify(p).includes('hunter2-never-kept') && !a.text.includes('hunter2-never-kept'), 'the literal password is nowhere');
+    assert.equal(calls.at(-1).name, 'translate_code');
+    assert.equal(calls.at(-1).proposal.id, p.id);
+  });
+  await check('code in the words themselves is translated the same way', async () => {
+    const code = "cy.visit('https://acme.example/contact-us'); cy.contains('Talk to us').should('be.visible');";
+    const { byName } = makeTools({ space, ent, switches: null, org: ORG, actions, redact, propose, onCall: (e) => events.push(e), now, text: code });
+    const a = await answerMock({ text: code, byName, propose, now });
+    assert.match(a.text, /^Translated 1 check from Cypress: the message \(2 steps\)\./, a.text);
+    assert.equal(proposals.at(-1).kind, 'run_import');
+  });
+  await check('a table of steps becomes checks too', async () => {
+    const rows = 'name,url,steps\nHome loads,https://acme.example/,see \'Welcome\'\nContact,https://acme.example/contact-us,"click \'Send\' : button; see \'Thanks\'"\n';
+    const { byName, held } = withFiles([{ name: 'checks.csv', encoding: 'text', data: rows }]);
+    const a = await answerMock({ text: 'turn these rows into checks', byName, propose, now, attachments: held, held });
+    assert.match(a.text, /^Translated 2 checks from the table: Home loads \(2 steps\), Contact \(3 steps\)\./, a.text);
+    const p = proposals.at(-1);
+    assert.match(p.args.cases[0].flow, /n1\{\{"Welcome"\}\}/);
+    assert.match(p.args.cases[1].flow, /click 'Send' : button/);
+  });
+  await check('a file that is neither is said to be neither', async () => {
+    const { byName, held } = withFiles([{ name: 'notes.txt', encoding: 'text', data: 'Release notes.\nNothing to run here.' }]);
+    const a = await answerMock({ text: 'read this', byName, propose, now, attachments: held, held });
+    assert.match(a.text, /^notes\.txt is 2 lines of text\./, a.text);
+    const r = await byName.translate_code.run({});
+    assert.match(r.facts.why, /hold no test code/);
+    assert.equal(r.proposal, undefined);
+  });
+  await check('"yes" reports what the translated checks did', async () => {
+    const { byName } = kit();
+    const a = await answerMock({ text: 'yes', byName, propose, now, executed: { kind: 'run_import', args: {}, ok: false, result: { passed: 1, total: 2, stopped: false, outcomes: [{ line: '"contact loads" passed' }, { line: '"pricing" failed at step 2 (click \'Go\' : button): not on the page' }] } } });
+    assert.equal(a.text, '1 of 2 translated checks passed.\n"contact loads" passed\n"pricing" failed at step 2 (click \'Go\' : button): not on the page\nA passing check can be kept as a case with the Save button under it.');
+  });
+  await check('the chart and file tools refuse bad input in words, never a throw', async () => {
+    const { byName } = kit();
+    assert.match((await byName.chart.run({ what: 'pie' })).facts.error, /is not a chart/);
+    assert.match((await byName.chart.run({ what: 'file' })).facts.error, /no table is attached/);
+    assert.match((await byName.attachment.run({})).facts.error, /nothing is attached/);
+    assert.match((await byName.translate_code.run({})).facts.why, /no test code was attached/);
+  });
+  await check('the caps travel with the turn: a file too big is refused by name', async () => {
+    const { rejected } = acceptAttachments([{ name: 'huge.csv', encoding: 'text', data: 'a,b\n' + '1,2\n'.repeat(80_000) }]);
+    assert.equal(rejected[0].name, 'huge.csv');
+    assert.match(rejected[0].why, /files up to 256 kB/);
+  });
 }
 
 // ---------------------------------------------------------------------------

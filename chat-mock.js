@@ -25,11 +25,13 @@
  */
 import { when } from './chat-tools.js';
 import { excerpt } from './docs-index.js';
+import { checkColumns } from './chat-import.js';
+import { detectFramework, frameworkWord } from './chat-translate.js';
 
 /** What the engine puts in front of an answer the model was meant to write. */
 export const unavailableNote = (reason) => `(The model was unavailable — ${reason}; answered by rules.)`;
 
-const FALLBACK = 'I can answer about defects, runs, suites, saved cases and monitoring, and run a saved case. Try "how many defects do we have" or "test the contact us page".';
+const FALLBACK = 'I can answer about defects, runs, suites, saved cases and monitoring, run a saved case, chart the records, and turn test code or a table you attach into checks. Try "how many defects do we have", "chart the runs per day" or "test the contact us page".';
 
 // ---- refusals ------------------------------------------------------------------------------
 /**
@@ -64,6 +66,21 @@ const lines = (...xs) => xs.flat().filter(Boolean).join('\n');
 /** A run history row, from the two halves it arrives in. */
 const zip = (facts, unsafe) => (facts ?? []).map((f, i) => ({ ...f, ...(unsafe?.[i] ?? {}) }));
 
+/**
+ * The suite the words name — "for Treasury demo", "into the Contact suite" —
+ * by its whole name, else null. The translator takes its id: the origin
+ * completes a relative address and the checks can be kept in it.
+ */
+async function suiteNamed(raw, T, byName) {
+  // The last such word wins ("turn this into checks for X" names X), and a
+  // generic noun after it ("into checks") names nothing.
+  const m = String(raw ?? '').match(/^.*\b(?:for|into|in|under)\s+(?:the\s+)?["“']?(?!(?:checks?|tests?|cases?|code|scripts?|steps?|it|them|this|that)["”']?\s*[.!?]?\s*$)([^"”'\n]+?)["”']?\s*(?:suite)?\s*[.!?]?\s*$/i);
+  if (!m || !byName.suites) return null;
+  const want = m[1].trim().toLowerCase();
+  const r = await T('suites', {});
+  return zip(r.facts.suites, r.unsafe.suites).find((s) => String(s.name ?? '').toLowerCase() === want)?.id ?? null;
+}
+
 /** Where a run stopped: what the step was doing when the history kept it, else which step, else nothing. */
 const where = (target, step) => (target ? ` at ${target}` : Number.isInteger(step) ? ` at step ${step + 1}` : '');
 
@@ -85,6 +102,45 @@ const DRAFT_SOMETHING = /^(?:can you |could you |please |would you )?(?:draft|wr
 
 /** The drafted checks, named with their size — what a person ticks. */
 const candidateList = (cs) => (cs ?? []).map((c) => `${c.name} (${c.steps} step${c.steps === 1 ? '' : 's'})`).join(', ');
+
+/** "chart the defects by status", "graph runs per day for the last 7 days", "plot revenue by month". */
+const CHART = /\b(chart|graph|plot|visuali[sz]e|draw)\b/;
+/** "turn this into checks", "import these tests", "translate the code". */
+const TRANSLATE = /\b(translate|convert|import|turn|make|create)\b.*\b(checks?|tests?|cases?|code|script)\b|\b(checks?|tests?|cases?)\b.*\b(from|out of)\b.*\b(file|code|script|upload|table|sheet)\b/;
+
+/** What a translation made, as a sentence: the checks by name and size, then what could not be carried. */
+function translated(r) {
+  const f = r.facts;
+  const u = r.unsafe ?? {};
+  const from = f.framework === 'table' ? 'the table' : frameworkWord(f.framework);
+  if (!f.checks?.length) {
+    const why = [...(u.dropped ?? []).map((d) => `${d.name}: ${d.why}`), ...(u.lines ?? []).slice(0, 3).map((l) => `${l.line} — ${l.why}`)];
+    return { text: lines(`I read ${f.source ?? 'the code'}${f.framework ? ` (${from})` : ''} but could not carry any of it across${f.why ? `: ${f.why}` : ''}.`, why.length ? why.map((w) => `· ${w}`) : null) };
+  }
+  const names = (u.checks ?? []).map((c, i) => `${c.name} (${f.checks[i]?.steps ?? 0} step${f.checks[i]?.steps === 1 ? '' : 's'}${f.checks[i]?.guessed ? ', a control guessed from the code' : ''})`).join(', ');
+  const head = `Translated ${f.checks.length} check${f.checks.length === 1 ? '' : 's'} from ${from}: ${names}.`;
+  const left = [];
+  for (const d of u.dropped ?? []) left.push(`"${d.name}" was left out — ${d.why}`);
+  for (const l of (u.lines ?? []).slice(0, 4)) left.push(`${l.line} — ${l.why}`);
+  if (f.extra) left.push(`${f.extra} more test${f.extra === 1 ? '' : 's'} after the first ${f.checks.length} — attach them on their own`);
+  const notes = (u.checks ?? []).flatMap((c) => c.notes ?? []).filter((n) => /vault/.test(n)).slice(0, 1);
+  return { text: lines(head, left.length ? `Could not carry: ${left.join('; ')}.` : null, notes.length ? `Note: ${notes[0]}.` : null, 'Tick the ones to run — or say yes to run them all. A passing one can be kept as a case afterwards.') };
+}
+
+/** A chart, as a sentence: what it counts and where the most is. */
+function charted(r) {
+  const f = r.facts;
+  const u = r.unsafe ?? {};
+  const unit = f.unit === '%' ? '%' : '';
+  const parts = (u.series ?? []).map((s, i) => {
+    const x = f.series[i] ?? {};
+    return f.unit === '%' ? `${s.name}: highest ${s.top} at ${x.topValue}%` : `${s.name}: ${x.total} in all${s.top != null ? `, most on ${s.top} (${x.topValue}${unit})` : ''}`;
+  });
+  return { text: lines(`Here is ${u.title}${u.subtitle ? ` (${u.subtitle})` : ''}: ${parts.join('; ')}.`, f.note ? `Note: ${f.note}.` : null) };
+}
+
+/** "runs per day for the last 7 days" → 7; a week is 7, a month 30, else the default. */
+const daysIn = (q) => { const m = q.match(/\b(\d{1,2})\s*days?\b/); if (m) return Math.max(1, Math.min(30, Number(m[1]))); if (/\bweek\b/.test(q)) return 7; if (/\bmonth\b/.test(q)) return 30; return null; };
 
 /**
  * In order, and the first one that answers wins. An intent that returns null
@@ -114,7 +170,75 @@ const INTENTS = [
       const head = `${r.passed ?? 0} of ${r.total ?? 0} drafted check${r.total === 1 ? '' : 's'} passed${r.stopped ? ' before it was stopped' : ''}.`;
       return { text: lines(head, (r.outcomes ?? []).map((o) => o.line).filter(Boolean)) };
     }
+    if (executed.kind === 'run_import') {
+      const head = `${r.passed ?? 0} of ${r.total ?? 0} translated check${r.total === 1 ? '' : 's'} passed${r.stopped ? ' before it was stopped' : ''}.`;
+      const tail = (r.passed ?? 0) > 0 ? 'A passing check can be kept as a case with the Save button under it.' : null;
+      return { text: lines(head, (r.outcomes ?? []).map((o) => o.line).filter(Boolean), tail) };
+    }
     return { text: 'Nothing is waiting for a yes.' };
+  },
+
+  // 1c · what the person handed over: a file this turn, code in the words, or a file
+  // still remembered and asked about (chat-import.js, chat-translate.js). Before
+  // everything that would read "tests" or "runs" in the words as a question.
+  async ({ q, raw, byName, T, attachments, held }) => {
+    const fresh = attachments ?? [];
+    const kept = held ?? [];
+    if (CHART.test(q)) return null;                       // a chart of a file is the chart intent's
+    const code = fresh.find((a) => a.kind === 'code' || a.kind === 'flow') ?? (!fresh.length && TRANSLATE.test(q) ? kept.find((a) => a.kind === 'code' || a.kind === 'flow') : null);
+    const into = code || detectFramework(raw) ? await suiteNamed(raw, T, byName) : null;
+    if (code) { if (!byName.translate_code) return { text: 'This runner cannot translate code.' }; return translated(await T('translate_code', { name: code.name, ...(into ? { suiteId: into } : {}) })); }
+    if (!fresh.length && detectFramework(raw)) { if (!byName.translate_code) return { text: 'This runner cannot translate code.' }; return translated(await T('translate_code', into ? { suiteId: into } : {})); }
+    const table = fresh.find((a) => a.kind === 'table') ?? (!fresh.length && TRANSLATE.test(q) ? kept.find((a) => a.kind === 'table' && checkColumns(a.table)) : null);
+    if (table) {
+      if (checkColumns(table.table) && (TRANSLATE.test(q) || /\b(checks?|tests?|cases?)\b/.test(q))) return translated(await T('translate_code', { name: table.name }));
+      const r = await T('attachment', { name: table.name, rows: 5 });
+      const f = r.facts;
+      if (f.error) return { text: f.error };
+      const cols = (r.unsafe?.columns ?? []).map((c) => `${c.name} (${c.type})`).join(', ');
+      const offers = [];
+      if (f.chartable) offers.push({ label: `Chart ${f.name}`, text: `chart ${f.name}` });
+      if (f.checks) offers.push({ label: 'Turn the rows into checks', text: `turn ${f.name} into checks` });
+      return { text: `${f.name}: ${f.rows} row${f.rows === 1 ? '' : 's'} × ${f.columns} column${f.columns === 1 ? '' : 's'}${f.sheet ? ` (sheet "${f.sheet}"${f.sheets > 1 ? ` of ${f.sheets}` : ''})` : ''} — ${cols}.${f.truncated ? ' Only the first rows were read.' : ''} ${f.chartable ? 'Ask me to chart a column by another' : 'Nothing here is a number to chart'}${f.checks ? ', or to turn the rows into checks' : ''}. The file stays readable here for ${f.keptForMinutes} minutes.`, offers };
+    }
+    const other = fresh[0];
+    if (other) {
+      const r = await T('attachment', { name: other.name });
+      const f = r.facts;
+      if (f.error) return { text: f.error };
+      return { text: `${f.name} is ${f.lines} line${f.lines === 1 ? '' : 's'} of text. The rules can translate test code (Playwright, Cypress, Selenium, Puppeteer) and read tables (CSV, TSV, JSON, a spreadsheet); a model, when a key is set, can read this one.` };
+    }
+    return null;
+  },
+
+  // 1d · a chart: of the records, or of a table the conversation holds (chat-charts.js).
+  async ({ q, byName, T, held }) => {
+    if (!CHART.test(q) || !byName.chart) return null;
+    const kept = held ?? [];
+    const tables = kept.filter((a) => a.kind === 'table');
+    const aboutRecords = /\b(runs?|scans?|tests?|checks?|defects?|bugs?|failures?|suites?|cases?|pages?|monitors?|incidents?|pass rate|passing)\b/.test(q);
+    const named = tables.find((a) => q.includes(a.name.toLowerCase()));
+    const aboutFile = named || (tables.length && (/\b(file|upload|attach|csv|tsv|sheet|spreadsheet|excel|xlsx|json|table|column|data|this|that|it)\b/.test(q) || !aboutRecords));
+    if (aboutFile) {
+      const m = q.match(/\b(?:chart|graph|plot|visuali[sz]e|draw)\s+(?:me\s+)?(?:the\s+|a\s+)?(.+?)\s+(?:by|per|against|over|vs\.?|versus)\s+(.+?)(?:\s+(?:from|in|of)\s+.+)?[?.!]*$/);
+      const table = named ?? tables[tables.length - 1];
+      const args = { what: 'file', name: table.name };
+      let r = m ? await T('chart', { ...args, y: m[1].split(/\s*(?:,|\band\b)\s*/).filter(Boolean), x: m[2] }) : await T('chart', args);
+      if (r.facts.error && m) r = await T('chart', args);
+      if (r.facts.error) return { text: r.facts.error };
+      return charted(r);
+    }
+    let what = 'runs_per_day';
+    if (/pass rate|passing/.test(q)) what = 'pass_rate_by_suite';
+    else if (/\b(defects?|bugs?|failures?)\b/.test(q)) what = /\bstatus/.test(q) ? 'defects_by_status' : 'defects_by_severity';
+    else if (/\b(cases?)\b/.test(q)) what = 'cases_by_suite';
+    else if (/\b(pages?)\b/.test(q)) what = 'pages_by_suite';
+    else if (/\b(monitors?|incidents?)\b/.test(q)) what = 'monitors_by_state';
+    else if (/\b(runs?|scans?|tests?|checks?)\b/.test(q) && /\bsuites?\b/.test(q)) what = 'runs_by_suite';
+    const days = daysIn(q);
+    const r = await T('chart', { what, ...(days ? { days } : {}) });
+    if (r.facts.error) return { text: r.facts.error };
+    return charted(r);
   },
 
   // 1b · draft tests for the X page (a proposal — chat-plan.js). Before the intents that read "tests" and "cases" as questions about what is saved.
@@ -373,14 +497,16 @@ async function everyCase(T) {
  * @param propose   the pending-action store, taken so the rules take exactly
  *                  what the engine hands the model — the tools already hold
  *                  it, so nothing here proposes anything by itself
+ * @param attachments the files this turn carried, and `held` the ones the
+ *                  conversation still remembers (chat-import.js)
  * @returns {Promise<{text: string, offers?: {label: string, text: string}[]}>}
  */
-export async function answerMock({ text, byName, executed = null, confirmed = null, propose, now = Date.now }) {
+export async function answerMock({ text, byName, executed = null, confirmed = null, propose, now = Date.now, attachments = [], held = [] }) {
   const raw = String(text ?? '').trim();
   const q = raw.toLowerCase().replace(/\s+/g, ' ').trim();
   const at = typeof now === 'function' ? now() : Number(now) || Date.now();
   const ctx = {
-    q, raw, byName, propose, at,
+    q, raw, byName, propose, at, attachments, held,
     executed: executed ?? confirmed,
     ago: (t) => when(t, at),
     /** One tool call; a refusal ends the intent rather than being worked around. */

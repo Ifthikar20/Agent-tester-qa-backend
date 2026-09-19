@@ -667,6 +667,8 @@ number in a reply comes from a tool result.
 | `run_case`, `run_suite`, `run_page_check` | the executor, through the same functions the routes call |
 | `docs` | the runner's own documentation, cut into sections at boot and ranked for the question (`docs-index.js`, BM25 over stemmed words, headings weighted) — the one tool about the product rather than the organisation; its sections are the reply's `sources` |
 | `scan_page`, `plan_page_tests`, `quickstart` | **propose only**: they drive the browser and change what the organisation keeps, so they answer with a proposal and stop; `plan_page_tests` exists only for an organisation that has allowed it (below) |
+| `attachment`, `chart` | a file the turn carried (`chat-import.js`: a table's columns and first rows, a code file's framework), and a chart shaped from the records or from that table (`chat-charts.js`) — a spec the page draws with its one chart component, never a picture |
+| `translate_code` | **propose only**: test code (Playwright, Cypress, Selenium, Puppeteer, the flow language) or a table of steps, translated into checks (`chat-translate.js`), each validated like a saved case; a `run_import` proposal the person ticks, and a yes runs them once as they are |
 
 Three rules run through every tool: facts (ids, counts, times, pass and fail) are stated plainly
 while names, titles, flows and failure sentences from sites under test ride inside a marked
@@ -676,6 +678,21 @@ an origin nobody allowed) comes back as a `refused` result the mind has to expla
 retry around. A fourth: what a data tool read is also shaped as a `view` (rows and numbers, names
 redacted) and kept on the reply as `data`, so the page draws the defect rows, the runs per day or a
 suite's cases under the words — the numbers in the drawing are the tool's, not the mind's.
+
+**Files and charts** (`chat-import.js`, `chat-translate.js`, `chat-charts.js`). A turn may carry
+attachments — four files, 256 kB each, in the turn's own JSON, a spreadsheet as base64 — refused
+whole by name when one cannot be read, read on arrival (CSV, TSV, JSON, an `.xlsx` through a
+zip-and-XML reader of the repository's own; code by the framework its idioms give away) and kept
+in memory for thirty minutes, never on disk: the transcript keeps a name and a shape per file.
+Their words are caller-derived and ride in the untrusted block. Code is never executed: it is
+read into the recorder's own IR (vocabulary.js) statement by statement — role-and-name locators
+carry over, a CSS id or name attribute becomes a guessed target marked as a guess, a key press
+or a checkbox is dropped with the reason, a typed credential becomes a vault reference and the
+literal is discarded — written back by `toFlow`, validated by `checkFlowFor` (the origin
+allowlist included), and PROPOSED as `run_import`; on the yes each ticked check runs once as it
+is, marked a draft in the history, and a card with a Save button is what keeps it. A chart is a
+spec (type, labels, series with a role each, capped at four series and sixty labels) that the
+page draws with Chart.js in the theme's tokens; the mind is told the totals, not the points.
 
 **Drafted tests** (`chat-plan.js`). "Test the contact page" on a page with no saved case, or
 "draft tests for it", is the third proposing tool, `plan_page_tests`; an organisation has it only

@@ -140,7 +140,9 @@ const can = {};
   console.log(`     defects numbered: ${can.defect_by_id ? first.id : 'no (derived from history)'} · drafting offered: ${can.plans ? 'yes' : 'no'}`);
   can.DEFECT = can.defect_by_id ? first.id : null;
 }
-const fill = (s) => String(s).replaceAll('{{base}}', BASE).replaceAll('{{defect}}', can.DEFECT ?? 'DEF-0000-000');
+const fill = (s) => String(s).replaceAll('{{base}}', BASE).replaceAll('{{suite}}', seed.suite).replaceAll('{{defect}}', can.DEFECT ?? 'DEF-0000-000');
+/** The files a scenario attaches, read from scripts/fixtures/ and filled in like the prompt; sent the way the composer sends them. */
+const attachmentsOf = (names) => (Array.isArray(names) ? names : []).map((n) => ({ name: n.split('/').pop(), encoding: 'text', data: fill(readFileSync(join(ROOT, 'scripts/fixtures', n), 'utf8')) }));
 
 /** One expectation against one reply; the first thing wrong, or null. */
 function judge(expect, m) {
@@ -165,6 +167,7 @@ const gist = (m) => {
   if (m.proposal) bits.push(`proposes ${m.proposal.kind}`);
   if (m.executed) bits.push(`executed ${m.executed.kind}`);
   if (m.data?.length) bits.push(`data ${m.data.map((v) => v.kind).join(',')}`);
+  if (m.proposal?.items?.length) bits.push(`${m.proposal.items.length} item${m.proposal.items.length === 1 ? '' : 's'}`);
   return bits.join(' · ');
 };
 
@@ -174,7 +177,7 @@ for (const s of CATALOGUE.scenarios) {
   if (s.requires && !can[s.requires]) { skip(`${s.prompt}`, `needs ${s.requires}`); continue; }
   for (const phrasing of [s.prompt, ...(s.also ?? [])]) {
     const text = fill(phrasing);
-    const { r, reply, conversationId } = await ask({ text });
+    const { r, reply, conversationId } = await ask({ text, ...(s.attachments ? { attachments: attachmentsOf(s.attachments) } : {}) });
     if (reply?.t !== 'chat.done') { bad(`"${text}"`, `${r.status} ${JSON.stringify(reply ?? r.json)}`); continue; }
     let m = reply.message;
     const wrong = judge(s.expect, m);
@@ -183,7 +186,7 @@ for (const s of CATALOGUE.scenarios) {
     for (const step of s.then ?? []) {
       const prompt = step.prompt.startsWith('@offer:') ? m.offers?.[Number(step.prompt.slice(7))]?.text : fill(step.prompt);
       if (!prompt) { bad(`  ↳ ${step.prompt}`, 'no such offer'); break; }
-      const body = { conversationId, text: prompt };
+      const body = { conversationId, text: prompt, ...(step.attachments ? { attachments: attachmentsOf(step.attachments) } : {}) };
       if (step.confirm === true) { if (!m.proposal?.id) { bad(`  ↳ "${prompt}"`, 'nothing to confirm'); break; } body.confirm = m.proposal.id; }
       const next = await ask(body, 120000);
       if (next.reply?.t !== 'chat.done') { bad(`  ↳ "${prompt}"`, JSON.stringify(next.reply ?? next.r.json)); break; }

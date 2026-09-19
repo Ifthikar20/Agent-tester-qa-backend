@@ -18,6 +18,8 @@
  *   8  a scan, proposed then confirmed   nothing runs on the model's say-so
  *   9  the transcript                kept, listed, deleted
  *  10  drafted tests                 read, tick, run, revise once, report — and stop (chat-plan.js, public/contact.html)
+ *  11  the documentation             a question about the product, answered from its own docs
+ *  12  files                         a Playwright file becomes checks to tick and run; a CSV is described and charted; the caps on the wire
  */
 import { spawn } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
@@ -354,7 +356,78 @@ section('11 · a question about the product, from its own documentation');
 }
 
 // ---------------------------------------------------------------------------
-section('12 · cleanup');
+// ---------------------------------------------------------------------------
+section('12 · files: code becomes checks to tick, a table becomes a chart');
+{
+  // A Playwright test against the runner's own demo page (public/demo.html):
+  // one check that can pass, one against a page that is not there.
+  const PW = `import { test, expect } from '@playwright/test';
+test('the account page', async ({ page }) => {
+  await page.goto('${BASE}/demo.html');
+  await expect(page.getByRole('heading', { name: 'Sign in to your account' })).toBeVisible();
+  await page.getByLabel('Email').fill('qa@example.com');
+  await page.getByRole('checkbox', { name: 'Remember me' }).check();
+});
+test('a page that is not there', async ({ page }) => {
+  await page.goto('${BASE}/nowhere.html');
+  await expect(page.getByText('Nothing here')).toBeVisible();
+});`;
+  const first = await ask({ text: 'Turn this into checks', attachments: [{ name: 'account.spec.ts', encoding: 'text', data: PW }] });
+  const cv = first.conversationId;
+  const m = first.reply?.message ?? {};
+  if (first.reply?.t === 'chat.done' && /^Translated 2 checks from Playwright: the account page \(3 steps\), a page that is not there \(2 steps\)\./.test(m.text)) ok('a Playwright file becomes two checks', short(m.text, 90)); else { bad('a Playwright file becomes two checks', `${first.r.status} ${short(m.text ?? JSON.stringify(first.reply))}`); await done(); }
+  if (/Could not carry: .*ticking a checkbox is not in the language yet/.test(m.text)) ok('and says what it could not carry', 'the checkbox'); else bad('and says what it could not carry', short(m.text));
+  const p = m.proposal;
+  const items = p?.items ?? [];
+  if (p?.kind === 'run_import' && items.length === 2 && items.every((i) => /^dc\d$/.test(i.id) && /testcase TD/.test(i.flow)) && m.runs.length === 0) ok('a run_import proposal with two items, and nothing ran', p.label); else { bad('a run_import proposal with two items, and nothing ran', JSON.stringify(p)); await done(); }
+  if ((m.tools ?? []).some((c) => c.name === 'translate_code')) ok('the translator was the agent asked'); else bad('the translator was the agent asked', (m.tools ?? []).map((c) => c.name).join(', '));
+  const kept = (await api('GET', `/api/chat/${cv}`)).json?.conversation;
+  const mine = kept?.messages?.[0];
+  if (mine?.attachments?.[0]?.name === 'account.spec.ts' && mine.attachments[0].kind === 'code' && mine.attachments[0].framework === 'playwright' && mine.attachments[0].lines > 5) ok('the transcript keeps the file\'s name and shape', JSON.stringify(mine.attachments[0])); else bad('the transcript keeps the file\'s name and shape', JSON.stringify(mine?.attachments));
+  // The reply may quote the one line it could not carry (bounded, credentials masked); the file itself stays in memory and out of the transcript.
+  const dump = JSON.stringify(kept);
+  if (!dump.includes("import { test, expect }") && !dump.includes('async ({ page })') && !('data' in (mine?.attachments?.[0] ?? {})) && !('text' in (mine?.attachments?.[0] ?? {}))) ok('and never the file itself'); else bad('and never the file itself', short(dump.match(/.{0,40}(import \{ test|async \(\{ page).{0,40}/)?.[0] ?? 'data on the message'));
+
+  const run = await ask({ conversationId: cv, text: 'Yes, run them all', confirm: p.id, choices: items.map((i) => i.id) }, 120000);
+  const cards = run.reply?.message?.runs ?? [];
+  if (run.reply?.t === 'chat.done' && /^1 of 2 translated checks passed\./.test(run.reply.message.text)) ok('both ran; one passed', short(run.reply.message.text, 100)); else { bad('both ran; one passed', JSON.stringify(run.reply?.message?.text ?? run.reply)); await done(); }
+  const by = Object.fromEntries(cards.map((c) => [c.candidate, c]));
+  if (cards.length === 2 && cards.every((c) => c.imported === true && c.draft === true && c.from === 'playwright' && c.caseId === null && c.suiteId === suiteId)) ok('one card per check, each translated, none saved, each in the suite its origin matches'); else bad('one card per check, each translated, none saved, each in the suite its origin matches', JSON.stringify(cards.map((c) => [c.candidate, c.imported, c.draft, c.from, c.caseId, c.suiteId])));
+  if (by.dc1?.ok === true && by.dc1.passed === 3 && /fill 'Email' : label/.test(by.dc1.flow ?? '')) ok('the account page passed', `${by.dc1.passed}/${by.dc1.total}`); else bad('the account page passed', JSON.stringify(by.dc1));
+  if (by.dc2?.ok === false && by.dc2.error) ok('the page that is not there failed, and says why', short(by.dc2.error, 80)); else bad('the page that is not there failed, and says why', JSON.stringify(by.dc2));
+  if (run.reply.message.executed?.kind === 'run_import' && run.reply.message.executed.result?.passed === 1) ok('the executed proposal is on the reply', run.reply.message.executed.label); else bad('the executed proposal is on the reply', JSON.stringify(run.reply.message.executed));
+  // Keeping the passing one is the person's press: the same route the card's button calls.
+  const saved = await api('POST', `/api/suites/${suiteId}/cases`, { name: by.dc1.caseName, pageId: null, flow: by.dc1.flow, source: 'generated' });
+  if (saved.json?.ok && saved.json.case.steps === 3) ok('the passing check keeps as a case', `${saved.json.case.name} (${saved.json.case.steps} steps)`); else bad('the passing check keeps as a case', JSON.stringify(saved.json));
+  const runsBefore = (await api('GET', '/api/runs')).json?.totals?.runs;
+
+  // A table: described, then charted from the offer, then the records charted.
+  const csv = 'day,runs,failed\n2026-09-01,4,1\n2026-09-02,6,0\n2026-09-03,3,2\n';
+  const t = await ask({ conversationId: cv, text: 'What is in this file?', attachments: [{ name: 'runs.csv', encoding: 'text', data: csv }] });
+  const tm = t.reply?.message ?? {};
+  if (t.reply?.t === 'chat.done' && /^runs\.csv: 3 rows × 3 columns — day \(date\), runs \(number\), failed \(number\)\./.test(tm.text)) ok('a CSV is described', short(tm.text, 90)); else { bad('a CSV is described', short(tm.text ?? JSON.stringify(t.reply))); await done(); }
+  if (tm.data?.[0]?.kind === 'table' && tm.data[0].rows.length === 3) ok('and drawn as a table', `${tm.data[0].rows.length} rows`); else bad('and drawn as a table', JSON.stringify(tm.data));
+  if (tm.offers?.[0]?.text === 'chart runs.csv') ok('with a chart offered', tm.offers[0].label); else { bad('with a chart offered', JSON.stringify(tm.offers)); await done(); }
+  const c = await ask({ conversationId: cv, text: tm.offers[0].text });
+  const cm = c.reply?.message ?? {};
+  const chart = (cm.data ?? []).find((v) => v.kind === 'chart');
+  if (chart && chart.type === 'line' && chart.x === 'date' && JSON.stringify(chart.series.map((s) => s.name)) === '["runs","failed"]' && chart.labels.length === 3) ok('the offer charts it: a line, by day', short(cm.text, 90)); else bad('the offer charts it: a line, by day', JSON.stringify(chart ?? cm.text));
+  const r = await ask({ conversationId: cv, text: 'chart the runs per day' });
+  const rc = (r.reply?.message?.data ?? []).find((v) => v.kind === 'chart');
+  if (rc && rc.stacked === true && rc.labels.length === 14 && rc.series[0].role === 'pass' && rc.series[1].role === 'fail') ok('the records chart too: runs per day, stacked', short(r.reply.message.text, 90)); else bad('the records chart too: runs per day, stacked', JSON.stringify(rc ?? r.reply?.message?.text));
+  if ((await api('GET', '/api/runs')).json?.totals?.runs === runsBefore) ok('reading and charting ran nothing'); else bad('reading and charting ran nothing');
+
+  // The caps and the kinds, on the wire: refused before anything is read, naming the file.
+  const big = await api('POST', '/api/chat/turns', { conversationId: cv, text: 'x', attachments: [{ name: 'big.csv', encoding: 'text', data: 'a,b\n' + '1,2\n'.repeat(70_000) }] });
+  if (big.status === 400 && /big\.csv: .*files up to 256 kB/.test(big.json?.error ?? '')) ok('a file too big is a 400 naming it', big.json.error); else bad('a file too big is a 400 naming it', `${big.status} ${JSON.stringify(big.json)}`);
+  const png = await api('POST', '/api/chat/turns', { conversationId: cv, text: 'x', attachments: [{ name: 'shot.png', encoding: 'base64', data: Buffer.from('\x89PNG\r\n').toString('base64') }] });
+  if (png.status === 400 && /shot\.png: .*does not read/.test(png.json?.error ?? '')) ok('a kind the chat does not read is a 400 naming it', png.json.error); else bad('a kind the chat does not read is a 400 naming it', `${png.status} ${JSON.stringify(png.json)}`);
+  const state = await api('GET', '/api/chat');
+  if (state.json?.busy === null) ok('nothing in flight afterwards'); else bad('nothing in flight afterwards', JSON.stringify(state.json?.busy));
+  await api('DELETE', `/api/chat/${cv}`);
+}
+
+section('13 · cleanup');
 {
   const r = await api('DELETE', `/api/suites/${suiteId}`);
   if (r.status === 200) ok('the suite is gone'); else bad('the suite is gone', `${r.status}`);

@@ -1109,22 +1109,80 @@ What a tool read is also drawn. A reply carries the data its tools returned —
 the defect rows, the runs per day, a suite's pages and cases, the pages
 scanned, the monitors — shaped by the tool that read it (`chat-tools.js`
 `view`, three views a reply at most, rows capped, names redacted), and the
-chat page draws them under the reply as tiles, tables and the dashboard's own
-chart. The words are the mind's; the numbers in the drawing are the tool's,
-so the two can be checked against each other.
+chat page draws them under the reply as tiles, tables and charts. The words
+are the mind's; the numbers in the drawing are the tool's, so the two can be
+checked against each other.
+
+### Charts, files and code
+
+Every chart the product draws is one component over Chart.js
+(`web/src/components/Chart.vue`, `web/src/charts.js`) — the runs on the
+dashboard, the runs under a suite, the runs per day, defects by severity and
+cases by suite under a reply, and a chart asked for in words: "chart the runs
+per day", "graph the pass rate by suite", "plot the defects by status". The
+`chart` tool shapes a SPEC from the same records the other tools read
+(`chat-charts.js`: labels, series, a role each) and the page draws it in the
+theme's own tokens, light or dark; the mind gets the totals and the largest
+values and says in a sentence what the chart shows. The rules of the drawing
+are the dashboard's: failures carry the colour and passes stay neutral,
+status and severity wear the status colours, anything else takes one of four
+hues checked together for colourblind separation, thin marks, one axis, a
+legend only for two series or more — and every chart has its values as a
+table, a press away, because a picture is the one thing a screen reader
+cannot read.
+
+A turn may carry FILES — the paperclip on the composer, a drop onto it, or a
+paste too long to be a question, which becomes a file rather than a wall in
+the box. Two kinds are understood (`chat-import.js`). A TABLE — CSV, TSV,
+JSON, or an `.xlsx` read by a small zip-and-XML reader of this repository's
+own rather than a library — is described (rows, columns and their kinds,
+the first rows drawn under the reply) and charted on request, by the columns
+named: "chart revenue by month". CODE — a Playwright, Cypress, Selenium or
+Puppeteer test, or one of this runner's own flow documents — is translated
+into checks (`chat-translate.js`): `page.getByRole('button', { name: 'Sign
+in' }).click()` is `click 'Sign in' : button`, `expect(page).toHaveURL(/dashboard/)`
+is an arrival at `["/dashboard"]`, a `beforeEach` visit is prepended to every
+test, a relative address is completed by the suite the question names, else by
+the one suite there is or the one origin every suite shares. What does not
+carry is said, line by line, with the reason — a CSS selector names
+nothing a person can read (an id or a name attribute is guessed from, and
+marked as a guess), a key press, a checkbox or a dropdown are not in the
+language yet, an absence cannot be checked — and a password the code types
+becomes a vault reference (`$PASSWORD`) with the literal never kept, not in
+the check, not in the transcript, not in the reply. Nothing is executed as
+code: the checks are validated by the validator a saved case passes, the
+origin allowlist included, and PROPOSED — the person ticks the ones to run,
+a yes runs them once as they are (`run_import`), and a passing one is kept
+as a case only by the Save button under its card. A table whose rows are
+steps in the language's own words becomes checks the same way.
+
+The caps are the runner's and the composer mirrors them: four files a turn,
+256 kB each, 300 kB together; a file that cannot be read is refused by name
+before anything else is. Files are read on arrival, kept in memory for half
+an hour so a follow-up can still ask about them, and never written to disk —
+the transcript keeps their names and shapes, and the checks they became are
+what persists. Their words are the person's own data and ride to the model
+inside the untrusted block like a page's do. `npm run check:import` is the
+offline check of the intake, the tables (a spreadsheet built by hand inside
+it), the translation of all four frameworks and the charts; the mock mind's
+sentences for files and charts are in `check:chat-request`, and `check:chat`
+attaches a Playwright file, runs the checks it became and charts a CSV on a
+runner of its own.
 
 Every kind of question the chat answers is written down once, in
 `scripts/fixtures/chat-prompts.json`: a scenario per kind — defects, runs,
 suites, cases, monitoring, the runner, a test to run, a page to scan, a
-quickstart, drafted tests, the documentation, a yes with nothing waiting, a
-refusal, a question nothing answers — with other phrasings of it and what the
+quickstart, drafted tests, the documentation, a chart, a file attached (a
+table, test code, rows of steps), a yes with nothing waiting, a refusal, a
+question nothing answers — with other phrasings of it and what the
 runner must do: which agents it asks, what the reply says, what data rides on
 it, whether anything ran, whether it proposed instead, and the follow-up a
 yes or a no gets. `npm run check:chat-prompts` runs every phrasing on a
 conversation of its own against a runner of its own, so the catalogue stays
 true; it is also the list to try by hand.
 
-A turn is `POST /api/chat/turns` (a 202) and is answered on the
+A turn is `POST /api/chat/turns` (a 202, with the files it carries as
+`attachments` in the same JSON) and is answered on the
 organisation's sockets — `chat.turn`, `chat.delta`, `chat.tool`,
 `chat.proposal`, `chat.done` — because a reply that runs a case takes as
 long as the case does; one reply at a time per organisation (a 409
