@@ -210,3 +210,32 @@ would be a second place to get the value wrong.
   request log).
 - `cd auth && python manage.py test accounts.tests.test_hardening tenants.tests.test_switches`
   — the control plane's half; the whole suite is `python manage.py test`.
+
+## 5. What leaves the runner on its own: notifications
+
+A notification (`notify.js`) is the one message the runner sends without being
+asked at that moment: an incident opening or resolving, a run failing, a
+defect filed or reopened, to a webhook, a Slack incoming webhook or an email
+through the operator's relay. What is sent, and what stops it being more:
+
+- **Redacted first.** Every string in the message goes through the
+  organisation's vault redaction before any channel sees it, the way a console
+  line does. A typed password is never in a webhook body.
+- **Signed when asked.** A webhook with a secret gets `X-Ghostclick-Signature:
+  sha256=<HMAC-SHA256 of the body>`; the secret is kept on the runner and
+  never shown back. Every post carries `X-Ghostclick-Event`.
+- **Within reach.** On a gated runner (`GC_BLOCK_PRIVATE`) a channel may not
+  point inside the container's network: the same reach rule a page lives
+  under (reach.js) refuses the address before anything is sent.
+- **Bounded.** A send that fails is retried three times with growing pauses
+  and then recorded on the channel with the reason; a day's sends per
+  organisation are capped (three hundred); one send is one request of ten
+  seconds at most. A flapping monitor is a nuisance, not a firehose.
+- **Managers only.** Channels are the organisation's, made and changed by its
+  owners and admins; everyone sees them by host, never by full address.
+- **Email needs the operator.** `GC_SMTP_URL` and `GC_SMTP_FROM` name the
+  relay; without them an email channel can be saved but every send says what
+  is missing. The client is the runner's own (`smtp.js`): STARTTLS when the
+  relay offers it, AUTH PLAIN when the address carries credentials.
+
+`npm run check:notify` drives every kind against receivers it starts itself.

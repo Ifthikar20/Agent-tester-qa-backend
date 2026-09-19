@@ -67,6 +67,8 @@ let cfg = {
   isIdle: () => true,
   /** One question per monitor per this long; a check sets it to zero. */
   judgeIntervalMs: JUDGE_MIN_INTERVAL_MS,
+  /** Somewhere to tell (notify.js send): an incident opening or resolving goes there too. Null tells nobody. */
+  notify: null,
 };
 /**
  * Given once by server.js: how to reach an organisation's sockets, which mind
@@ -558,6 +560,8 @@ class MonitorEngine {
     this.persist();
     this.emit({ t: 'incident.opened', incident: inc });
     const headline = (inc.violations[0] && inc.violations[0].message) || 'The element changed';
+    try { cfg.notify?.(this.org, 'incident', { id: inc.id, label: m.label, ruleText: m.ruleText, headline, severity: inc.verdict?.severity ?? null, page: m.url ?? null, url: m.url ?? null }); }
+    catch (err) { cfg.log.error(`  monitoring: could not notify: ${err.message}`); }
     // A rule the element failed from the start — "must not exceed 10px" on a
     // 16px paragraph — is a rule to rewrite, not a change to chase; the
     // baseline itself says which this is.
@@ -622,6 +626,8 @@ class MonitorEngine {
       }
       this.persist();
       this.emit({ t: 'incident.resolved', incident: inc });
+      try { cfg.notify?.(this.org, 'incident', { id: inc.id, status: 'resolved', label: inc.monitorLabel, ruleText: inc.ruleText, by: by ?? null, page: m?.url ?? null, url: m?.url ?? null }); }
+      catch (err) { cfg.log.error(`  monitoring: could not notify: ${err.message}`); }
     }
     return inc;
   }

@@ -223,6 +223,7 @@ The routes, by mechanism:
 | fixes | `GET /api/fixes`, `POST /api/fixes/:id/accept`, `POST /api/fixes/:id/reject`, `GET/PUT /api/settings/heal` |
 | monitoring | `GET /api/monitoring`, `GET/POST /api/monitors`, `POST /api/monitors/preview`, `POST /api/monitors/compile`, `DELETE /api/monitors/:id`, `POST /api/monitors/:id/pause`, `…/resume`, `GET /api/monitors/shots/:name`, `GET /api/incidents`, `POST /api/incidents/:id/resolve` |
 | support | `GET /api/support`, `POST /api/support/request`, `DELETE /api/support/access` |
+| notifications | `GET /api/notify`, `POST /api/notify/channels`, `PATCH/DELETE /api/notify/channels/:id`, `POST /api/notify/channels/:id/test` — managers set channels; an incident, a failed run or a defect is sent by notify.js, redacted, retried, capped per day |
 | schedules | `GET/POST /api/schedules`, `PATCH/DELETE /api/schedules/:id`, `POST /api/schedules/:id/run` (a 202; the outcome comes on the socket as `schedule.fired`) |
 | chat | `GET /api/chat`, `GET/DELETE /api/chat/:id`, `POST /api/chat/turns` (a 202; the reply comes on the socket), `POST /api/chat/stop` (ends a batch of drafted tests after the one in flight) |
 | the app | `GET /` redirects to `/app/`; `/app` serves `GC_WEB_DIR` or the 503; `/hero` serves images; `/vendor/mermaid.min.js` |

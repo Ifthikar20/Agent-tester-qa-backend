@@ -38,6 +38,7 @@ import { NavigationLog } from './navlog.js';
 import * as monitoring from './monitor.js';
 import * as schedules from './schedules.js';
 import { BrowserPool, PoolFull } from './pool.js';
+import * as notify from './notify.js';
 import { MonitorAgent } from './monitor-page.js';
 // Aliased: resolver.js (automatic fixes) exports the same two names, and each
 // layer keeps its own copy of the key lookup and its own client.
@@ -1897,6 +1898,33 @@ app.post('/api/monitors/:id/resume', async (req, res) => {
   try { const engine = monitorsOf(req); const m = await engine.resume(req.params.id); sendOk(res, { monitor: engine.publicMonitor(m) }); }
   catch (err) { fail(res, err); }
 });
+// ---- notifications: where an incident, a failed run or a defect is told (notify.js) ---------
+app.get('/api/notify', (req, res) => {
+  sendOk(res, { channels: req.space.notify.list(), events: notify.EVENTS, kinds: notify.KINDS, smtp: notify.smtpConfigured() });
+});
+app.post('/api/notify/channels', (req, res) => {
+  try { tenancy.requireManager(req.user); } catch (err) { return fail(res, err); }
+  const b = req.body ?? {};
+  try { sendOk(res, { channel: req.space.notify.create({ kind: b.kind, name: b.name, url: b.url, to: b.to, secret: b.secret, events: b.events }) }); }
+  catch (err) { fail(res, err); }
+});
+app.patch('/api/notify/channels/:id', (req, res) => {
+  try { tenancy.requireManager(req.user); } catch (err) { return fail(res, err); }
+  const b = req.body ?? {};
+  try { sendOk(res, { channel: req.space.notify.update(req.params.id, { name: b.name, events: b.events, enabled: b.enabled, url: b.url, to: b.to, secret: b.secret }) }); }
+  catch (err) { fail(res, err); }
+});
+app.delete('/api/notify/channels/:id', (req, res) => {
+  try { tenancy.requireManager(req.user); } catch (err) { return fail(res, err); }
+  try { sendOk(res, { channel: req.space.notify.remove(req.params.id) }); }
+  catch (err) { fail(res, err); }
+});
+app.post('/api/notify/channels/:id/test', async (req, res) => {
+  try { tenancy.requireManager(req.user); } catch (err) { return fail(res, err); }
+  try { sendOk(res, { result: await notify.test(req.space.org, req.params.id) }); }
+  catch (err) { fail(res, err); }
+});
+
 // ---- schedules: suites run and monitored pages swept on a cadence (schedules.js) ------------
 app.get('/api/schedules', (req, res) => {
   sendOk(res, { schedules: req.space.schedules.list(req.query.suite ? String(req.query.suite) : null) });
@@ -2856,8 +2884,15 @@ async function resetSession() {
  * run or a recording holds it otherwise, and a screenshot must not scroll
  * under them.
  */
+notify.configure({
+  log: console,
+  // The same reach rule a page lives under: a channel may not point inside the container's network on a gated runner.
+  mayReach: BLOCK_PRIVATE ? (url) => blocked(url) : null,
+  redactFor: (org) => (text) => tenancy.workspace(org).monitors.redact(text),
+});
 monitoring.configure({
   emitTo,
+  notify: (org, event, data) => { notify.send(org, event, data); },
   log: console,
   llm: { mode: MONITOR_LLM.mode, model: MONITOR_LLM.mode === 'claude' ? MONITOR_MODEL : null, key: { have: Boolean(MONITOR_KEY.key), from: MONITOR_KEY.source } },
   resolver: monitorResolver,
@@ -3058,10 +3093,16 @@ async function run(plan, meta = {}) {
     try {
       for (const c of space.defects.sync(space.history.list())) {
         say({ t: 'log', level: c.kind === 'closed' ? 'info' : 'warn', msg: `${c.id} ${c.kind}: ${c.title}` });
+        // A defect filed or reopened is told (notify.js): queued, never waited for.
+        if (c.kind === 'filed' || c.kind === 'reopened') notify.send(space.org, 'defect', { kind: c.kind, id: c.id, title: c.title, suite: plan.suite });
       }
       defect = space.defects.idFor(entry);
     } catch (err) {
       say({ t: 'log', level: 'error', msg: `could not file the defect: ${err.message}` });
+    }
+    // And a failed run, with the step it stopped on and the defect it went under.
+    if (!ok) {
+      notify.send(space.org, 'run_failed', { suite: plan.suite, caseName: meta.caseName ?? null, passed, total: results.length, error: entry.error, step: entry.step, doing: entry.target ?? null, defect, scheduled: meta.scheduled === true, page: entry.url, url: entry.url });
     }
     // Same function, same IR — with outcomes folded in, the plan diagram
     // becomes the run report. Drawing it is a nicety; failing to draw it must
@@ -3726,5 +3767,5 @@ process.on('unhandledRejection', (err) => {
 scheduler = new schedules.Scheduler({ fire: fireSchedule, emit: emitTo, log: console }).start();
 console.log(`  schedules   ${scheduler.known.size ? [...scheduler.known].map((o) => `${o}: ${tenancy.workspace(o).schedules.list().length}`).join(', ') : 'none yet'}`);
 
-process.on('SIGINT', async () => { scheduler?.stop(); monitoring.flushAll(); await pool?.drain().catch(() => {}); await browser.close(); process.exit(0); });
-process.on('SIGTERM', async () => { scheduler?.stop(); monitoring.flushAll(); await pool?.drain().catch(() => {}); await browser.close(); process.exit(0); });
+process.on('SIGINT', async () => { scheduler?.stop(); monitoring.flushAll(); await notify.drain(); await pool?.drain().catch(() => {}); await browser.close(); process.exit(0); });
+process.on('SIGTERM', async () => { scheduler?.stop(); monitoring.flushAll(); await notify.drain(); await pool?.drain().catch(() => {}); await browser.close(); process.exit(0); });

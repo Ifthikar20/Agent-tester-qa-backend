@@ -759,6 +759,33 @@ Open answered `Only http and https can be driven, not about:`.
 appears and you get an unexplained white rectangle instead of the black one it
 replaced.
 
+## Notifications: told somewhere a person will see it
+
+Everything the runner says goes to its own sockets, which is to say to nobody
+once the tab is closed. **Notifications** (Settings → Notifications) name a
+place to tell instead: a **webhook** (JSON, with an `X-Ghostclick-Event`
+header and, when the channel has a secret, an `X-Ghostclick-Signature` of
+`sha256=<HMAC of the body>`), a **Slack** incoming webhook (a line of text),
+or an **email** through the operator's relay — `GC_SMTP_URL`
+(`smtp://user:pass@host:587`, upgraded to TLS on the wire when the relay
+offers it; `smtps://…:465` for TLS from the first byte) and `GC_SMTP_FROM`,
+sent by the runner's own client (`smtp.js`, no dependency). Each channel
+names the events it wants: an **incident** opening or resolving, a **run
+failing** (a person's or a schedule's, with the step it stopped on and the
+defect it went under), a **defect** filed or reopened. Every word is
+redacted against the vault before it leaves, like a console line; a send
+that fails is retried three times with growing pauses and then recorded on
+the channel with the reason; a day's sends per organisation are capped at
+three hundred, so a flapping monitor is a nuisance, not a firehose; and on a
+gated runner a channel may not point inside the container's network
+(`GC_BLOCK_PRIVATE`, the same rule a page lives under). Channels are the
+organisation's, set by its managers, and shown by their host, never their
+full address or secret; **Test** sends one message and says what came back.
+`GET /api/notify`, `POST /api/notify/channels`, `PATCH/DELETE
+/api/notify/channels/:id`, `POST /api/notify/channels/:id/test`;
+`npm run check:notify` drives every kind against receivers it starts
+itself, a relay included.
+
 ## Schedules: runs and sweeps with nobody at the console
 
 A run happens when somebody presses Run, and a monitor watches the page that
