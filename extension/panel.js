@@ -47,6 +47,10 @@ function describe(s) {
   if (s.op === 'click') return `click ${s.target}`;
   if (s.op === 'hover') return `hover ${s.target}`;
   if (s.op === 'fill') return s.valueRef ? `type into ${s.target} ← vault` : `type "${s.value}" into ${s.target}`;
+  if (s.op === 'tick') return `tick ${s.target}`;
+  if (s.op === 'untick') return `untick ${s.target}`;
+  if (s.op === 'choose') return `choose "${s.value}" in ${s.target}`;
+  if (s.op === 'press') return `press ${s.key}${s.target ? ` in ${s.target}` : ''}`;
   if (s.op === 'expect' && s.assert === 'urlContains') return `assert url contains ${s.value}`;
   if (s.op === 'expect' && s.assert === 'textVisible') return `assert text "${s.value}"`;
   return s.op;

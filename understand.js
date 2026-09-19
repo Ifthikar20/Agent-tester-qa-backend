@@ -106,7 +106,7 @@ export async function captureStep(page, { secretValues = [] } = {}) {
 // -------------------------------------------------------------------- rules
 
 /** Two steps that do the same thing to the same element. A check or a page load is never "the same press twice". */
-const sameAction = (a, b) => Boolean(a && b) && ['click', 'fill', 'hover'].includes(a.op) && a.op === b.op &&
+const sameAction = (a, b) => Boolean(a && b) && ['click', 'fill', 'hover', 'tick', 'untick', 'choose'].includes(a.op) && a.op === b.op &&
   a.target === b.target && (a.value ?? null) === (b.value ?? null) && (a.valueRef ?? null) === (b.valueRef ?? null);
 
 /**
@@ -120,7 +120,7 @@ const sameAction = (a, b) => Boolean(a && b) && ['click', 'fill', 'hover'].inclu
  * number: a note stays on screen while steps before it are taken out.
  */
 export function ruleConcern({ step, index, prev = null, capture = null, prevCapture = null, evidence = null }) {
-  if (evidence?.inFrame && ['click', 'fill', 'hover'].includes(step?.op)) {
+  if (evidence?.inFrame && ['click', 'fill', 'hover', 'tick', 'untick', 'choose', 'press'].includes(step?.op)) {
     return {
       kind: 'in_frame', by: 'rule',
       text: `Recorded inside a frame${evidence.frame ? ` from ${evidence.frame}` : ''}. A replay cannot reach inside a frame, so this step will fail.`,

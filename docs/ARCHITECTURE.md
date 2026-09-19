@@ -686,8 +686,9 @@ zip-and-XML reader of the repository's own; code by the framework its idioms giv
 in memory for thirty minutes, never on disk: the transcript keeps a name and a shape per file.
 Their words are caller-derived and ride in the untrusted block. Code is never executed: it is
 read into the recorder's own IR (vocabulary.js) statement by statement — role-and-name locators
-carry over, a CSS id or name attribute becomes a guessed target marked as a guess, a key press
-or a checkbox is dropped with the reason, a typed credential becomes a vault reference and the
+carry over, a CSS id or name attribute becomes a guessed target marked as a guess, a checkbox,
+a dropdown and a key press are `tick`, `choose` and `press` (a double click, an upload or an
+option by its position is dropped with the reason), a typed credential becomes a vault reference and the
 literal is discarded — written back by `toFlow`, validated by `checkFlowFor` (the origin
 allowlist included), and PROPOSED as `run_import`; on the yes each ticked check runs once as it
 is, marked a draft in the history, and a card with a Save button is what keeps it. A chart is a

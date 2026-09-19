@@ -41,7 +41,7 @@
  * this file and flow.js is pinned in scripts/copies.js, and a grammar that has
  * changed without this moving fails there.
  */
-export const LANGUAGE_VERSION = 2;
+export const LANGUAGE_VERSION = 3;
 
 // ------------------------------------------------------------------ literals
 
@@ -91,6 +91,38 @@ export const showTarget = (t) => {
 
 /** Vault references are named, never expanded — not here, not anywhere. */
 const showValue = (s) => (s.valueRef ? `$${s.valueRef.replace(/^secrets\./, '')}` : `'${s.value}'`);
+
+// ------------------------------------------------------------------- keys
+
+/** The keys `press` knows, by the names Playwright presses them by. */
+export const KEY_NAMES = ['Enter', 'Tab', 'Escape', 'Space', 'Backspace', 'Delete',
+  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'];
+const KEY_ALIASES = {
+  return: 'Enter', esc: 'Escape', del: 'Delete', spacebar: 'Space', pgup: 'PageUp', pgdn: 'PageDown',
+  up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight',
+  uparrow: 'ArrowUp', downarrow: 'ArrowDown', leftarrow: 'ArrowLeft', rightarrow: 'ArrowRight',
+};
+const MODIFIERS = { shift: 'Shift', control: 'Control', ctrl: 'Control', alt: 'Alt', meta: 'Meta', cmd: 'Meta', command: 'Meta', controlormeta: 'ControlOrMeta' };
+
+/**
+ * `enter` → `Enter`, `shift+tab` → `Shift+Tab`, `ctrl+a` → `Control+a`. A name
+ * this does not know comes back as it was written, so `check` refuses it by
+ * name rather than something guessing at what was meant.
+ */
+export function keyName(raw) {
+  return String(raw ?? '').trim().split('+').map((p) => p.trim()).filter(Boolean).map((p) => {
+    const l = p.toLowerCase();
+    return KEY_NAMES.find((k) => k.toLowerCase() === l) ?? KEY_ALIASES[l] ?? MODIFIERS[l] ?? p;
+  }).join('+');
+}
+
+/** True when `press` presses it: a named key, or one character, behind any modifiers. */
+export function isKey(name) {
+  const parts = String(name ?? '').split('+');
+  const last = parts.pop();
+  if (!parts.every((m) => Object.values(MODIFIERS).includes(m))) return false;
+  return KEY_NAMES.includes(last) || (parts.length > 0 && last.length === 1);
+}
 
 // ---------------------------------------------------------------- the verbs
 
@@ -144,6 +176,49 @@ export const VERBS = [
     // named scroll at save, giving its own target as the reason.
     check: (s) => Boolean(s.target) || s.to === 'top' || s.to === 'bottom'
       || 'scroll needs a target, or "top"/"bottom"',
+  },
+  {
+    // A checkbox, a switch or a radio, put in a state — not toggled. A click
+    // would flip whatever it found, which is a different test every run.
+    op: 'tick',
+    syntax: [{ re: /^tick\s+(.+)$/i, ir: (m) => ({ target: target(m[1]) }) }],
+    show: (s) => `tick ${showTarget(s.target)}`,
+    label: (s, t) => `tick ${t(s.target, 17)}`,
+  },
+  {
+    op: 'untick',
+    syntax: [{ re: /^untick\s+(.+)$/i, ir: (m) => ({ target: target(m[1]) }) }],
+    show: (s) => `untick ${showTarget(s.target)}`,
+    label: (s, t) => `untick ${t(s.target, 15)}`,
+  },
+  {
+    // An option in a dropdown, by the words on it: a native select, or a
+    // combobox of the page's own that opens on a click. Written like fill —
+    // the field, then what goes in it — so an option with "in" in its name
+    // can never be read as two.
+    op: 'choose',
+    syntax: [{
+      re: /^choose\s+(.+?)\s*=\s*(.+)$/i,
+      ir: (m) => ({ target: target(m[1]), ...value(m[2]) }),
+    }],
+    show: (s) => `choose ${showTarget(s.target)} = ${showValue(s)}`,
+    label: (s, t) => (s.valueRef ? `choose ${t(s.target, 12)} ← vault` : `choose ${t(s.value, 8)} in ${t(s.target, 8)}`),
+    check: (s) => (Boolean(s.target) && (Boolean(s.valueRef) || (typeof s.value === 'string' && s.value.trim().length > 0)))
+      || 'choose needs the dropdown and the option to pick in it',
+  },
+  {
+    // A key — on a named control, or wherever the focus is. Enter in a search
+    // box is the only way to submit some forms; Escape closes what a click
+    // opened. The keys are named, and a name outside the list is refused, so
+    // a typo cannot press something else.
+    op: 'press',
+    syntax: [
+      { re: /^press\s+(\S+)\s+in\s+(.+)$/i, ir: (m) => ({ key: keyName(m[1]), target: target(m[2]) }) },
+      { re: /^press\s+(\S+)$/i, ir: (m) => ({ key: keyName(m[1]) }) },
+    ],
+    show: (s) => `press ${s.key}${s.target ? ` in ${showTarget(s.target)}` : ''}`,
+    label: (s, t) => `press ${t(s.key, 9)}${s.target ? ` in ${t(s.target, 9)}` : ''}`,
+    check: (s) => isKey(s.key) || `press knows ${KEY_NAMES.join(', ')} (with Shift, Control, Alt or Meta in front) — not "${s.key}"`,
   },
 
   // ------------------------------------------------------------- assertions

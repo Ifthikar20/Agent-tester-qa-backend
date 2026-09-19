@@ -1141,13 +1141,15 @@ named: "chart revenue by month". CODE — a Playwright, Cypress, Selenium or
 Puppeteer test, or one of this runner's own flow documents — is translated
 into checks (`chat-translate.js`): `page.getByRole('button', { name: 'Sign
 in' }).click()` is `click 'Sign in' : button`, `expect(page).toHaveURL(/dashboard/)`
-is an arrival at `["/dashboard"]`, a `beforeEach` visit is prepended to every
+is an arrival at `["/dashboard"]`, `.check()` is `tick`, `.selectOption('Yearly')`
+is `choose … = 'Yearly'`, `.press('Enter')`, Cypress's `{enter}` and Selenium's
+`Keys.RETURN` are `press Enter`, a `beforeEach` visit is prepended to every
 test, a relative address is completed by the suite the question names, else by
 the one suite there is or the one origin every suite shares. What does not
 carry is said, line by line, with the reason — a CSS selector names
 nothing a person can read (an id or a name attribute is guessed from, and
-marked as a guess), a key press, a checkbox or a dropdown are not in the
-language yet, an absence cannot be checked — and a password the code types
+marked as a guess), a double click, an upload, an option by its position or
+an absence cannot be carried yet — and a password the code types
 becomes a vault reference (`$PASSWORD`) with the literal never kept, not in
 the check, not in the transcript, not in the reply. Nothing is executed as
 code: the checks are validated by the validator a saved case passes, the
@@ -2211,6 +2213,9 @@ Node shape is the assertion; edge label is the action.
 | `--\|fill 'User' : textbox = 'a' * 20\|--` | `fill`, repeated value |
 | `--\|check 'User' : textbox is 20 chars\|--` | assert value |
 | `--\|scroll to top\|--` · `--\|scroll to 'Docs' : link\|--` | move the page on purpose |
+| `--\|tick 'Remember me' : checkbox\|--` · `--\|untick 'Newsletter' : label\|--` | a checkbox, a switch or a radio put in that state — never toggled |
+| `--\|choose 'Plan' : combobox = 'Yearly'\|--` | an option in a dropdown, by its words |
+| `--\|press Enter in 'Search' : searchbox\|--` · `--\|press Escape\|--` | a key on a control, or wherever the focus is |
 | `--\|see 'Profile saved'\|--` | assert text without making a node of it |
 | `--\|check status 404\|--` · `--\|check 2 redirects\|--` · `--\|check redirect via '/go'\|--` | what the last navigation *did* |
 | `--\|check at top\|--` · `--\|wait 500ms\|--` | position, patience |

@@ -6,6 +6,8 @@
  * through a tool-use schema. The validator downstream doesn't care which
  * produced it, which is exactly the point.
  */
+import { keyName } from './vocabulary.js';
+
 export function parse(text) {
   const steps = [];
   let suite = 'Ad-hoc run';
@@ -60,6 +62,28 @@ export function parse(text) {
       case 'wait':
         steps.push({ op: 'wait', ms: parseInt(args, 10) || 500 });
         break;
+
+      // tick <target>   |   untick <target>
+      case 'tick':
+      case 'untick':
+        steps.push({ op: verb, target: strip(args) });
+        break;
+
+      // choose <target> with <option>
+      case 'choose': {
+        const m = args.match(/^(\S+)\s+with\s+(.+)$/);
+        if (!m) throw new Error(`Bad choose: ${line}`);
+        steps.push({ op: 'choose', target: m[1], value: strip(m[2]) });
+        break;
+      }
+
+      // press <key>   |   press <key> in <target>
+      case 'press': {
+        const m = args.match(/^(\S+)(?:\s+in\s+(\S+))?$/);
+        if (!m) throw new Error(`Bad press: ${line}`);
+        steps.push({ op: 'press', key: keyName(m[1]), ...(m[2] ? { target: m[2] } : {}) });
+        break;
+      }
 
       default:
         throw new Error(`Unknown verb "${verb}"`);

@@ -359,14 +359,21 @@ section('11 · a question about the product, from its own documentation');
 // ---------------------------------------------------------------------------
 section('12 · files: code becomes checks to tick, a table becomes a chart');
 {
-  // A Playwright test against the runner's own demo page (public/demo.html):
-  // one check that can pass, one against a page that is not there.
+  // A Playwright test against the runner's own sign-up page (public/form.html):
+  // one check that can pass — a dropdown, two checkboxes and Enter in a
+  // field, with one line the language has no verb for — and one against a
+  // page that is not there.
   const PW = `import { test, expect } from '@playwright/test';
-test('the account page', async ({ page }) => {
-  await page.goto('${BASE}/demo.html');
-  await expect(page.getByRole('heading', { name: 'Sign in to your account' })).toBeVisible();
-  await page.getByLabel('Email').fill('qa@example.com');
+test('the sign-up page', async ({ page }) => {
+  await page.goto('${BASE}/form.html');
+  await expect(page.getByRole('heading', { name: 'Create your account' })).toBeVisible();
+  await page.getByLabel('Name').fill('Ada');
+  await page.getByLabel('Plan').selectOption('Yearly');
   await page.getByRole('checkbox', { name: 'Remember me' }).check();
+  await page.getByLabel('Send me the newsletter').uncheck();
+  await page.getByLabel('Name').press('Enter');
+  await expect(page.getByText('Yearly plan')).toBeVisible();
+  await page.getByRole('button', { name: 'Sign up' }).dblclick();
 });
 test('a page that is not there', async ({ page }) => {
   await page.goto('${BASE}/nowhere.html');
@@ -375,8 +382,8 @@ test('a page that is not there', async ({ page }) => {
   const first = await ask({ text: 'Turn this into checks', attachments: [{ name: 'account.spec.ts', encoding: 'text', data: PW }] });
   const cv = first.conversationId;
   const m = first.reply?.message ?? {};
-  if (first.reply?.t === 'chat.done' && /^Translated 2 checks from Playwright: the account page \(3 steps\), a page that is not there \(2 steps\)\./.test(m.text)) ok('a Playwright file becomes two checks', short(m.text, 90)); else { bad('a Playwright file becomes two checks', `${first.r.status} ${short(m.text ?? JSON.stringify(first.reply))}`); await done(); }
-  if (/Could not carry: .*ticking a checkbox is not in the language yet/.test(m.text)) ok('and says what it could not carry', 'the checkbox'); else bad('and says what it could not carry', short(m.text));
+  if (first.reply?.t === 'chat.done' && /^Translated 2 checks from Playwright: the sign-up page \(8 steps\), a page that is not there \(2 steps\)\./.test(m.text)) ok('a Playwright file becomes two checks', short(m.text, 90)); else { bad('a Playwright file becomes two checks', `${first.r.status} ${short(m.text ?? JSON.stringify(first.reply))}`); await done(); }
+  if (/Could not carry: .*a double or right click is not in the language yet/.test(m.text)) ok('and says what it could not carry', 'the double click'); else bad('and says what it could not carry', short(m.text));
   const p = m.proposal;
   const items = p?.items ?? [];
   if (p?.kind === 'run_import' && items.length === 2 && items.every((i) => /^dc\d$/.test(i.id) && /testcase TD/.test(i.flow)) && m.runs.length === 0) ok('a run_import proposal with two items, and nothing ran', p.label); else { bad('a run_import proposal with two items, and nothing ran', JSON.stringify(p)); await done(); }
@@ -393,12 +400,12 @@ test('a page that is not there', async ({ page }) => {
   if (run.reply?.t === 'chat.done' && /^1 of 2 translated checks passed\./.test(run.reply.message.text)) ok('both ran; one passed', short(run.reply.message.text, 100)); else { bad('both ran; one passed', JSON.stringify(run.reply?.message?.text ?? run.reply)); await done(); }
   const by = Object.fromEntries(cards.map((c) => [c.candidate, c]));
   if (cards.length === 2 && cards.every((c) => c.imported === true && c.draft === true && c.from === 'playwright' && c.caseId === null && c.suiteId === suiteId)) ok('one card per check, each translated, none saved, each in the suite its origin matches'); else bad('one card per check, each translated, none saved, each in the suite its origin matches', JSON.stringify(cards.map((c) => [c.candidate, c.imported, c.draft, c.from, c.caseId, c.suiteId])));
-  if (by.dc1?.ok === true && by.dc1.passed === 3 && /fill 'Email' : label/.test(by.dc1.flow ?? '')) ok('the account page passed', `${by.dc1.passed}/${by.dc1.total}`); else bad('the account page passed', JSON.stringify(by.dc1));
+  if (by.dc1?.ok === true && by.dc1.passed === 8 && /choose 'Plan' : label = 'Yearly'/.test(by.dc1.flow ?? '') && /tick 'Remember me' : checkbox/.test(by.dc1.flow) && /untick 'Send me the newsletter' : label/.test(by.dc1.flow) && /press Enter in 'Name' : label/.test(by.dc1.flow)) ok('the sign-up page passed: chosen, ticked, unticked, Enter pressed', `${by.dc1.passed}/${by.dc1.total}`); else bad('the sign-up page passed: chosen, ticked, unticked, Enter pressed', JSON.stringify(by.dc1));
   if (by.dc2?.ok === false && by.dc2.error) ok('the page that is not there failed, and says why', short(by.dc2.error, 80)); else bad('the page that is not there failed, and says why', JSON.stringify(by.dc2));
   if (run.reply.message.executed?.kind === 'run_import' && run.reply.message.executed.result?.passed === 1) ok('the executed proposal is on the reply', run.reply.message.executed.label); else bad('the executed proposal is on the reply', JSON.stringify(run.reply.message.executed));
   // Keeping the passing one is the person's press: the same route the card's button calls.
   const saved = await api('POST', `/api/suites/${suiteId}/cases`, { name: by.dc1.caseName, pageId: null, flow: by.dc1.flow, source: 'generated' });
-  if (saved.json?.ok && saved.json.case.steps === 3) ok('the passing check keeps as a case', `${saved.json.case.name} (${saved.json.case.steps} steps)`); else bad('the passing check keeps as a case', JSON.stringify(saved.json));
+  if (saved.json?.ok && saved.json.case.steps === 8) ok('the passing check keeps as a case', `${saved.json.case.name} (${saved.json.case.steps} steps)`); else bad('the passing check keeps as a case', JSON.stringify(saved.json));
   const runsBefore = (await api('GET', '/api/runs')).json?.totals?.runs;
 
   // A table: described, then charted from the offer, then the records charted.

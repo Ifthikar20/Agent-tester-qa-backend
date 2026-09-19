@@ -827,7 +827,7 @@ export function reportLine(step) {
 }
 
 /** Ops whose step counts as a following ACTION — never an expect. */
-const ACTIONS = new Set(['click', 'fill', 'hover', 'scroll', 'wait']);
+const ACTIONS = new Set(['click', 'fill', 'hover', 'tick', 'untick', 'choose', 'press', 'scroll', 'wait']);
 
 /**
  * Everything a report says, read from the page. Reading only: nothing here

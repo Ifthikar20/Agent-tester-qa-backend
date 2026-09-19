@@ -497,6 +497,7 @@ test('contact loads', async ({ page }) => {
   await page.getByLabel('Password').fill('hunter2-never-kept');
   await expect(page.getByText('Talk to us')).toBeVisible();
   await page.getByRole('checkbox', { name: 'Yearly' }).check();
+  await page.getByRole('button', { name: 'Send' }).dblclick();
 });
 test('pricing', async ({ page }) => {
   await page.goto('/pricing');
@@ -549,8 +550,8 @@ test('pricing', async ({ page }) => {
     const { byName, held, calls } = withFiles([{ name: 'contact.spec.ts', encoding: 'text', data: PW }]);
     seen.runPlan.length = 0;
     const a = await answerMock({ text: 'Turn this into checks', byName, propose, now, attachments: held, held });
-    assert.match(a.text, /^Translated 2 checks from Playwright: contact loads \(3 steps\), pricing \(2 steps\)\./, a.text);
-    assert.match(a.text, /Could not carry: .*ticking a checkbox is not in the language yet/);
+    assert.match(a.text, /^Translated 2 checks from Playwright: contact loads \(4 steps\), pricing \(2 steps\)\./, a.text);
+    assert.match(a.text, /Could not carry: .*a double or right click is not in the language yet/);
     assert.match(a.text, /Note: typed from the vault as \$PASSWORD/);
     assert.match(a.text, /Tick the ones to run/);
     assert.deepEqual(seen.runPlan, [], 'nothing ran');
@@ -560,6 +561,7 @@ test('pricing', async ({ page }) => {
     assert.equal(p.args.cases.length, 2);
     assert.equal(p.args.cases[0].suiteId, suite.id, 'the suite is found by the origin it opens');
     assert.match(p.args.cases[0].flow, /fill 'Password' : label = \$PASSWORD/);
+    assert.match(p.args.cases[0].flow, /tick 'Yearly' : checkbox/, 'the checkbox is carried');
     assert.match(p.args.cases[1].flow, /n0\(\("https:\/\/acme\.example\/pricing"\)\)/, 'a relative address is completed by the suite');
     assert.ok(!JSON.stringify(p).includes('hunter2-never-kept') && !a.text.includes('hunter2-never-kept'), 'the literal password is nowhere');
     assert.equal(calls.at(-1).name, 'translate_code');

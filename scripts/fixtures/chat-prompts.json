@@ -641,7 +641,7 @@
         "tools": [
           "translate_code"
         ],
-        "reply": "^Translated 1 check from Playwright: the sign-in page is there \\(3 steps\\)\\.",
+        "reply": "^Translated 1 check from Playwright: the sign-up page works \\(7 steps\\)\\.",
         "proposal": "run_import",
         "items": 1,
         "runs": 0
@@ -657,7 +657,7 @@
           }
         }
       ],
-      "notes": "Test code is translated into the flow language and proposed, never run on its own say-so; the checkbox line is reported as one the language cannot carry. The yes runs the ticked checks; a passing one is kept as a case by the card's own button."
+      "notes": "A Playwright test of the sign-up page: a dropdown chosen, a checkbox ticked, Enter pressed in a field — every line carries."
     },
     {
       "id": "files.cypress",

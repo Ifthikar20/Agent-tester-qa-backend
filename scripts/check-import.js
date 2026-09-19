@@ -270,17 +270,17 @@ check('Playwright: two tests, the setup goto prepended, the password a vault ref
   assert.deepEqual(a.steps[5], { op: 'expect', assert: 'textVisible', value: 'Welcome back' });
   assert.deepEqual(b.steps[1], { op: 'click', target: 'contentinfo/link:Pricing' });
   assert.deepEqual(b.steps[2], { op: 'expect', assert: 'textVisible', value: 'Plans' });
-  assert.deepEqual(b.steps[3], { op: 'expect', assert: 'textVisible', value: '$120' });
-  assert.equal(b.dropped.length, 2);
-  assert.match(b.dropped[0].why, /ticking a checkbox is not in the language yet/);
-  assert.match(b.dropped[1].why, /absence/);
+  assert.deepEqual(b.steps[3], { op: 'tick', target: 'checkbox:Yearly' });
+  assert.deepEqual(b.steps[4], { op: 'expect', assert: 'textVisible', value: '$120' });
+  assert.equal(b.dropped.length, 1);
+  assert.match(b.dropped[0].why, /absence/);
   const out = compileAll(r);
   assert.ok(out.every((o) => o.ok), JSON.stringify(out.map((o) => o.why)));
   assert.match(out[0].flow, /fill 'Password' : label = \$PASSWORD/);
   assert.match(out[0].flow, /^%% suite "Acme · signs in"/);
   assert.match(out[1].flow, /click 'Pricing' : contentinfo\/link/);
 });
-check('Cypress: a relative visit completed by the suite, a guessed id, a key press left out', () => {
+check('Cypress: a relative visit completed by the suite, a guessed id, a key press carried', () => {
   const r = translate(CYPRESS);
   assert.equal(r.framework, 'cypress');
   const [c] = r.checks;
@@ -288,9 +288,10 @@ check('Cypress: a relative visit completed by the suite, a guessed id, a key pre
   assert.deepEqual(c.steps[0], { op: 'goto', url: '/contact' });
   assert.deepEqual(c.steps[1], { op: 'fill', target: 'label:Name', value: 'Ada' });
   assert.deepEqual(c.steps[2], { op: 'fill', target: 'testid:message', value: 'Hello' });
-  assert.deepEqual(c.steps[3], { op: 'click', target: 'button:Send' });
+  assert.deepEqual(c.steps[3], { op: 'press', key: 'Enter', target: 'testid:message' });
+  assert.deepEqual(c.steps[4], { op: 'click', target: 'button:Send' });
   assert.ok(c.notes.some((n) => /guessed from #name/.test(n)));
-  assert.ok(c.notes.some((n) => /key press/.test(n)));
+  assert.ok(!c.notes.some((n) => /left out/.test(n)), 'nothing was left out');
   assert.match(c.dropped[0].why, /names nothing a person reads/);
   assert.match(compileAll(r, null)[0].why, /relative address \/contact/);
   const out = compileAll(r)[0];
@@ -315,6 +316,62 @@ check('Puppeteer: selectors guessed, a script with no test() is one check', () =
   assert.deepEqual(r.checks[0].steps.map((s) => s.op), ['goto', 'expect', 'click', 'fill', 'wait']);
   assert.deepEqual(r.checks[0].steps[2], { op: 'click', target: 'testid:monthly' });
   assert.ok(compileAll(r)[0].ok);
+});
+check('a checkbox, a dropdown and a key press are carried, and what is not is said', () => {
+  const r = translate(`import { test, expect } from '@playwright/test';
+test('signs up', async ({ page }) => {
+  await page.goto('https://acme.example/signup');
+  await page.getByLabel('Plan').selectOption('Yearly');
+  await page.getByLabel('Currency').selectOption({ value: 'eur' });
+  await page.getByRole('checkbox', { name: 'Remember me' }).check();
+  await page.getByLabel('Newsletter').setChecked(false);
+  await page.getByLabel('Search').press('Enter');
+  await page.keyboard.press('Escape');
+  await page.getByLabel('Plan').selectOption({ index: 2 });
+  await page.getByLabel('Name').press('F1');
+  await page.getByLabel('Tags').selectOption(['a', 'b']);
+});`);
+  const [c] = r.checks;
+  assert.deepEqual(c.steps.slice(1), [
+    { op: 'choose', target: 'label:Plan', value: 'Yearly' },
+    { op: 'choose', target: 'label:Currency', value: 'eur' },
+    { op: 'tick', target: 'checkbox:Remember me' },
+    { op: 'untick', target: 'label:Newsletter' },
+    { op: 'press', key: 'Enter', target: 'label:Search' },
+    { op: 'press', key: 'Escape' },
+    { op: 'choose', target: 'label:Tags', value: 'a' },
+  ]);
+  assert.ok(c.notes.some((n) => /"eur" is the option's value/.test(n)));
+  assert.ok(c.notes.some((n) => /only the first of the options/.test(n)));
+  assert.match(c.dropped[0].why, /by its position/);
+  assert.match(c.dropped[1].why, /"F1" is not a key the runner presses/);
+  const out = compileAll(r)[0];
+  assert.ok(out.ok, out.why);
+  assert.match(out.flow, /choose 'Plan' : label = 'Yearly'/);
+  assert.match(out.flow, /tick 'Remember me' : checkbox/);
+  assert.match(out.flow, /untick 'Newsletter' : label/);
+  assert.match(out.flow, /press Enter in 'Search' : label/);
+  assert.match(out.flow, /press Escape/);
+});
+check('the same in Cypress, Selenium and Puppeteer', () => {
+  const cy = translate("describe('x', () => { it('picks', () => { cy.visit('https://acme.example/'); cy.get('#plan').select('Team'); cy.get('#q').type('widgets{enter}'); cy.get('[data-testid=\"agree\"]').check(); cy.get('#q').type('{selectall}{del}again{tab}'); }); });");
+  assert.deepEqual(cy.checks[0].steps.slice(1), [
+    { op: 'choose', target: 'label:Plan', value: 'Team' },
+    { op: 'fill', target: 'label:Q', value: 'widgets' },
+    { op: 'press', key: 'Enter', target: 'label:Q' },
+    { op: 'tick', target: 'testid:agree' },
+  ]);
+  assert.match(cy.checks[0].dropped[0].why, /text typed after a key press/);
+  const se = translate('from selenium import webdriver\nfrom selenium.webdriver.common.by import By\nfrom selenium.webdriver.common.keys import Keys\nfrom selenium.webdriver.support.ui import Select\n\ndef test_pick():\n    driver = webdriver.Chrome()\n    driver.get("https://acme.example/")\n    Select(driver.find_element(By.ID, "plan")).select_by_visible_text("Team")\n    driver.find_element(By.NAME, "q").send_keys("widgets", Keys.RETURN)\n    Select(driver.find_element(By.ID, "plan")).select_by_index(2)\n');
+  assert.deepEqual(se.checks[0].steps.slice(1), [
+    { op: 'choose', target: 'label:Plan', value: 'Team' },
+    { op: 'fill', target: 'label:Q', value: 'widgets' },
+    { op: 'press', key: 'Enter', target: 'label:Q' },
+  ]);
+  assert.match(se.checks[0].dropped[0].why, /by its position/);
+  const pp = translate("const puppeteer = require('puppeteer');\n(async () => {\n  const browser = await puppeteer.launch();\n  const page = await browser.newPage();\n  await page.goto('https://acme.example/');\n  await page.select('#plan', 'yearly');\n  await page.keyboard.press('Enter');\n  await page.keyboard.type('x');\n})();");
+  assert.deepEqual(pp.checks[0].steps.slice(1), [{ op: 'choose', target: 'label:Plan', value: 'yearly' }, { op: 'press', key: 'Enter' }]);
+  assert.match(pp.checks[0].dropped[0].why, /typing without a field/);
 });
 check('the flow language is taken as it is', () => {
   const r = translate(FLOW, { name: 'home.flow' });

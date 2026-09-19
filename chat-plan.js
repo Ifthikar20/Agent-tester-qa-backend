@@ -40,6 +40,7 @@
  * rides on — the proposal a person confirms (chat.js), run() and its events
  * (server.js), the case language (vocabulary.js, flow.js) — are unchanged.
  */
+import { isKey, keyName } from './vocabulary.js';
 import { parseFlow, flatten, toFlow } from './flow.js';
 
 // ------------------------------------------------------------------ bounds
@@ -68,7 +69,7 @@ export const MIN_CONFIDENCE = 0.6;
 /** A candidate's id, as a proposal hands it out and a choice names it. */
 export const CANDIDATE_ID = /^dc[1-8]$/;
 
-export const OPS = ['click', 'hover', 'fill', 'wait', 'scroll', 'expect'];
+export const OPS = ['click', 'hover', 'fill', 'tick', 'untick', 'choose', 'press', 'wait', 'scroll', 'expect'];
 export const ASSERTS = ['', 'urlContains', 'textVisible', 'valueLength', 'status', 'redirects', 'atTop', 'via'];
 export const VERDICTS = ['passed', 'test_script', 'app_bug', 'not_expressible', 'needs_a_person', 'refused', 'stopped'];
 
@@ -130,11 +131,11 @@ export function stepSchema({ targets, paths, pagePath = null }) {
     additionalProperties: false,
     required: ['op', 'assert', 'target', 'path', 'text', 'number'],
     properties: {
-      op: { type: 'string', enum: OPS, description: 'click, hover, fill, wait, scroll, or expect' },
+      op: { type: 'string', enum: OPS, description: 'click, hover, fill, tick, untick, choose, press, wait, scroll, or expect' },
       assert: { type: 'string', enum: ASSERTS, description: "for expect only: what to check; '' otherwise" },
       target: { type: 'string', enum: targetEnum, description: "the control, from the list, or '' when the step has none" },
       path: { type: 'string', enum: pathEnum, description: "for expect urlContains only: the path the URL must contain; '' otherwise" },
-      text: { type: 'string', description: "fill: what to type (short, plain, no quotes or semicolons); expect textVisible: words the page must show, copied from the page; expect via: the path a redirect goes through; scroll: 'top' or 'bottom'; '' otherwise" },
+      text: { type: 'string', description: "fill: what to type (short, plain, no quotes or semicolons); choose: the option's words, as the dropdown shows them; press: the key — Enter, Tab, Escape, Space, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown; expect textVisible: words the page must show, copied from the page; expect via: the path a redirect goes through; scroll: 'top' or 'bottom'; '' otherwise" },
       number: { type: 'integer', description: 'wait: milliseconds; expect valueLength: how many characters the field must hold after a fill; expect status: the HTTP status; expect redirects: how many; 0 otherwise' },
     },
   };
@@ -207,6 +208,19 @@ export function stepsFrom(rows, menu) {
       if (!text || text.length > VALUE_MAX || UNCARRIABLE.test(text) || SECRETISH.test(text)) { drop(`fill: "${target}" — the value cannot be typed by a drafted case`); continue; }
       steps.push({ op: 'fill', target, value: text });
       typed.set(target, text.length);
+    } else if (op === 'tick' || op === 'untick') {
+      if (!named()) { drop(`${op}: "${target}" is not on the page`); continue; }
+      steps.push({ op, target });
+    } else if (op === 'choose') {
+      if (!named()) { drop(`choose: "${target}" is not on the page`); continue; }
+      if (!text || text.length > VALUE_MAX || UNCARRIABLE.test(text)) { drop(`choose: "${target}" — the option cannot be named`); continue; }
+      steps.push({ op: 'choose', target, value: text });
+    } else if (op === 'press') {
+      const key = keyName(text);
+      if (!isKey(key)) { drop(`press: "${text}" is not a key the runner presses`); continue; }
+      // A key on a control the page has, or wherever the focus is when no control is named.
+      if (target && !named()) { drop(`press: "${target}" is not on the page`); continue; }
+      steps.push({ op: 'press', key, ...(target ? { target } : {}) });
     } else if (op === 'wait') {
       if (!(number > 0)) { drop('wait: no time'); continue; }
       steps.push({ op: 'wait', ms: Math.min(5000, Math.max(100, Math.round(number / 100) * 100)) });
@@ -285,6 +299,8 @@ export function compile(candidate, { id, menu, page, suiteName, checkFlow }) {
     if (s.valueRef) return fail('a drafted case types no vault value');
     if (s.target && !allowed.has(s.target)) return fail(`"${s.target}" is not on the page`);
     if (s.op === 'fill' && (typeof s.value !== 'string' || SECRETISH.test(s.value) || UNCARRIABLE.test(s.value))) return fail('a value a drafted case cannot type');
+    if (s.op === 'choose' && (typeof s.value !== 'string' || UNCARRIABLE.test(s.value))) return fail('an option a drafted case cannot name');
+    if (s.op === 'press' && !isKey(s.key)) return fail('a key the runner does not press');
   }
   const steps = [{ op: 'goto', url: page.url }, ...body];
   let flow;
@@ -469,6 +485,8 @@ export function checkRevision(original, revised, { menu }) {
     if (s.valueRef) return bad('a vault value');
     if (s.target && !allowed.has(s.target)) return bad(`"${s.target}" is not on the page now`);
     if (s.op === 'fill' && (typeof s.value !== 'string' || SECRETISH.test(s.value) || UNCARRIABLE.test(s.value))) return bad('a value a drafted case cannot type');
+    if (s.op === 'choose' && (typeof s.value !== 'string' || UNCARRIABLE.test(s.value))) return bad('an option a drafted case cannot name');
+    if (s.op === 'press' && !isKey(s.key)) return bad('a key the runner does not press');
   }
   const kept = assertions(now);
   for (const a of assertions(was)) {

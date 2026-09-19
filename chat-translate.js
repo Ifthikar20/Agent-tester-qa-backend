@@ -18,6 +18,7 @@
  * code becomes a vault reference ($PASSWORD) and the literal is never kept:
  * not in the check, not in the transcript, not in the reply.
  */
+import { KEY_NAMES, isKey, keyName } from './vocabulary.js';
 import { toFlow } from './flow.js';
 
 export const FRAMEWORKS = Object.freeze(['playwright', 'cypress', 'selenium', 'puppeteer', 'flow']);
@@ -269,6 +270,28 @@ function byKind(kind, value, verb) {
 
 // ---- one statement → steps ------------------------------------------------------------------------
 
+/** Cypress's `{enter}` and Selenium's `Keys.RETURN`, by the runner's names; a modifier held on its own has no verb. */
+const HELD = /^(shift|ctrl|control|alt|meta|cmd|command)$/i;
+function keyPiece(name) {
+  const key = keyName(String(name).toLowerCase().replace(/_/g, ''));
+  if (isKey(key)) return { key };
+  if (HELD.test(name) || key === 'selectall') return { skip: name };
+  return { unknown: name };
+}
+/** `'Hello{enter}'` → text and keys in the order typed. */
+function typedPieces(text) {
+  const out = [];
+  let last = 0;
+  for (const m of text.matchAll(KEYS)) {
+    if (m.index > last) out.push({ text: text.slice(last, m.index) });
+    out.push(keyPiece(m[1]));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push({ text: text.slice(last) });
+  return out;
+}
+const NOT_A_KEY = (k) => `"${k}" is not a key the runner presses — it knows ${KEY_NAMES.join(', ')}`;
+
 const FRAMEWORK_WORDS = { playwright: 'Playwright', cypress: 'Cypress', selenium: 'Selenium', puppeteer: 'Puppeteer', flow: 'the flow language' };
 const SKIP = /^(import|export|const|let|var|from|require|module\.exports|package|using|namespace|\}|\{|\)|\}\)|\]|\)\)|@\w+)/;
 const KEYS = /\{(enter|tab|esc|escape|backspace|del|selectall|uparrow|downarrow|leftarrow|rightarrow|home|end|pageup|pagedown|shift|ctrl|alt|meta)\}/gi;
@@ -316,6 +339,26 @@ export function translateStatement(raw, framework) {
   if ((m = s.match(/^cy\.(?:url|location)\s*\((?:\s*['"]pathname['"]\s*)?\)\s*\.should\s*\(\s*['"](?:include|contain|eq|equal|match)['"]\s*,\s*(.+)\)$/))) { const l = literal(m[1]); return l ? { steps: [{ op: 'expect', assert: 'urlContains', value: pathOf(l.text) }] } : { why: 'a URL that is not a literal' }; }
   if ((m = s.match(/(?:driver\.current_url|driver\.getCurrentUrl\(\)|page\.url\(\))/)) && (m = s.match(/((['"])(?:\\.|(?!\2).)*\2)/))) { const l = literal(m[1]); return l ? { steps: [{ op: 'expect', assert: 'urlContains', value: pathOf(l.text) }] } : null; }
   if (/expect\s*\(\s*page\s*\)\s*\.toHaveTitle|driver\.title|getTitle\(\)|page\.title\(\)|cy\.title\(\)/.test(s)) return { why: 'the page title is not something a check can see — check a heading on the page instead' };
+  // ---- a key on the keyboard, wherever the focus is ---------------------------------------------
+  if ((m = s.match(/^page\.keyboard\.press\s*\(\s*(.+)\)$/))) {
+    const k = literal(splitArgs(m[1])[0]);
+    if (!k) return { why: 'a key that is not a literal' };
+    const key = keyName(k.text);
+    return isKey(key) ? { steps: [{ op: 'press', key }] } : { why: NOT_A_KEY(k.text) };
+  }
+  if (/^page\.keyboard\.(type|insertText)\s*\(/.test(s)) return { why: 'typing without a field — name the field and fill it' };
+  // ---- Selenium's Select: an option by its words, its value, or its place -----------------------
+  if ((m = s.match(/^(?:new\s+)?Select\s*\(\s*(.+)\)\s*\.\s*select_?[bB]y_?(visible_?[tT]ext|[vV]alue|[iI]ndex)\s*\(\s*(.+)\)$/))) {
+    const how = m[2].toLowerCase().replace(/_/g, '');
+    if (how === 'index') return { why: 'an option by its position — name it by its words' };
+    const v = literal(splitArgs(m[3])[0]);
+    if (!v) return { why: 'an option that is not a literal' };
+    // The element the way its own locator names it, then the choice as Playwright would write it.
+    const out = translateStatement(`${m[1]}.selectOption(${JSON.stringify(v.text)})`, framework);
+    if (!out?.steps?.length) return { why: out?.why ?? 'a dropdown the runner could not find' };
+    if (how === 'value') out.notes = [...(out.notes ?? []), `"${v.text}" is the option's value, not its words — the runner matches the words first, then the value`];
+    return out;
+  }
   // ---- text on the page --------------------------------------------------------------------------
   if ((m = s.match(/(?:driver\.page_source|getPageSource\(\)|page\.content\(\)|document\.body\.(?:innerText|textContent))/)) && (m = s.match(/((['"])(?:\\.|(?!\2).)*\2)/))) { const l = literal(m[1]); return l ? { steps: [{ op: 'expect', assert: 'textVisible', value: l.text }] } : null; }
   // ---- chains: a subject, then what is done with it ------------------------------------------------
@@ -341,8 +384,8 @@ export function translateStatement(raw, framework) {
   let nth = null;
   const notes = [];
   let i = 1;
-  const verbOf = (name) => (/^(fill|type|pressSequentially|send_keys|sendKeys|setValue|clear)$/.test(name) ? 'fill' : /^(should|toBeVisible|toHaveText|toContainText|toHaveValue|toBeHidden|toHaveCount|toBeEnabled|toBeDisabled|toBeChecked|toBeAttached|toHaveAttribute|toBeInViewport|toHaveClass|not)$/.test(name) ? 'expect' : 'click');
-  const actionSeg = [...inner.slice(1), ...tail].find((g) => /^(click|dblclick|tap|fill|type|pressSequentially|send_keys|sendKeys|hover|check|uncheck|selectOption|select|press|clear|focus|blur|submit|scrollIntoViewIfNeeded|scrollIntoView|setInputFiles|should|trigger|rightclick|not|to[A-Z]\w*)$/.test(g.name));
+  const verbOf = (name) => (/^(fill|type|pressSequentially|send_keys|sendKeys|setValue|clear|check|uncheck|setChecked|selectOption|select|press)$/.test(name) ? 'fill' : /^(should|toBeVisible|toHaveText|toContainText|toHaveValue|toBeHidden|toHaveCount|toBeEnabled|toBeDisabled|toBeChecked|toBeAttached|toHaveAttribute|toBeInViewport|toHaveClass|not)$/.test(name) ? 'expect' : 'click');
+  const actionSeg = [...inner.slice(1), ...tail].find((g) => /^(click|dblclick|tap|fill|type|pressSequentially|send_keys|sendKeys|hover|check|uncheck|setChecked|selectOption|select|press|clear|focus|blur|submit|scrollIntoViewIfNeeded|scrollIntoView|setInputFiles|should|trigger|rightclick|not|to[A-Z]\w*)$/.test(g.name));
   const verb = verbOf(actionSeg?.name ?? (isExpect ? 'toBeVisible' : 'click'));
   for (; i < inner.length; i++) {
     const seg = inner[i];
@@ -372,12 +415,16 @@ export function translateStatement(raw, framework) {
     const a = splitArgs(rest[0].args);
     const sel = literal(a[0]);
     if (!sel) return { why: 'a selector that is not a literal' };
-    const t = guessTarget(sel.text, rest[0].name === 'type' ? 'fill' : rest[0].name === 'waitForSelector' ? 'expect' : 'click');
+    const t = guessTarget(sel.text, rest[0].name === 'type' || rest[0].name === 'select' ? 'fill' : rest[0].name === 'waitForSelector' ? 'expect' : 'click');
     if (t.why) return { why: t.why };
     target = t.target; if (t.guessed) notes.push(t.guessed);
     if (rest[0].name === 'type') { const v = literal(a[1]); return v ? fillStep(target, v.text, notes) : { why: 'a value that is not a literal' }; }
     if (rest[0].name === 'waitForSelector') return { steps: [{ op: 'expect', assert: 'textVisible', value: nameOf(target) }], notes };
-    if (rest[0].name === 'select') return unsupported('choosing from a dropdown');
+    if (rest[0].name === 'select') {
+      const v = literal(a[1]);
+      if (!v) return { why: 'an option that is not a literal' };
+      return { steps: [{ op: 'choose', target, value: v.text }], notes: [...notes, `"${v.text}" is the option's value, not its words — the runner matches the words first, then the value`] };
+    }
     return { steps: [{ op: rest[0].name === 'hover' ? 'hover' : 'click', target }], notes };
   }
   if (!target) return rest.length || isExpect ? { why: `${str(s, 70)} — the runner could not find what this names` } : null;
@@ -390,18 +437,61 @@ export function translateStatement(raw, framework) {
       case 'hover': return { steps: [{ op: 'hover', target }], notes };
       case 'dblclick': case 'rightclick': return unsupported('a double or right click');
       case 'fill': case 'type': case 'pressSequentially': case 'send_keys': case 'sendKeys': case 'setValue': {
-        const v = literal(a[0]);
-        if (!v) return { why: 'a value that is not a literal' };
-        const keys = v.text.match(KEYS) ?? (/Keys\.\w+/.test(a.join(',')) ? ['a key'] : []);
-        const text = v.text.replace(KEYS, '').trim();
-        const out = text ? fillStep(target, text, notes) : { why: `${g.name}: only a key press, which is not in the language yet` };
-        if (keys.length && out.steps) out.notes = [...(out.notes ?? []), `the key press (${keys.join(', ')}) was left out — click the button instead`];
-        return out;
+        // Text and keys, in the order given: `type('Hello{enter}')`, `send_keys('x', Keys.RETURN)`.
+        // The text goes into the field; each key is pressed there after it.
+        const pieces = [];
+        for (const arg of a) {
+          const lit = literal(arg);
+          if (lit) { pieces.push(...typedPieces(lit.text)); continue; }
+          const k = arg.match(/^Keys\.(\w+)$/);
+          if (k) { pieces.push(keyPiece(k[1])); continue; }
+          return { why: 'a value that is not a literal' };
+        }
+        let text = '';
+        const keys = [];
+        for (const p of pieces) {
+          if (p.text != null) { if (keys.length && p.text.trim()) return { why: 'text typed after a key press goes to whatever has the focus then — name the field instead' }; text += p.text; continue; }
+          if (p.skip) { notes.push(`{${p.skip}} was left out — a held modifier is not in the language`); continue; }
+          if (p.unknown) return { why: NOT_A_KEY(p.unknown) };
+          keys.push(p.key);
+        }
+        text = text.trim();
+        if (!text && !keys.length) return { why: 'nothing typed' };
+        const out = text ? fillStep(target, text, notes) : { steps: [], notes };
+        if (out.why) return out;
+        return { steps: [...out.steps, ...keys.map((key) => ({ op: 'press', key, target }))], notes: out.notes };
       }
       case 'clear': case 'focus': case 'blur': continue;
-      case 'check': case 'uncheck': return unsupported('ticking a checkbox');
-      case 'selectOption': case 'select': return unsupported('choosing from a dropdown');
-      case 'press': return unsupported('a key press');
+      case 'check': return { steps: [{ op: 'tick', target }], notes };
+      case 'uncheck': return { steps: [{ op: 'untick', target }], notes };
+      case 'setChecked': {
+        if (!/^(true|false)$/.test((a[0] ?? '').trim())) return { why: 'a state that is not a literal' };
+        return { steps: [{ op: a[0].trim() === 'true' ? 'tick' : 'untick', target }], notes };
+      }
+      case 'selectOption': case 'select': {
+        // 'Yearly' | { label: 'Yearly' } | { value: 'y' } | { index: 1 } | ['a', 'b']
+        let arg = (a[0] ?? '').trim();
+        let byValue = false;
+        let fromList = false;
+        if ((m = arg.match(/^\[(.*)\]$/s))) { arg = (splitArgs(m[1])[0] ?? '').trim(); fromList = true; }
+        if ((m = arg.match(/^\{\s*(label|value|index)\s*:\s*(.+?)\s*\}$/s))) {
+          if (m[1] === 'index') return { why: 'an option by its position — name it by its words' };
+          byValue = m[1] === 'value';
+          arg = m[2];
+        }
+        const v = literal(arg);
+        if (!v) return { why: 'an option that is not a literal' };
+        const more = [...notes];
+        if (byValue) more.push(`"${v.text}" is the option's value, not its words — the runner matches the words first, then the value`);
+        if (fromList) more.push('only the first of the options listed is chosen — the language picks one');
+        return { steps: [{ op: 'choose', target, value: v.text }], notes: more };
+      }
+      case 'press': {
+        const k = literal(a[0]);
+        if (!k) return { why: 'a key that is not a literal' };
+        const key = keyName(k.text);
+        return isKey(key) ? { steps: [{ op: 'press', key, target }], notes } : { why: NOT_A_KEY(k.text) };
+      }
       case 'submit': return unsupported('submitting a form by itself — click its button');
       case 'setInputFiles': case 'attachFile': case 'selectFile': return unsupported('uploading a file');
       case 'scrollIntoViewIfNeeded': case 'scrollIntoView': return { steps: [{ op: 'scroll', target }], notes };
