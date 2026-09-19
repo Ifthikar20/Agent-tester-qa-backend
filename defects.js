@@ -21,6 +21,17 @@
  * reopened, for someone to look at again, rather than hidden under last
  * month's "won't fix".
  *
+ * A MONITOR'S INCIDENT IS A DEFECT TOO. A monitored element (or the whole
+ * page) that breaks its rule and is confirmed (monitor.js) is filed here as
+ * it opens, under the same numbers as a failed run, and closed as it
+ * resolves — on its own, by a person accepting the new state, or by Claude
+ * judging the change fine. Its identity is the monitor and the checks that
+ * failed: the same rule breaking the same way again reopens the same number.
+ * It has no cases, so a passing run never closes it, and its evidence is the
+ * incident's: the failed checks, the verdict's severity, the before and after
+ * clips. The Defects page is then one page for what is broken, whichever way
+ * the runner found out.
+ *
  * WHAT MAKES TWO FAILURES ONE DEFECT. A run records only its first failure,
  * because a run stops there, so a defect is that sentence, about the step that
  * failed, on the site it happened on. Grouping by what failed rather than by
@@ -60,6 +71,11 @@ export const SEVERITIES = ['critical', 'major', 'minor', 'trivial'];
 /** What a person may park a failing defect as. */
 export const RESOLUTIONS = ['known_issue', 'wont_fix'];
 const TRIAGE_FIELDS = ['assignee', 'severity', 'resolution'];
+/** Where a defect came from: a failed run, or a monitor's incident. */
+export const KINDS = ['run', 'monitor'];
+/** A monitor verdict's severity (monitor-rules.js judgeMock, or Claude's), as a defect's. */
+const MONITOR_SEVERITY = { high: 'critical', medium: 'major', low: 'minor' };
+const MAX_VIOLATIONS = 6;
 
 export class NoSuchDefect extends Error {
   constructor(id) { super(`No defect "${id}"`); this.name = 'NoSuchDefect'; }
@@ -115,6 +131,19 @@ export const fingerprint = (run) => createHash('sha256')
   .digest('hex').slice(0, 16);
 
 /**
+ * One incident's identity: the monitor and the checks that failed — or that
+ * the element went missing. The same rule breaking the same way is the same
+ * defect; a different check of the same rule is another.
+ */
+export const fingerprintIncident = (monitorId, violationKey) => createHash('sha256')
+  .update(`monitor\n${monitorId}\n${violationKey}`)
+  .digest('hex').slice(0, 16);
+/** Which checks an incident is failing, as one string (monitor-rules.js violationKey draws the same line). */
+export const violationKeyOf = (incident) => (incident?.type === 'missing'
+  ? 'missing'
+  : (incident?.violations ?? []).map((v) => String(v.checkId ?? v.metric ?? '')).sort().join(',') || 'changed');
+
+/**
  * A case as history knows it: its id, or — for a script run from the console,
  * which has none — where it started.
  */
@@ -133,9 +162,16 @@ const whereOf = (r) => r.caseName ?? suiteNameOf(r);
  * The severity the runner works out, from what it knows rather than a guess:
  * critical when the case could not get past its first step, or three or more
  * cases have gone down with it; major when two have, or it has come back after
- * being fixed; minor otherwise.
+ * being fixed; minor otherwise. A monitor's defect is graded by its verdict.
  */
 export function autoSeverity(d) {
+  if (d.kind === 'monitor') {
+    // Gone is critical; otherwise the verdict's word, and a rule that broke
+    // again after being fixed is at least major, like a regression in a run.
+    if (d.monitor?.type === 'missing') return 'critical';
+    const graded = MONITOR_SEVERITY[d.evidence?.verdictSeverity] ?? 'major';
+    return graded === 'minor' && d.reopened > 0 ? 'major' : graded;
+  }
   if (d.step === 0 || d.cases.length >= 3) return 'critical';
   if (d.cases.length === 2 || d.reopened > 0) return 'major';
   return 'minor';
@@ -152,6 +188,7 @@ export function statusOf(d) {
 function view(d) {
   return {
     id: d.id,
+    kind: d.kind ?? 'run',
     title: d.title,
     target: d.target ?? null,
     origin: d.origin,
@@ -171,6 +208,11 @@ function view(d) {
     assignee: d.triage.assignee ? { ...d.triage.assignee } : null,
     reporter: 'ghostclick',
     updatedAt: d.updatedAt,
+    // A monitor's defect: which monitor, and the incident's evidence — the
+    // failed checks, the verdict's word, the clips (served by the monitoring
+    // routes) — so the page can show what broke without a second read.
+    monitor: d.monitor ? { ...d.monitor } : null,
+    evidence: d.evidence ? { ...d.evidence, violations: (d.evidence.violations ?? []).map((x) => ({ ...x })) } : null,
   };
 }
 
@@ -260,12 +302,17 @@ export function open(org) {
     d.updatedAt = Math.max(d.updatedAt, ev.at);
   };
 
-  function file(r, fp) {
-    const month = monthOf(r.at);
+  /** The next number of the month `at` falls in — spent the moment it is handed out. */
+  const nextId = (at) => {
+    const month = monthOf(at);
     const n = (state.counters[month] ?? 0) + 1;
     state.counters[month] = n;
+    return formatId(month, n);
+  };
+
+  function file(r, fp) {
     const d = {
-      id: formatId(month, n), fp, aliases: [], title: r.error, target: r.target ?? null,
+      id: nextId(r.at), fp, aliases: [], kind: 'run', title: r.error, target: r.target ?? null,
       origin: originOf(r.url), url: r.url || '', step: r.step ?? null,
       firstSeen: r.at, lastSeen: r.at, hits: 0, reopened: 0, closedAt: null,
       cases: [], suites: [],
@@ -357,8 +404,114 @@ export function open(org) {
     else if (d.suites.length < MAX_SUITES) d.suites.push(suite);
   }
 
+  /** The incident's evidence as a defect keeps it: the failed checks cut to a card's worth, the verdict's word, the clips' names. */
+  const evidenceOf = (inc) => ({
+    incidentId: inc?.id ?? null,
+    violations: (inc?.violations ?? []).slice(0, MAX_VIOLATIONS).map((x) => ({
+      checkId: x.checkId ?? null, metric: x.metric ?? null, message: clip(x.message, 200),
+      actual: clip(x.actual, 200), expected: clip(x.expected, 200), baseline: clip(x.baseline, 200),
+    })),
+    verdictSeverity: inc?.verdict?.severity ?? null,
+    verdict: clip(inc?.verdict?.explanation, 400),
+    before: inc?.before?.screenshot ?? null,
+    after: inc?.after?.screenshot ?? null,
+  });
+  /** What an incident is about, in one line: its first failed check, or that the element is gone. */
+  const headlineOf = (inc, monitor) => (inc?.type === 'missing'
+    ? `${monitor?.label ?? 'The element'} is no longer on the page`
+    : clip(inc?.violations?.[0]?.message, 240) || `${monitor?.label ?? 'The element'} changed`);
+  const openMonitorDefect = (incidentId) => state.defects.find((d) => d.kind === 'monitor' && !d.closedAt && d.monitor?.incidentId === incidentId) ?? null;
+  const RESOLVED_TEXT = {
+    auto: 'the page recovered on its own',
+    manual: 'the current state was accepted as the new baseline',
+    judge: 'Claude judged the change fine and made it the baseline',
+  };
+
   return {
     org,
+
+    /**
+     * A monitor's incident, into the registry (monitor.js): `opened` files a
+     * defect or reopens the one this failure had before, `updated` (a
+     * different failure inside the same incident) rewrites what it says,
+     * `resolved` closes it and `removed` (the monitor deleted) closes every
+     * open defect of that monitor. Returns the defect's id and what a person
+     * would want to be told, the way sync does.
+     *
+     * @param {'opened'|'updated'|'resolved'|'removed'} event
+     * @param {{incident?: object, monitor?: object, by?: object|null, suiteName?: string|null, at?: number}} data
+     *   `by` is who resolved it, for the activity — a person's {sub, email} on
+     *   a manual resolve, null when the runner or the judge did.
+     * @returns {{id: string|null, changes: {kind: string, id: string, title: string}[]}}
+     */
+    incident(event, { incident = null, monitor = null, by = null, suiteName = null, at = Date.now() } = {}) {
+      const changes = [];
+      const m = monitor ?? (incident ? { id: incident.monitorId, label: incident.monitorLabel, selector: incident.selector, ruleText: incident.ruleText } : null);
+      if (event === 'removed') {
+        for (const d of state.defects) {
+          if (d.kind !== 'monitor' || d.closedAt || d.monitor?.id !== m?.id) continue;
+          d.closedAt = at;
+          d.triage.resolution = null;
+          note(d, { at, by: null, kind: 'closed', text: 'the monitor was deleted' });
+          changes.push({ kind: 'closed', id: d.id, title: d.title });
+        }
+        if (changes.length) persist();
+        return { id: null, changes };
+      }
+      if (!incident || !m?.id) return { id: null, changes };
+      if (event === 'resolved') {
+        const d = openMonitorDefect(incident.id);
+        if (!d) return { id: null, changes };
+        d.closedAt = at;
+        const parked = d.triage.resolution;
+        d.triage.resolution = null;
+        note(d, { at, by: by ?? null, kind: 'closed', text: (RESOLVED_TEXT[by?.how ?? incident.resolvedBy] ?? 'resolved') + (parked ? `, so it is no longer ${parked === 'wont_fix' ? "won't fix" : 'a known issue'}` : '') });
+        changes.push({ kind: 'closed', id: d.id, title: d.title });
+        persist();
+        return { id: d.id, changes };
+      }
+      const headline = headlineOf(incident, m);
+      if (event === 'updated') {
+        const d = openMonitorDefect(incident.id);
+        if (!d) return { id: null, changes };
+        if (d.title !== headline) note(d, { at, by: null, kind: 'updated', text: `now failing differently: ${headline}` });
+        Object.assign(d, { title: headline, lastSeen: at, evidence: evidenceOf(incident), updatedAt: Math.max(d.updatedAt, at) });
+        d.monitor.type = incident.type ?? d.monitor.type;
+        persist();
+        return { id: d.id, changes };
+      }
+      // opened
+      const fp = fingerprintIncident(m.id, violationKeyOf(incident));
+      let d = byFp.get(fp) ?? null;
+      const where = m.label ?? m.selector ?? 'a monitor';
+      if (!d) {
+        d = {
+          id: nextId(at), fp, aliases: [], kind: 'monitor', title: headline, target: clip(m.ruleText, 500), origin: originOf(m.url), url: m.url || '', step: null,
+          firstSeen: at, lastSeen: at, hits: 0, reopened: 0, closedAt: null,
+          cases: [], suites: m.suiteId ? [{ id: String(m.suiteId), name: suiteName || 'Monitoring' }] : [],
+          monitor: { id: m.id, label: clip(m.label, 80), selector: clip(m.selector, 1000), ruleText: clip(m.ruleText, 500), page: m.url || null, incidentId: incident.id, type: incident.type ?? 'violation' },
+          evidence: evidenceOf(incident),
+          triage: { assignee: null, severity: null, resolution: null },
+          activity: [], updatedAt: at,
+        };
+        note(d, { at, by: null, kind: 'filed', text: `${where} broke its rule: ${headline}` });
+        state.defects.push(d);
+        byFp.set(fp, d);
+        byId.set(d.id, d);
+        changes.push({ kind: 'filed', id: d.id, title: d.title });
+      } else if (d.closedAt) {
+        d.closedAt = null;
+        d.reopened++;
+        note(d, { at, by: null, kind: 'reopened', text: `${where} broke its rule again: ${headline}` });
+        changes.push({ kind: 'reopened', id: d.id, title: headline });
+      }
+      d.hits++;
+      Object.assign(d, { title: headline, lastSeen: at, url: m.url || d.url, evidence: evidenceOf(incident), updatedAt: Math.max(d.updatedAt, at) });
+      d.monitor = { ...d.monitor, label: clip(m.label, 80) ?? d.monitor.label, selector: clip(m.selector, 1000) ?? d.monitor.selector, ruleText: clip(m.ruleText, 500) ?? d.monitor.ruleText, page: m.url || d.monitor.page, incidentId: incident.id, type: incident.type ?? 'violation' };
+      if (m.suiteId && !d.suites.some((x) => x.id === String(m.suiteId))) d.suites.push({ id: String(m.suiteId), name: suiteName || 'Monitoring' });
+      persist();
+      return { id: d.id, changes };
+    },
 
     /**
      * Fold in every run not folded in yet, oldest first. Safe to call as often
@@ -411,12 +564,14 @@ export function open(org) {
     },
 
     totals() {
-      const t = { all: 0, open: 0, reopened: 0, known_issue: 0, wont_fix: 0, closed: 0, unassigned: 0 };
+      const t = { all: 0, open: 0, reopened: 0, known_issue: 0, wont_fix: 0, closed: 0, unassigned: 0, monitors: 0 };
       for (const d of state.defects) {
         const s = statusOf(d);
         t.all++;
         t[s]++;
         if ((s === 'open' || s === 'reopened') && !d.triage.assignee) t.unassigned++;
+        // Standing, and found by a monitor rather than a run.
+        if ((s === 'open' || s === 'reopened') && d.kind === 'monitor') t.monitors++;
       }
       return t;
     },

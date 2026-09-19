@@ -460,7 +460,9 @@ Around the loop:
 - `defects.js`: `DEF-YYMM-NNN`. Nobody files one: every run is folded in, a failure joins the
   defect it has been before (the same sentence, about the same step, on the same site) or is
   filed; a pass closes; a return reopens under the same number. People assign, overrule severity,
-  or park one as known or won't-fix.
+  or park one as known or won't-fix. A monitoring incident is filed the same way as it opens
+  (`incident()`: the monitor and the failed checks are its identity, the incident's checks, verdict
+  and clips its evidence) and closed as it resolves, so the Defects page is one list for both.
 - `sessions.js`: a saved sign-in is Playwright `storageState`, one per organisation, loaded only
   for origins the organisation still allows, values never sent to a viewer. `devices.js`: the
   viewport, pixel ratio, touch and user-agent applied live over CDP, with the screencast restarted
@@ -593,7 +595,10 @@ flowchart LR
    insists a new state is **confirmed** by a second report that agrees or a fresh measurement half
    a second later. That is what stops an animation frame becoming an alert. A freshly armed
    monitor gives a late element six seconds before "missing" is believed.
-5. **Incidents** carry the evidence: before and after clips (`monitor-shots/`, served at
+5. **Incidents** are filed as defects the moment they open (`cfg.defects` → `defects.js`
+   `incident()`), under the same `DEF-YYMM-NNN` numbers as a failed run's; the incident, its
+   notification and its log line carry the number, and the defect closes as the incident resolves.
+   They carry the evidence: before and after clips (`monitor-shots/`, served at
    `GET /api/monitors/shots/:name`), the metric diff, the failed checks, the before and after
    excerpts, and a verdict: the mock's at once, Claude's later (`resolver.judge`, both clips and
    both excerpts, one question per monitor per minute, from the daily budget). A change on a
@@ -801,14 +806,17 @@ midnight; `GC_MONITOR_AI_MAX_PER_DAY` and `GC_CHAT_AI_MAX_PER_DAY`, 200 by defau
 | `stores/live.js` | the one WebSocket: mints a ticket, reconnects with backoff, hands frames to the console's canvas (keeping the last one so an idle page is never a black canvas), and folds every event into state: steps, log, targets, origins, monitors, incidents, the lock, the chat's events |
 | `stores/session.js` | who you are: the HttpOnly session cookie to Django, and the executor token held in memory and renewed with a minute to spare, sent as a Bearer header and never in a URL |
 | `stores/suites.js`, `stores/chat.js`, `stores/ui.js` | suites cached and refreshed after every write; the transcript cache and the reply being written; how the shell is arranged, per viewer |
-| `monitoring.js`, `lang/vocabulary.js`, `icons/`, `webauthn.js`, `composables/reauth.js` | the monitoring chips and pills; the checked copy of the language; PNG icons by name with line-art fallbacks; passkeys; step-up sign-in |
+| `monitoring.js`, `defects.js`, `lang/vocabulary.js`, `icons/`, `webauthn.js`, `composables/reauth.js` | the monitoring chips and pills; how a defect reads on a row and in its drawer (severity as shape and word, filters, search, sort, the tiles); the checked copy of the language; PNG icons by name with line-art fallbacks; passkeys; step-up sign-in |
 
 Views by area: `LandingView`, `DashboardView`, `SuitesView`, `OnboardView`, `SuiteView` with
-`SuiteOverview`, `SuitePages`, `SuiteCases`, `SuiteRuns`; `DefectsView`; `ConsoleView` (the
+`SuiteOverview`, `SuitePages`, `SuiteCases`, `SuiteRuns`; `DefectsView` with `DefectDrawer` (the
+list, and one defect's evidence, activity and triage at `/defects/:id`); `ConsoleView` (the
 canvas, the address bar, the script box, teach mode); `MonitoringView`; `ChatView`;
 `SettingsView`, `OrganizationView`; and the account flows, `LoginView`, `MfaChallengeView`,
 `SignupView`, `VerifyView`, `ForgotPasswordView`, `ResetPasswordView`, `InviteView`,
 `SecurityView` with password, email, MFA and sessions.
+The account flows (router `meta.open`) are always light: `public/theme-boot.js` decides it before
+the first paint and `App.vue` keeps it so, whatever theme the viewer chose for the app behind them.
 
 In development `npm run dev` serves it from Vite and proxies `/api` and `/ws` to a runner on
 `:3000` (`GC_API` moves it). Built, `dist/` is a directory the runner is pointed at and serves

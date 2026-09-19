@@ -82,6 +82,7 @@ export function shape(event, d = {}) {
       lines.push(`Rule: ${cut(d.ruleText, 160)}`);
       if (d.severity) lines.push(`Severity: ${d.severity}`);
       if (d.page) lines.push(`Page: ${d.page}`);
+      if (d.defect) lines.push(`Defect ${d.defect}`);
       if (d.id) lines.push(`Incident ${d.id}`);
       return {
         title: `${resolved ? 'Resolved' : 'Incident'}: ${cut(d.label ?? 'a monitored element', 80)}`,

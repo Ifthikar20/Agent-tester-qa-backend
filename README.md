@@ -848,6 +848,33 @@ run, the runner:
 Each lands in the defect's activity as ghostclick's, and in the console log as it
 happens (`DEF-2609-007 filed: …`). The reporter is always the application.
 
+**A monitor's incident is a defect too.** A monitored element — or the whole
+page — that breaks its rule and is confirmed (the monitoring section below) is
+filed here as the incident opens, under the same numbers as a failed run, with
+the monitor and the checks that failed as its identity and the incident's
+evidence as its own: the failed checks, the verdict's word, the clips before
+and after. It closes as the incident resolves — on its own when the page
+recovers, by a person accepting the new state (the activity says who), or by
+Claude judging the change fine — reopens under the same number when the same
+rule breaks the same way again, and closes when its monitor is deleted. It has
+no cases, so a passing run never closes it. The incident's notification and
+its card carry the number, and the Defects page is one list for what is
+broken, whichever way the runner found out.
+
+**The Defects page** is that list, drawn the way a good issue tracker draws
+one: the numbers first (open, needing attention, from monitors, closed this
+week), a search and one-press filters — open, parked, closed; runs or
+monitors; each severity — with the count behind each, and a dense row per
+defect: the severity as a shape and a word before a colour, the number, the
+sentence, where (the suites and cases, or the monitor and its page), the
+source, the status, how often, when last, who has it. A row opens a drawer
+beside the list with the whole story — the evidence, the runs that hit it or
+the clips, the activity, and the triage for an owner or admin — and the
+drawer has an address, `/defects/DEF-2609-007`, so a number in a chat reply, a
+run's row or a notification opens straight onto it. The list follows the
+runner over the socket (`defects.changed`): a run or an incident that files,
+closes or reopens one redraws it.
+
 **Severity is worked out, and a person can overrule it.** Critical when the case
 could not get past its first step, or three or more cases went down with it;
 major when two did, or when it came back after being fixed; minor otherwise.
@@ -1079,6 +1106,13 @@ check:monitoring` walks it: the ticker learned, a swapped class ignored, the
 reworded hero caught by the words rule, a new table row caught by the layout
 rule with the cells named and the sections below it moved down.
 
+An incident is also a defect. The moment one opens it is filed under a
+`DEF-YYMM-NNN` number like a failed run's (the Defects section), with the
+failed checks and both clips as its evidence; the incident card, the log and
+the notification carry the number, and the defect closes when the incident
+resolves. The Defects page is where a person triages it — assigns it, grades
+it, parks it — beside everything the runs found.
+
 Two things worth knowing about the security model. A monitor's selector is data
 handed to `querySelector` inside a script the RUNNER installs; the flow
 language still has no evaluate and no selector, and the page never gets a way
@@ -1116,7 +1150,11 @@ Three smaller things moved with this. Light, dark or the device's theme is a
 setting, so it lives on *Origins & vault → Appearance* rather than in the
 sidebar; the sidebar's collapse control is at the top, where a hand goes
 looking for it, and Sign out is at the foot; and Run history's suite filter sits
-with the tables it narrows instead of in the top bar.
+with the tables it narrows instead of in the top bar. The pages a person sees
+before they are signed in — sign in, sign up, the code, the reset, an
+invitation — are always light, whatever theme was chosen for the app: they are
+drawn once, in daylight, and `public/theme-boot.js` decides that before the
+first paint so a dark-mode browser never flashes them dark first.
 
 ## Chat: ask the runner what it knows
 

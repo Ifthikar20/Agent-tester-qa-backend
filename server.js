@@ -1978,7 +1978,7 @@ app.get('/api/incidents', (req, res) => {
 app.post('/api/incidents/:id/resolve', async (req, res) => {
   try {
     const engine = monitorsOf(req);
-    const inc = await engine.resolve(req.params.id, 'manual');
+    const inc = await engine.resolve(req.params.id, 'manual', req.user ? { sub: req.user.sub ?? null, email: req.user.email ?? null } : null);
     const m = engine.monitors.get(inc.monitorId);
     sendOk(res, { incident: inc, monitor: m ? engine.publicMonitor(m) : null });
   } catch (err) { fail(res, err); }
@@ -2893,6 +2893,19 @@ notify.configure({
 monitoring.configure({
   emitTo,
   notify: (org, event, data) => { notify.send(org, event, data); },
+  // An incident is a defect too (defects.js incident): filed as it opens,
+  // closed as it resolves, under the same numbers as a failed run's — and
+  // said in the log and on the sockets the way a run's filing is. The
+  // incident's own notification carries the number, so none is sent here.
+  defects: (org, event, data) => {
+    const space = tenancy.workspace(org);
+    let suiteName = null;
+    if (data.monitor?.suiteId) { try { suiteName = space.suites.get(String(data.monitor.suiteId))?.name ?? null; } catch { suiteName = null; } }
+    const { id, changes } = space.defects.incident(event, { ...data, suiteName });
+    for (const ch of changes) emitTo(org, { t: 'log', level: ch.kind === 'closed' ? 'info' : 'warn', msg: `${ch.id} ${ch.kind}: ${ch.title}` });
+    if (changes.length) emitTo(org, { t: 'defects.changed', changes });
+    return id;
+  },
   log: console,
   llm: { mode: MONITOR_LLM.mode, model: MONITOR_LLM.mode === 'claude' ? MONITOR_MODEL : null, key: { have: Boolean(MONITOR_KEY.key), from: MONITOR_KEY.source } },
   resolver: monitorResolver,
@@ -3091,11 +3104,14 @@ async function run(plan, meta = {}) {
     // below, failing at it must not cost the run its verdict.
     let defect = null;
     try {
-      for (const c of space.defects.sync(space.history.list())) {
+      const changes = space.defects.sync(space.history.list());
+      for (const c of changes) {
         say({ t: 'log', level: c.kind === 'closed' ? 'info' : 'warn', msg: `${c.id} ${c.kind}: ${c.title}` });
         // A defect filed or reopened is told (notify.js): queued, never waited for.
         if (c.kind === 'filed' || c.kind === 'reopened') notify.send(space.org, 'defect', { kind: c.kind, id: c.id, title: c.title, suite: plan.suite });
       }
+      // And the Defects page, open in a tab somewhere, reloads its list.
+      if (changes.length) emitTo(space.org, { t: 'defects.changed', changes });
       defect = space.defects.idFor(entry);
     } catch (err) {
       say({ t: 'log', level: 'error', msg: `could not file the defect: ${err.message}` });

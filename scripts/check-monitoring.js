@@ -272,6 +272,11 @@ let incident = null;
   if (await v.until((m) => m.t === 'monitor.changed' && m.monitor.id === hero.id && m.monitor.state === 'violated', 5000, from)) ok('the monitor is violated'); else bad('the monitor is violated');
   if (await v.until((m) => m.t === 'monitor.tick' && m.monitorId === hero.id && m.ok === false, 5000, from)) ok('a tick said ok:false'); else bad('a tick said ok:false');
   if (await v.until((m) => m.t === 'log' && /incident: check-hero/.test(m.msg), 5000, from)) ok('and the log said so'); else bad('and the log said so');
+  // An incident is a defect too (defects.js): filed under a number as it opens, with the monitor and the incident's evidence.
+  if (/^DEF-\d{4}-\d{3,}$/.test(incident.defect ?? '')) ok('the incident names the defect it was filed as', incident.defect); else bad('the incident names the defect it was filed as', JSON.stringify(incident.defect));
+  const filed = (await api('GET', '/api/defects')).json?.defects.find((d) => d.id === incident.defect);
+  if (filed && filed.kind === 'monitor' && filed.status === 'open' && filed.monitor?.id === hero.id && filed.monitor.incidentId === incident.id && filed.evidence?.after === incident.after?.screenshot && filed.evidence.violations[0]?.metric === 'fontSize') ok('and the Defects page lists it, from the monitor, with the evidence', `${filed.id} · ${filed.severity} · ${filed.title}`); else bad('and the Defects page lists it, from the monitor, with the evidence', String(JSON.stringify(filed)).slice(0, 200));
+  if (await v.until((m) => m.t === 'defects.changed' && m.changes.some((c) => c.kind === 'filed' && c.id === incident.defect), 5000, from)) ok('and the sockets heard the filing'); else bad('and the sockets heard the filing');
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +291,8 @@ section('4 · and recovery closes it');
   if (list.json?.incidents.some((i) => i.id === incident.id)) ok('it is listed as resolved'); else bad('it is listed as resolved');
   const open_ = await api('GET', '/api/incidents?status=open');
   if (!open_.json?.incidents.some((i) => i.id === incident.id)) ok('and not as open'); else bad('and not as open');
+  const closedDefect = (await api('GET', `/api/defects/${incident.defect}`)).json?.defect;
+  if (closedDefect?.status === 'closed' && /recovered on its own/.test(closedDefect.activity.at(-1)?.text ?? '')) ok('and its defect closed with it', closedDefect.activity.at(-1).text); else bad('and its defect closed with it', JSON.stringify(closedDefect && { status: closedDefect.status, last: closedDefect.activity.at(-1) }));
 }
 
 // ---------------------------------------------------------------------------

@@ -80,6 +80,12 @@ let cfg = {
   judgeIntervalMs: JUDGE_MIN_INTERVAL_MS,
   /** Somewhere to tell (notify.js send): an incident opening or resolving goes there too. Null tells nobody. */
   notify: null,
+  /**
+   * The defect registry (defects.js incident): an incident is filed as a
+   * defect when it opens and closed when it resolves. (org, event, { incident,
+   * monitor, by }) → the defect's id, or null. Null files nothing.
+   */
+  defects: null,
 };
 /**
  * Given once by server.js: how to reach an organisation's sockets, which mind
@@ -248,6 +254,24 @@ class MonitorEngine {
   emit(ev) { cfg.emitTo(this.org, ev); }
   say(level, msg) { this.emit({ t: 'log', level, msg }); }
   live() { return this.agent && this.agent.alive() ? this.agent : null; }
+  /**
+   * The incident, into the defect registry (cfg.defects) — filed as it opens,
+   * rewritten as it changes, closed as it resolves, and every open one of a
+   * monitor closed when the monitor goes. The id comes back onto the incident
+   * so a card and a notification can name the number. Failing at it must not
+   * cost the incident: said in the log, and the incident stands.
+   */
+  fileDefect(event, inc, m, by = null) {
+    if (!cfg.defects) return inc?.defect ?? null;
+    try {
+      const id = cfg.defects(this.org, event, { incident: inc, monitor: m, by }) ?? null;
+      if (inc && id) inc.defect = id;
+      return id;
+    } catch (err) {
+      cfg.log.error(`  monitoring: could not file the defect: ${err.message}`);
+      return inc?.defect ?? null;
+    }
+  }
 
   // ---- listings ------------------------------------------------------------------------
   status() {
@@ -425,6 +449,8 @@ class MonitorEngine {
   async remove(id) {
     const m = this.get(id);
     clearRuntime(this.rt.get(id));
+    // Its open defects close with it, saying why (defects.js): a rule nobody watches any more is not a standing failure.
+    this.fileDefect('removed', null, m);
     // Its incidents go with it, clips included. They were evidence about a
     // rule nobody watches any more, and a page that reports on what is set
     // should not fill up with the history of what is not.
@@ -588,11 +614,15 @@ class MonitorEngine {
     this.incidents.set(inc.id, inc);
     m.openIncidentId = inc.id;
     m.stats.incidents++;
+    // A defect, under the same numbers as a failed run's (defects.js), before
+    // anyone is told — so the event and the notification carry its number.
+    inc.defect = null;
+    this.fileDefect('opened', inc, m);
     this.prune();
     this.persist();
     this.emit({ t: 'incident.opened', incident: inc });
     const headline = (inc.violations[0] && inc.violations[0].message) || (m.spec?.kind === 'page' ? 'The page changed' : 'The element changed');
-    try { cfg.notify?.(this.org, 'incident', { id: inc.id, label: m.label, ruleText: m.ruleText, headline, severity: inc.verdict?.severity ?? null, page: m.url ?? null, url: m.url ?? null }); }
+    try { cfg.notify?.(this.org, 'incident', { id: inc.id, label: m.label, ruleText: m.ruleText, headline, severity: inc.verdict?.severity ?? null, page: m.url ?? null, url: m.url ?? null, defect: inc.defect ?? null }); }
     catch (err) { cfg.log.error(`  monitoring: could not notify: ${err.message}`); }
     // A rule the element failed from the start — "must not exceed 10px" on a
     // 16px paragraph — is a rule to rewrite, not a change to chase; the
@@ -619,24 +649,27 @@ class MonitorEngine {
       if (shot) { afterPng = shot.png; this.deleteShot(inc.after.screenshot); inc.after.screenshot = this.saveShot(`${inc.id}-after-${inc.updatedAt}`, shot.png); inc.after.screenshotKind = shot.kind; }
     }
     if (!inc.verdict || inc.verdict.source === 'mock') inc.verdict = judgeMock({ label: m.label, selector: m.selector, ruleText: m.ruleText, violations: inc.violations, diff: inc.diff, judgment: !!inc.judgment });
+    if (prevIds !== nextIds) this.fileDefect('updated', inc, m);
     this.emit({ t: 'incident.updated', incident: inc });
     // A different failure inside the same incident is a new question.
     if (prevIds !== nextIds) this.scheduleJudge(m, inc, afterPng, excerpt);
   }
   /**
    * Close an incident. `auto` is recovery; `manual` is "accept the current
-   * state", and `judge` is Claude saying the change was fine: for both, the
+   * state" (`who` says by whom), and `judge` is Claude saying the change was fine: for both, the
    * element as it is now becomes the baseline — relative rules and judgment
    * proxies take it as their new normal — and absolute rules that still fail
    * put the monitor into `acknowledged`, which stays quiet until the element
    * changes again.
    */
-  async resolve(incId, by) {
+  async resolve(incId, by, who = null) {
     const inc = this.incident(incId);
     const m = this.monitors.get(inc.monitorId);
     if (inc.status !== 'resolved') {
       inc.status = 'resolved'; inc.resolvedAt = now(); inc.resolvedBy = by;
       if (m && m.openIncidentId === inc.id) m.openIncidentId = null;
+      // Its defect closes with it; `who` is the person behind a manual resolve, for the activity.
+      this.fileDefect('resolved', inc, m ?? null, who ? { ...who, how: by } : { how: by });
       if ((by === 'manual' || by === 'judge') && m) {
         const rt = this.rt.get(m.id);
         if (rt) { rt.candidate = null; clearTimeout(rt.confirm); rt.confirm = null; clearTimeout(rt.debounce); rt.debounce = null; rt.pending = null; }
@@ -658,7 +691,7 @@ class MonitorEngine {
       }
       this.persist();
       this.emit({ t: 'incident.resolved', incident: inc });
-      try { cfg.notify?.(this.org, 'incident', { id: inc.id, status: 'resolved', label: inc.monitorLabel, ruleText: inc.ruleText, by: by ?? null, page: m?.url ?? null, url: m?.url ?? null }); }
+      try { cfg.notify?.(this.org, 'incident', { id: inc.id, status: 'resolved', label: inc.monitorLabel, ruleText: inc.ruleText, by: by ?? null, page: m?.url ?? null, url: m?.url ?? null, defect: inc.defect ?? null }); }
       catch (err) { cfg.log.error(`  monitoring: could not notify: ${err.message}`); }
     }
     return inc;
