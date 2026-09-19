@@ -37,6 +37,7 @@ import { Recorder } from './recorder.js';
 import { NavigationLog } from './navlog.js';
 import * as monitoring from './monitor.js';
 import * as schedules from './schedules.js';
+import { BrowserPool, PoolFull } from './pool.js';
 import { MonitorAgent } from './monitor-page.js';
 // Aliased: resolver.js (automatic fixes) exports the same two names, and each
 // layer keeps its own copy of the key lookup and its own client.
@@ -277,6 +278,8 @@ let recordedSteps = [];   // the steps the revision was counted on, to tell a ne
 let running = false;
 /** What runs with nobody at the console (schedules.js), up once the browser is. */
 let scheduler = null;
+/** Pooled contexts for that work (pool.js), one per organisation; made with the browser. */
+let pool = null;
 /**
  * The rest of the driven session, and why these are `let` rather than `const`.
  *
@@ -599,7 +602,7 @@ app.use('/app', (req, res, next) => {
  */
 app.get('/healthz', (_req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.status(browserReady ? 200 : 503).json({ ok: browserReady, browser: browserReady, busy: running });
+  res.status(browserReady ? 200 : 503).json({ ok: browserReady, browser: browserReady, busy: running, pool: pool ? pool.stats() : null });
 });
 
 /**
@@ -1571,15 +1574,22 @@ app.post('/api/suites/:id/run', async (req, res) => {
  * refused before case one, not discovered halfway. And the plan before the
  * lock: a run the plan refuses never takes the browser.
  */
-async function runCasesOf({ suite, wanted, pace = PACE, space, ent, switches, scheduled = false }) {
+async function runCasesOf({ suite, wanted, pace = PACE, space, ent, switches, scheduled = false, session = null }) {
   if (!wanted.length) throw new Error('This suite has no cases to run');
   ent.check('runs.per_day', space.history.today(), wanted.length);
-  await take(space.org);
-  if (running) throw Object.assign(new Error('A run is in progress'), { status: 409 });
+  // On a pooled session (a schedule's) the console's lock is not taken: the
+  // suite runs on the organisation's own page, beside whatever the console does.
+  if (session) {
+    if (session.running) throw Object.assign(new Error('A run is in progress'), { status: 409 });
+  } else {
+    await take(space.org);
+    if (running) throw Object.assign(new Error('A run is in progress'), { status: 409 });
+  }
+  const say = session ? session.emit : emit;
 
   const checkFlow = checkFlowFor(space);
 
-  emit({ t: 'suite.start', suite: suite.name, cases: wanted.length });
+  say({ t: 'suite.start', suite: suite.name, cases: wanted.length });
   const outcomes = [];
   for (const c of wanted) {
     let plan;
@@ -1588,20 +1598,20 @@ async function runCasesOf({ suite, wanted, pace = PACE, space, ent, switches, sc
     } catch (err) {
       // An unparseable case is a failed case, not a dead suite.
       outcomes.push({ case: c.id, name: c.name, ok: false, error: err.message });
-      emit({ t: 'log', level: 'error', msg: `${c.name}: ${err.message}` });
+      say({ t: 'log', level: 'error', msg: `${c.name}: ${err.message}` });
       continue;
     }
     plan.suite = `${suite.name} · ${c.name}`;
-    emit({ t: 'diagram', kind: 'plan', mermaid: toMermaid(plan) });
+    say({ t: 'diagram', kind: 'plan', mermaid: toMermaid(plan) });
     // Express 4 does not catch a rejection from an async handler, so an
     // unexpected throw here would take the process with it rather than failing
     // one case. A suite run survives a bad case.
-    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name, pace, space, ent, switches, scheduled })
+    const r = await run(plan, { suiteId: suite.id, caseId: c.id, caseName: c.name, pace, space, ent, switches, scheduled, session })
       .catch((err) => ({ ok: false, passed: 0, total: 0, error: err.message }));
     outcomes.push({ case: c.id, name: c.name, ...r });
   }
   const passed = outcomes.filter((o) => o.ok).length;
-  emit({ t: 'suite.end', suite: suite.name, passed, total: outcomes.length });
+  say({ t: 'suite.end', suite: suite.name, passed, total: outcomes.length });
   return { suite: suite.id, passed, total: outcomes.length, outcomes };
 }
 
@@ -1620,40 +1630,38 @@ async function fireSchedule(org, s) {
   const ent = tenancy.entitlements(claims);
   const sw = switchesFor(claims);
   try { sw.demand('runner.schedules'); } catch (err) { return { ok: false, error: err.message }; }
-  const held = () => running || (recorder?.recording ?? false);
-  if (held()) throw new schedules.Deferred('a run or a recording holds the browser');
-  const lock = async () => {
-    try { await take(org); }
-    catch (err) { if (err instanceof tenancy.RunnerBusy) throw new schedules.Deferred(err.message); throw err; }
-  };
+  // The organisation's own pooled page (backgroundSession): a schedule never
+  // takes the console's, so it runs beside whatever a person is doing there.
+  const session = await backgroundSession(org);
+  if (session.running) throw new schedules.Deferred("this organisation's scheduled work is still running");
   if (s.kind === 'suite') {
     const suite = space.suites.get(s.suiteId);
     if (!suite.cases.length) return { ok: false, error: 'the suite has no cases to run' };
     const origin = originOf(suite);
     if (!space.origins.has(origin)) return { ok: false, error: `${origin} is not allowed — allow it under Origins & vault` };
-    await lock();
-    const r = await runCasesOf({ suite, wanted: suite.cases, space, ent, switches: sw, scheduled: true });
+    const r = await runCasesOf({ suite, wanted: suite.cases, space, ent, switches: sw, scheduled: true, session });
     return { ok: r.passed === r.total, passed: r.passed, total: r.total };
   }
   const urls = [...new Set(space.monitors.list().filter((m) => m.state !== 'paused' && m.url).map((m) => m.url))];
   if (!urls.length) return { ok: true, pages: 0, of: 0, note: 'nothing to sweep: no monitors' };
-  await lock();
   let opened = 0;
   const errors = [];
-  for (const url of urls) {
-    if (held()) { errors.push('stopped: the browser was taken'); break; }
-    let origin;
-    try { origin = new URL(url).origin; } catch { errors.push(`${url}: not an address`); continue; }
-    if (!space.origins.has(origin)) { errors.push(`${url}: ${origin} is not allowed`); continue; }
-    try {
-      await OPS.goto(page, { url }, { cursor, emit, nav, onNavigate: publishTargets, origins: space.origins });
-      opened++;
-    } catch (err) { errors.push(`${url}: ${String(err.message).split('\n')[0]}`); continue; }
-    // The document arms its monitors on load; each gets this long to be measured (monitor.js ARM_GRACE_MS).
-    await sleep(monitoring.ARM_GRACE_MS + 1500);
-    driver.touch(org);
-  }
-  emit({ t: 'log', level: 'info', msg: `swept ${opened} of ${urls.length} monitored page${urls.length === 1 ? '' : 's'}` });
+  session.running = true;
+  try {
+    for (const url of urls) {
+      let origin;
+      try { origin = new URL(url).origin; } catch { errors.push(`${url}: not an address`); continue; }
+      if (!space.origins.has(origin)) { errors.push(`${url}: ${origin} is not allowed`); continue; }
+      try {
+        await OPS.goto(session.page, { url }, { cursor: session.cursor, emit: session.emit, nav: session.nav, origins: space.origins });
+        opened++;
+      } catch (err) { errors.push(`${url}: ${String(err.message).split('\n')[0]}`); continue; }
+      // The document arms its monitors on load; each gets this long to be measured (monitor.js ARM_GRACE_MS).
+      await sleep(monitoring.ARM_GRACE_MS + 1500);
+      pool?.touch(org);
+    }
+  } finally { session.running = false; }
+  session.emit({ t: 'log', level: 'info', msg: `swept ${opened} of ${urls.length} monitored page${urls.length === 1 ? '' : 's'}` });
   const open = space.monitors.listIncidents('open').length;
   return { ok: errors.length === 0, pages: opened, of: urls.length, openIncidents: open, ...(errors.length ? { error: errors.slice(0, 3).join('; ') } : {}) };
 }
@@ -1927,7 +1935,7 @@ app.post('/api/schedules/:id/run', (req, res) => {
   let s;
   try { s = space.schedules.get(req.params.id); } catch (err) { return fail(res, err, 404); }
   if (!scheduler) return fail(res, new Error('the scheduler is not up yet'), 503);
-  if (scheduler.firing || running || (recorder?.recording ?? false)) return fail(res, new Error('the runner is busy — try again when the run has ended'), 409);
+  if (scheduler.firing) return fail(res, new Error('a schedule is already firing — try again when it has ended'), 409);
   // A fire may take minutes: answered now, reported on the socket (schedule.fired) when it ends.
   scheduler.runNow(space.org, s.id).catch((err) => emitTo(space.org, { t: 'log', level: 'error', msg: `schedule "${s.name}": ${err.message}` }));
   res.status(202).json({ ok: true, firing: true, id: s.id });
@@ -2261,8 +2269,63 @@ const browser = CDP_URL
 // favour of PoolFull when the box is at capacity. GC_POOL_MAX sizes it; the
 // attach path (a browser IS one identity) stays capacity 1 and scales by
 // replicas instead (docker/docker-compose.pool.yml). scripts/check-pool.js
-// proves the pool on a real browser. Left as a seam, not switched on here,
-// because the screencast rewrite is a change to make deliberately, not blind.
+// proves the pool on a real browser. The console's page stays this singleton,
+// screencast and all; what is wired to the pool is the work nobody watches:
+// a schedule's suite run or sweep leases the organisation's own context
+// (backgroundSession below), so it runs beside a person driving, never in
+// their place. Giving every driver a lease of their own is the step after.
+if (!CDP_URL) {
+  pool = new BrowserPool(browser, { max: Math.max(1, Number(process.env.GC_POOL_MAX) || 2), idleMs: 5 * 60_000, viewport: VIEW });
+}
+
+/**
+ * A pooled session for an organisation's scheduled work: its own context and
+ * page, wired with what a run needs — the reach rule, a cursor, a navigation
+ * log, and a monitoring agent reporting into the organisation's engine — and
+ * nothing a person needs: no screencast, no recorder, no target panel. Made
+ * once per lease and kept on it; the lease closes itself after five idle
+ * minutes (pool.js) and the session goes with it. Its events reach the
+ * organisation's sockets marked `background`, so the console does not draw
+ * them as its own run. A full pool is a Deferred: the schedule waits.
+ */
+async function backgroundSession(org) {
+  if (!pool) throw new schedules.Deferred('scheduled work needs the launched browser, not an attached one');
+  const space = tenancy.workspace(org);
+  let lease;
+  try { lease = await pool.acquire(org, { storageState: space.session.state(space.origins.list()) ?? undefined }); }
+  catch (err) { if (err instanceof PoolFull) throw new schedules.Deferred(err.message); throw err; }
+  if (lease.session) { pool.touch(org); return lease.session; }
+  const say = (ev) => emitTo(org, { ...ev, background: true });
+  const { page: pg, context } = lease;
+  // The same rule the console's page lives under (reach.js): a page may
+  // navigate where the allowlist says, and fetch only what reach permits.
+  if (BLOCK_PRIVATE) {
+    await context.route('**/*', async (route) => {
+      const url = route.request().url();
+      const why = await blocked(url);
+      if (!why) return route.continue();
+      say({ t: 'log', level: 'error', msg: `blocked ${url} — ${why}` });
+      return route.abort('blockedbyclient');
+    });
+  }
+  const bgCdp = await context.newCDPSession(pg);
+  // A cursor that draws nowhere: the pointer events are the console's canvas's, and this page has none.
+  const bgCursor = new VirtualCursor(bgCdp, () => {});
+  const bgNav = new NavigationLog(pg, { onNavigation: (n) => say({ t: 'nav', ...n }) });
+  bgNav.attach();
+  const engine = space.monitors;
+  const bgAgent = new MonitorAgent(pg, {
+    owner: org,
+    listFor: (href) => engine.monitorsForPage(href),
+    onReport: (r) => engine.ingest(r),
+    onVisit: (href, list) => { if (list.length) engine.visited(href, list.map((m) => m.id)); },
+    onError: (msg) => say({ t: 'log', level: 'error', msg }),
+  });
+  await bgAgent.attach();
+  const session = { org, page: pg, cursor: bgCursor, nav: bgNav, agent: bgAgent, emit: say, running: false, background: true };
+  lease.session = session;
+  return session;
+}
 
 /**
  * Broadcast is per organisation (docs/AUTH.md §9.6 [websocket-3]).
@@ -2873,7 +2936,12 @@ const vaultFor = (space, ent) => ({
 async function run(plan, meta = {}) {
   const space = meta.space ?? local;
   const ent = meta.ent ?? tenancy.entitlements(null);
-  if (running) {
+  // A pooled session (backgroundSession) runs the plan on its own page, so a
+  // schedule never takes the console's; without one, this is the console's run.
+  const bg = meta.session ?? null;
+  const pg = bg ? bg.page : page;
+  const say = bg ? bg.emit : emit;
+  if (bg ? bg.running : running) {
     // An error, not a warning. A refused run does nothing visible, so if this
     // is quiet the only symptom is a button that appears not to work.
     emitTo(space.org, { t: 'log', level: 'error', msg: 'A run is already in progress — wait for it to finish' });
@@ -2882,7 +2950,9 @@ async function run(plan, meta = {}) {
   // A plan with no `goto` of its own is only allowed to run on a page this
   // organisation already holds — checked BEFORE the lock, so a refused plan
   // does not take the browser away from whoever has it.
-  const stray = unanchored(plan, space);
+  const stray = bg
+    ? (plan.steps[0]?.op === 'goto' ? null : { error: 'a scheduled run opens a page of its own — it starts with a goto' })
+    : unanchored(plan, space);
   if (stray) {
     emitTo(space.org, { t: 'log', level: 'error', msg: stray.error });
     if (stray.origin) emitTo(space.org, { t: 'needs.origin', origin: stray.origin, url: stray.url });
@@ -2896,17 +2966,17 @@ async function run(plan, meta = {}) {
   const heal = healFor(plan, meta, space);
   try {
     ent.check('runs.per_day', space.history.today());
-    await take(space.org);
+    if (!bg) await take(space.org);
   } catch (err) {
     emitTo(space.org, { t: 'refused', of: 'run', ...refusal(err) });
     emitTo(space.org, { t: 'log', level: 'error', msg: err.message });
     return { ok: false, passed: 0, total: 0, error: err.message };
   }
-  running = true;
-  const wasRecording = recorder.recording;
-  recorder.recording = false;
+  if (bg) bg.running = true; else running = true;
+  const wasRecording = bg ? false : recorder.recording;
+  if (!bg) recorder.recording = false;
   // A run's clicks must reach the page: an active pick would swallow them.
-  if (monitorAgent?.picking) {
+  if (!bg && monitorAgent?.picking) {
     await monitorAgent.stopPicker().catch(() => null);
     if (monitorAgent.owner) emitTo(monitorAgent.owner, { t: 'monitor.pick', on: false });
   }
@@ -2915,12 +2985,12 @@ async function run(plan, meta = {}) {
   // A run can be told how much of itself to perform. Unset means this server's
   // default, so nothing that does not ask is affected.
   const ctx = {
-    cursor, emit, nav, onNavigate: publishTargets, pace: paceOf(meta.pace, PACE),
+    cursor: bg ? bg.cursor : cursor, emit: say, nav: bg ? bg.nav : nav, onNavigate: bg ? null : publishTargets, pace: paceOf(meta.pace, PACE),
     origins: space.origins, vault: vaultFor(space, ent),
     heal,
   };
   const attempt = Number(meta.attempt) > 1 ? { attempt: Number(meta.attempt) } : {};
-  emit({ t: 'run.start', total: plan.steps.length, suite: plan.suite, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName, ...attempt, ...(meta.scheduled ? { scheduled: true } : {}) });
+  say({ t: 'run.start', total: plan.steps.length, suite: plan.suite, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName, ...attempt, ...(meta.scheduled ? { scheduled: true } : {}) });
 
   // Everything from here to the finally must be able to throw without wedging
   // the executor. It used to clear the lock on the happy path only, so a
@@ -2930,36 +3000,36 @@ async function run(plan, meta = {}) {
   // what that looks like from the outside.
   try {
     for (const [i, step] of plan.steps.entries()) {
-      emit({ t: 'step.start', i, step });
+      say({ t: 'step.start', i, step });
       ctx.heal.step = i;
       ctx.heal.taken = [];
       ctx.heal.trace = [];
       const t0 = Date.now();
       try {
-        await OPS[step.op](page, step, ctx);
+        await OPS[step.op](pg, step, ctx);
         // The fixes this step needed, if any; each went out as step.heal first.
         const fixed = ctx.heal.taken.length ? { fixes: ctx.heal.taken } : {};
         // And how it was worked out, when anything had to be; each entry went out as step.trace first.
         const traced = ctx.heal.trace.length ? { trace: ctx.heal.trace } : {};
         results.push({ i, ok: true, ms: Date.now() - t0, ...fixed, ...traced });
-        emit({ t: 'step.pass', i, ms: Date.now() - t0, ...fixed, ...traced });
+        say({ t: 'step.pass', i, ms: Date.now() - t0, ...fixed, ...traced });
       } catch (err) {
         const ms = Date.now() - t0;
         // A step that fails on a page Turnstile guards has usually failed
         // because of it, and nothing in its own message could say so.
-        const error = turnstile.explain(err.message, page);
+        const error = turnstile.explain(err.message, pg);
         // Why, from the model, for a failure no fix may change (ops.js
         // explainFailure) — not for a plan refusal or a Turnstile page, whose
         // own words already say why. Asked before step.fail, so the verdict
         // carries it; `ms` is the step's own time, not the model's.
         const why = err instanceof tenancy.EntitlementError || error !== err.message
-          ? null : await explainFailure(page, step, ctx, err).catch(() => null);
+          ? null : await explainFailure(pg, step, ctx, err).catch(() => null);
         const traced = ctx.heal.trace.length ? { trace: ctx.heal.trace } : {};
         const explained = why ? { why } : {};
         results.push({ i, ok: false, ms, error, ...traced, ...explained });
-        emit({ t: 'step.fail', i, ms, error, ...traced, ...explained });
+        say({ t: 'step.fail', i, ms, error, ...traced, ...explained });
         // A step the plan refused is a plan refusal, not a broken page.
-        if (err instanceof tenancy.EntitlementError) emit({ t: 'refused', of: 'run', ...refusal(err) });
+        if (err instanceof tenancy.EntitlementError) say({ t: 'refused', of: 'run', ...refusal(err) });
         break;
       }
       await sleep(120);
@@ -2987,21 +3057,21 @@ async function run(plan, meta = {}) {
     let defect = null;
     try {
       for (const c of space.defects.sync(space.history.list())) {
-        emit({ t: 'log', level: c.kind === 'closed' ? 'info' : 'warn', msg: `${c.id} ${c.kind}: ${c.title}` });
+        say({ t: 'log', level: c.kind === 'closed' ? 'info' : 'warn', msg: `${c.id} ${c.kind}: ${c.title}` });
       }
       defect = space.defects.idFor(entry);
     } catch (err) {
-      emit({ t: 'log', level: 'error', msg: `could not file the defect: ${err.message}` });
+      say({ t: 'log', level: 'error', msg: `could not file the defect: ${err.message}` });
     }
     // Same function, same IR — with outcomes folded in, the plan diagram
     // becomes the run report. Drawing it is a nicety; failing to draw it must
     // not cost you the run's verdict.
     try {
-      emit({ t: 'diagram', kind: 'report', mermaid: toMermaid(plan, { results }) });
+      say({ t: 'diagram', kind: 'report', mermaid: toMermaid(plan, { results }) });
     } catch (err) {
-      emit({ t: 'log', level: 'error', msg: `could not draw the report: ${err.message}` });
+      say({ t: 'log', level: 'error', msg: `could not draw the report: ${err.message}` });
     }
-    await publishTargets();
+    if (!bg) await publishTargets();
     // The failing step and what it was doing, so a caller can say "stopped at
     // click 'Login'" without reading the history back (the chat does). The
     // history keeps the error's first line; `errorFull` is the whole of it —
@@ -3014,11 +3084,9 @@ async function run(plan, meta = {}) {
     // Clear the lock BEFORE announcing the end. run.end means "you may start
     // another run"; emitting it while still locked makes a caller that runs
     // back-to-back scripts hang on a silently refused second run.
-    running = false;
-    recorder.recording = wasRecording;
-    driver.touch(space.org);
-    armRelease();
-    emit({ t: 'run.end', ok: results.every((r) => r.ok) && results.length > 0, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName,
+    if (bg) bg.running = false;
+    else { running = false; recorder.recording = wasRecording; driver.touch(space.org); armRelease(); }
+    say({ t: 'run.end', ok: results.every((r) => r.ok) && results.length > 0, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName,
       fixed: results.reduce((n, r) => n + (r.fixes?.length ?? 0), 0), ...(Number(meta.attempt) > 1 ? { attempt: Number(meta.attempt) } : {}) });
   }
 }
@@ -3655,8 +3723,8 @@ process.on('unhandledRejection', (err) => {
 });
 
 // ---- schedules: what runs with nobody at the console (schedules.js) -------------------------
-scheduler = new schedules.Scheduler({ fire: fireSchedule, busy: () => running || (recorder?.recording ?? false), emit: emitTo, log: console }).start();
+scheduler = new schedules.Scheduler({ fire: fireSchedule, emit: emitTo, log: console }).start();
 console.log(`  schedules   ${scheduler.known.size ? [...scheduler.known].map((o) => `${o}: ${tenancy.workspace(o).schedules.list().length}`).join(', ') : 'none yet'}`);
 
-process.on('SIGINT', async () => { scheduler?.stop(); monitoring.flushAll(); await browser.close(); process.exit(0); });
-process.on('SIGTERM', async () => { scheduler?.stop(); monitoring.flushAll(); await browser.close(); process.exit(0); });
+process.on('SIGINT', async () => { scheduler?.stop(); monitoring.flushAll(); await pool?.drain().catch(() => {}); await browser.close(); process.exit(0); });
+process.on('SIGTERM', async () => { scheduler?.stop(); monitoring.flushAll(); await pool?.drain().catch(() => {}); await browser.close(); process.exit(0); });

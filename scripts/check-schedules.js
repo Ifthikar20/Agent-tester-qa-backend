@@ -213,8 +213,20 @@ try {
     const r = await api('POST', `/api/schedules/${scheduleId}/run`);
     assert.equal(r.status, 202, JSON.stringify(r.json));
     let s = null;
-    for (let i = 0; i < 200; i++) { s = (await api('GET', `/api/schedules?suite=${suiteId}`)).json.schedules[0]; if (s.lastOutcome) break; await sleep(300); }
+    // The run is on the organisation's own pooled page (backgroundSession):
+    // the console is never marked running by it, however often it is asked.
+    let consoleRunning = false;
+    for (let i = 0; i < 200; i++) {
+      const [sched, state] = await Promise.all([api('GET', `/api/schedules?suite=${suiteId}`), api('GET', '/api/state')]);
+      if (state.json?.running) consoleRunning = true;
+      s = sched.json.schedules[0];
+      if (s.lastOutcome) break;
+      await sleep(150);
+    }
     assert.ok(s?.lastOutcome, 'an outcome arrived');
+    assert.equal(consoleRunning, false, 'the console was marked running by a scheduled run');
+    const health = (await api('GET', '/healthz')).json;
+    assert.ok(health.pool && health.pool.active >= 1, `a pooled context is leased: ${JSON.stringify(health.pool)}`);
     assert.equal(s.lastOutcome.byHand, true);
     assert.equal(s.lastOutcome.ok, true, JSON.stringify(s.lastOutcome));
     assert.equal(s.fired, 1);
@@ -228,6 +240,26 @@ try {
     assert.equal(off.json.schedule.name, 'Paused mornings');
     const on = await api('PATCH', `/api/schedules/${scheduleId}`, { enabled: true, cron: '*/10 * * * *' });
     assert.equal(on.json.schedule.describe, 'every 10 minutes');
+  });
+  await check('a sweep opens a monitored page on the pooled session and the monitor is visited', async () => {
+    // A monitor on the demo page's heading, made over the API the way the monitoring check makes one.
+    const made = await api('POST', '/api/monitors', { selector: 'h1', label: 'check-schedules', ruleText: 'text must not change' });
+    if (made.status !== 200) return `skipped: a monitor could not be made here (${made.status} ${JSON.stringify(made.json).slice(0, 80)})`;
+    const monitorId = made.json.monitor.id;
+    try {
+      const r = await api('POST', '/api/schedules', { kind: 'sweep', cron: '0 * * * *', name: 'Sweep check' });
+      const id = r.json.schedule.id;
+      assert.equal((await api('POST', `/api/schedules/${id}/run`)).status, 202);
+      let s = null;
+      for (let i = 0; i < 300; i++) { s = (await api('GET', '/api/schedules')).json.schedules.find((x) => x.id === id); if (s.lastOutcome) break; await sleep(200); }
+      assert.ok(s?.lastOutcome, 'the sweep ended');
+      assert.equal(s.lastOutcome.pages, 1, JSON.stringify(s.lastOutcome));
+      assert.equal(s.lastOutcome.ok, true, JSON.stringify(s.lastOutcome));
+      const m = (await api('GET', '/api/monitors')).json.monitors.find((x) => x.id === monitorId);
+      assert.ok(m && m.stats && m.stats.visits >= 1, `the monitor was visited by the sweep: ${JSON.stringify(m?.stats)}`);
+      assert.equal((await api('DELETE', `/api/schedules/${id}`)).status, 200);
+      return `visits ${m.stats.visits}`;
+    } finally { await api('DELETE', `/api/monitors/${monitorId}`); }
   });
   await check('a sweep with nothing to sweep says so', async () => {
     const r = await api('POST', '/api/schedules', { kind: 'sweep', cron: '0 * * * *' });

@@ -140,9 +140,12 @@ Two overlays change the shape on purpose:
 
 The scale axes as they stand are replicas × contexts. `pool.js` (`BrowserPool`, `GC_POOL_MAX`) is
 the second axis, one isolated BrowserContext leased per organisation with idle eviction, proven on
-a real browser by `npm run check:pool` and **not yet wired into the socket path**: the seam is
-marked beside the `browser` singleton in `server.js`, and today one organisation drives at a time
-(§3).
+a real browser by `npm run check:pool` and wired in for the work nobody watches: a schedule's
+suite run or sweep leases the organisation's own context (`backgroundSession` in `server.js`;
+`GC_POOL_MAX` contexts, two by default, each with the reach rule, a cursor, a navigation log and
+a monitoring agent of its own), so it runs beside a person driving the console rather than in
+their place. The console's page is still the singleton, screencast and all, so one organisation
+drives it at a time (§3); giving every driver a lease of their own is the step after.
 
 ---
 
@@ -824,7 +827,7 @@ install with `--require-hashes`.
 
 - **One browser, one run lock, one driving organisation per process.** Two signed-in people share
   the browser; a login says who, not which runner. `pool.js` and the replica overlay are the two
-  axes that change this, and the first is not yet wired in (§2).
+  axes that change this; the first is wired in for scheduled work (§2) and not yet for the console.
 - **Monitoring watches the page that is open.** A monitor whose page is not on the browser is
   "not on this page", never "missing"; it re-arms when the page is opened again — and a sweep
   schedule (`schedules.js`) opens every monitored page on a cadence, so "again" no longer waits
