@@ -24,7 +24,7 @@
  * plan may resolve a value at all (`vault.enabled`) is decided by the caller
  * that holds the token, not here: this module knows organisations, not plans.
  */
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEMO as DEMO_MODE } from './mode.js';
 import { LOCAL, stateDir } from './org.js';
@@ -87,6 +87,52 @@ export function forOrg(org) {
         );
       }
       return vault.get(key);
+    },
+
+    /**
+     * Put a value in this organisation's own file, and hand back the names.
+     *
+     * A password the recorder refused to write down has to come from
+     * somewhere, and "stop the runner and set an environment variable" is not
+     * somewhere a person with a browser can reach. The value goes straight to
+     * .ghostclick/<org>/secrets.json, which is gitignored and 0600, and is
+     * never read back out to a viewer — `names()` is all anyone sees.
+     *
+     * TODO is refused by name: it is what the recorder writes when it dropped
+     * a password, and a vault key called TODO would make that placeholder look
+     * like a value somebody meant.
+     */
+    set(name, value) {
+      const key = String(name ?? '').replace(/^\$/, '').replace(/^secrets\./, '').trim().toUpperCase();
+      if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(key)) {
+        throw new Error(`"${name}" is not a key name — use letters, digits and underscores, starting with a letter, e.g. QA_PASS.`);
+      }
+      if (key === 'TODO') throw new Error('TODO is what the recorder writes when it dropped a password — give the value a name of its own, e.g. QA_PASS.');
+      const v = String(value ?? '');
+      if (!v) throw new Error(`No value for ${key}.`);
+      const file = join(stateDir(org), 'secrets.json');
+      let kept = {};
+      try { kept = JSON.parse(readFileSync(file, 'utf8')); } catch { /* no file is normal */ }
+      if (typeof kept !== 'object' || kept === null || Array.isArray(kept)) kept = {};
+      kept[key] = v;
+      mkdirSync(stateDir(org), { recursive: true });
+      writeFileSync(file, `${JSON.stringify(kept, null, 2)}\n`, { mode: 0o600 });
+      vault = load(org);
+      return names();
+    },
+
+    /** Take one out of this organisation's file. One set in the environment stays, and says so. */
+    remove(name) {
+      const key = String(name ?? '').replace(/^\$/, '').trim().toUpperCase();
+      const file = join(stateDir(org), 'secrets.json');
+      let kept = {};
+      try { kept = JSON.parse(readFileSync(file, 'utf8')); } catch { /* nothing to take out */ }
+      if (typeof kept === 'object' && kept !== null && !Array.isArray(kept) && key in kept) {
+        delete kept[key];
+        writeFileSync(file, `${JSON.stringify(kept, null, 2)}\n`, { mode: 0o600 });
+      }
+      vault = load(org);
+      return names();
     },
   };
   vaults.set(org, store);

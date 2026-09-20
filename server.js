@@ -3039,7 +3039,11 @@ async function run(plan, meta = {}) {
     heal,
   };
   const attempt = Number(meta.attempt) > 1 ? { attempt: Number(meta.attempt) } : {};
-  say({ t: 'run.start', total: plan.steps.length, suite: plan.suite, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName, ...attempt, ...(meta.scheduled ? { scheduled: true } : {}) });
+  // The steps ride along so the console can show every row's words from the
+  // start — a step that never runs because the run stopped before it is still
+  // a step. The entry fingerprint and the recorded evidence are left out: they
+  // are the bulky parts, and step.start carries the whole step anyway.
+  say({ t: 'run.start', total: plan.steps.length, steps: plan.steps.map(({ entry, at, via, ...s }) => s), suite: plan.suite, suiteId: meta.suiteId, caseId: meta.caseId, caseName: meta.caseName, ...attempt, ...(meta.scheduled ? { scheduled: true } : {}) });
 
   // Everything from here to the finally must be able to throw without wedging
   // the executor. It used to clear the lock on the happy path only, so a
@@ -3564,6 +3568,19 @@ wss.on('connection', (ws) => {
       // carries them, and neither does anyone else's socket [websocket-3].
       try { tenancy.requireManager(claims); } catch (err) { return refuse('secrets.reload', err); }
       tell({ t: 'secrets', secrets: space.vault.reload() });
+      return;
+    }
+    if (m.t === 'secrets.set' || m.t === 'secrets.remove') {
+      // A value arrives here and goes no further: into the organisation's own
+      // file, never into a log line, a reply or another socket. What comes
+      // back is the list of NAMES, which is all a viewer ever sees.
+      try { tenancy.requireManager(claims); } catch (err) { return refuse(m.t, err); }
+      try {
+        const secrets = m.t === 'secrets.set' ? space.vault.set(m.name, m.value) : space.vault.remove(m.name);
+        tell({ t: 'secrets', secrets });
+        emitTo(space.org, { t: 'log', level: 'info',
+          msg: `vault: $${String(m.name ?? '').replace(/^\$/, '').toUpperCase()} ${m.t === 'secrets.set' ? 'set' : 'removed'}` });
+      } catch (err) { return refuse(m.t, err); }
       return;
     }
 
