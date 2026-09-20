@@ -17,6 +17,16 @@ chrome.runtime.onInstalled.addListener(() =>
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {}));
 
 const pathOf = (u) => { try { const x = new URL(u); return `${x.pathname}${x.hash}`; } catch { return null; } };
+const hostOf = (u) => { try { const x = new URL(u); return /^https?:$/.test(x.protocol) ? x.host : null; } catch { return null; } };
+
+/** The path — or host + path when the click left the site (recorder.js arrivalOf, the same rule). */
+const arrivalOf = (href, prev) => {
+  const path = pathOf(href);
+  if (!path) return null;
+  const from = hostOf(prev), to = hostOf(href);
+  if (from && to && from !== to) return `${to}${path}`;
+  return path !== pathOf(prev) ? path : null;
+};
 
 /** A route change is an assertion — it is what makes a recording self-checking. */
 async function noteUrl(state, href) {
@@ -24,9 +34,9 @@ async function noteUrl(state, href) {
   const prev = state.lastUrl;
   state.lastUrl = href;
   if (!prev) return false;
-  const path = pathOf(href);
-  if (path && path !== pathOf(prev)) {
-    state.steps.push({ op: 'expect', assert: 'urlContains', value: path });
+  const value = arrivalOf(href, prev);
+  if (value) {
+    state.steps.push({ op: 'expect', assert: 'urlContains', value });
     return true;
   }
   return false;

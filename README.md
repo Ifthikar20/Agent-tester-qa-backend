@@ -26,6 +26,7 @@ npm run check:naming              # when the page and the browser disagree about
 npm run check:redirects           # redirect chains, statuses, the friendly 404
 npm run check:app                 # one command starts it all, each half handed its half of the keypair
 npm run check:patience            # late vs never coming, and settling
+npm run check:aim                 # a wrapped link is pressed on its words, a press that would miss says so
 npm run check:pace                # a fast run reaches the same verdict as a watched one
 npm run check:console             # a late viewer is primed, the wheel reaches the page, the vault does not
 npm run check:teach               # demonstrate by hand, then replay what it wrote
@@ -2477,6 +2478,7 @@ silently inside someone else's docs.
 | `vocabulary.js` | every verb, declared once: syntax, how it writes back, how it draws |
 | `flow.js` | the test case language: text ↔ IR, and `asFlowchart()` for a picture |
 | `ops.js` | what each verb does, origin allowlist, validation gate |
+| `aim.js` | where a press lands: the element's own boxes, the hit test before the press, the sentences when it misses or a URL check gives up |
 | `parse.js` | DSL text → JSON IR |
 | `diagram.js` | JSON IR → mermaid `block-beta` |
 | `suites.js` | the suite model — one origin, pages, expectations, cases |
@@ -2523,9 +2525,11 @@ silently inside someone else's docs.
 | `scripts/check-naming.js` | counts follow the accessibility tree, and no step is dropped |
 | `scripts/check-redirects.js` | chains, status assertions, and the 404 a URL check misses |
 | `scripts/check-patience.js` | late vs never-coming, settle without stalling |
+| `scripts/check-aim.js` | a wrapped link pressed on its words, a press that would miss, what a URL check says, a click that leaves the site |
 | `scripts/check-pace.js` | how much of a run is performance, and that skipping it is safe |
 | `public/slow.html` | an element that arrives after a delay you choose |
 | `public/links.html` | four links that all work and are each wrong differently |
+| `public/wrapped.html` | a link on two lines, the same link on the other host, a button that does nothing, a veil that takes a press |
 | `public/results.html` | a sticky header over cards named by a whole paragraph |
 | `scripts/check-console.js` | the canvas paints on arrival, and the wheel reaches the page |
 | `scripts/check-monitoring.js` | a rule, a change, an incident, recovery, picking from the canvas — on a runner of its own |

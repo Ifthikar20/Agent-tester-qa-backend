@@ -441,11 +441,12 @@ export class Recorder {
    *   statuses — because "it went to the right URL" is not the same as "it went
    *   there directly", and neither is visible afterwards.
    */
-  constructor(page, { onStep, onError, nav } = {}) {
+  constructor(page, { onStep, onError, onNote, nav } = {}) {
     this.page = page;
     this.nav = nav ?? null;
     this.onStep = onStep ?? (() => {});
     this.onError = onError ?? (() => {});
+    this.onNote = onNote ?? (() => {});    // something worth a line in the log, not an error
     this.recording = false;
     this.steps = [];
     this.lastUrl = null;
@@ -553,6 +554,7 @@ export class Recorder {
         this.lastChain = key;
         const step = this.steps.at(-1);
         if (step?.op === 'click') step.via = n.hops;
+        if (n.leftOrigin) this.onNote(`the redirect chain left ${hostOf(n.hops[0].url) ?? 'the site'} for ${hostOf(n.url) ?? 'another site'}`);
         this.onStep(step, this.steps);
         return;
       }
@@ -566,10 +568,13 @@ export class Recorder {
     const prev = this.lastUrl;
     this.lastUrl = href;
     if (!prev) return;
-    const path = pathOf(href);
-    if (path && path !== pathOf(prev)) {
-      this.#push({ op: 'expect', assert: 'urlContains', value: path });
+    const value = arrivalOf(href, prev);
+    if (!value) return;
+    const from = hostOf(prev), to = hostOf(href);
+    if (from && to && from !== to) {
+      this.onNote(`${this.steps.at(-1)?.op === 'click' ? 'this click leaves' : 'the page left'} ${from} for ${to} — the arrival check names the host`);
     }
+    this.#push({ op: 'expect', assert: 'urlContains', value });
   }
 
   /**
@@ -826,4 +831,23 @@ function originOf(u) {
 
 function pathOf(u) {
   try { const x = new URL(u); return `${x.pathname}${x.hash}`; } catch { return null; }
+}
+
+/** An address as its host (with a port that is not the default), or null. */
+function hostOf(u) {
+  try { const x = new URL(u); return /^https?:$/.test(x.protocol) ? x.host : null; } catch { return null; }
+}
+
+/**
+ * What the arrival assertion says: the path, as ever — or host + path when
+ * the step left the site, because "/turbo-ai-notetaking-app-2025-11" on the
+ * page you were on and on businessinsider.com are two different arrivals, and
+ * the check is a substring of the whole URL either way.
+ */
+function arrivalOf(href, prev) {
+  const path = pathOf(href);
+  if (!path) return null;
+  const from = hostOf(prev), to = hostOf(href);
+  if (from && to && from !== to) return `${to}${path}`;
+  return path !== pathOf(prev) ? path : null;
 }

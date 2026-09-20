@@ -2693,6 +2693,7 @@ async function newSession() {
       if (recorder?.recording) notes?.saw(step, steps);
     },
     onError: (msg) => emit({ t: 'log', level: 'error', msg }),
+    onNote: (msg) => emit({ t: 'log', level: 'info', msg }),
   });
   await recorder.attach();
 

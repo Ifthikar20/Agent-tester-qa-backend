@@ -1,13 +1,13 @@
 {
   "a consent overlay, answered with Reject": {
     "ok": false,
-    "step": 4,
-    "error": "expected the URL to contain \"#/dashboard\", but it is \"http://heal.test/consent.html\" — the step before this one did not navigate anywhere"
+    "step": 1,
+    "error": "\"label:Email\" is on the page, but the press would land on div \"We value your privacy We use cookies to …\" over the field, not on the field — so nothing was pressed.\n  A press that misses reports success, and the case fails later, at a check, with the wrong sentence.\n  Tried 324,220."
   },
   "a What's new dialog, closed": {
     "ok": false,
-    "step": 2,
-    "error": "expected the URL to contain \"#pricing\", but it is \"http://heal.test/whats-new.html\" — the step before this one did not navigate anywhere"
+    "step": 1,
+    "error": "\"navigation/link:Pricing\" is on the page, but the press would land on div \"What's new Pricing has a calculator now,…\" over the link, not on the link — so nothing was pressed.\n  A press that misses reports success, and the case fails later, at a check, with the wrong sentence.\n  Tried 131,25."
   },
   "a late render inside the grace period": {
     "ok": false,
@@ -27,7 +27,7 @@
   "a dead button": {
     "ok": false,
     "step": 4,
-    "error": "expected the URL to contain \"#/dashboard\", but it is \"http://heal.test/dead-button.html\" — the step before this one did not navigate anywhere"
+    "error": "expected the URL to contain \"#/dashboard\", but it is still \"http://heal.test/dead-button.html\" — the page did not change after clicking 'Sign in' : button; the press landed on the button \"Sign in\", and nothing navigated in the 1.2s this waited.\n  A link that opens a new tab, a download, a menu, or a handler that did nothing all look like this from here."
   },
   "a removed link": {
     "ok": false,
@@ -46,22 +46,22 @@
   },
   "a dialog with only Accept and OK": {
     "ok": false,
-    "step": 4,
-    "error": "expected the URL to contain \"#/dashboard\", but it is \"http://heal.test/accept-only.html\" — the step before this one did not navigate anywhere"
+    "step": 1,
+    "error": "\"label:Email\" is on the page, but the press would land on div \"Cookies This site uses cookies. Accept a…\" over the field, not on the field — so nothing was pressed.\n  A press that misses reports success, and the case fails later, at a check, with the wrong sentence.\n  Tried 324,220."
   },
   "a \"Payment failed\" dialog with Close": {
     "ok": false,
-    "step": 3,
-    "error": "expected the URL to contain \"#/next\", but it is \"http://heal.test/payment-failed.html\" — the step before this one did not navigate anywhere"
+    "step": 2,
+    "error": "\"button:Continue\" is on the page, but the press would land on div \"Payment failed Your card was declined, s…\" over the button, not on the button — so nothing was pressed.\n  A press that misses reports success, and the case fails later, at a check, with the wrong sentence.\n  Tried 468,158."
   },
   "an \"Unsaved changes? Keep editing / Discard\" dialog": {
     "ok": false,
-    "step": 2,
-    "error": "expected the URL to contain \"#/projects\", but it is \"http://heal.test/unsaved.html\" — the step before this one did not navigate anywhere"
+    "step": 1,
+    "error": "\"link:Back to projects\" is on the page, but the press would land on div \"Unsaved changes Your welcome message has…\" over the link, not on the link — so nothing was pressed.\n  A press that misses reports success, and the case fails later, at a check, with the wrong sentence.\n  Tried 415,156."
   },
   "a newsletter banner with an email field": {
     "ok": false,
-    "step": 4,
-    "error": "expected the URL to contain \"#/dashboard\", but it is \"http://heal.test/newsletter.html\" — the step before this one did not navigate anywhere"
+    "step": 1,
+    "error": "\"label:Email\" is on the page, but the press would land on div \"Get the newsletter One email a month. Su…\" over the field, not on the field — so nothing was pressed.\n  A press that misses reports success, and the case fails later, at a check, with the wrong sentence.\n  Tried 324,220."
   }
 }

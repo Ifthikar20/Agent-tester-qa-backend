@@ -1,4 +1,5 @@
 import { sleep } from './cursor.js';
+import { aimAt, aimIn, landing, drift, missMessage, arrivalFailure } from './aim.js';
 import { parseTarget, locate, aliasesFor, discover, withoutIcons, LANDMARKS, ROLES } from './targets.js';
 import { OP_NAMES, checkAction, showTarget } from './vocabulary.js';
 import { PRIVATE_HOST, forOrg as originsOf } from './origins.js';
@@ -220,10 +221,23 @@ async function landed(page, ctx, timeout = 8000) {
 /** Remember where the navigation counter was, so `landed` can want a newer one. */
 const markNav = (ctx) => { ctx.navMark = ctx.nav?.seq ?? -1; };
 
-function point(box, opts) {
-  const x = box.x + (opts.leftEdge ? Math.min(14, box.width / 2) : box.width / 2);
-  return [x, box.y + box.height / 2];
-}
+/**
+ * What a press records about itself, for the URL check that may follow it
+ * (aim.js arrivalFailure): how it was made, what pixel it landed on and what
+ * was there, and the URL and navigation count at the time.
+ */
+const pressOf = (ctx, page, how, aimed = true) => ({
+  how, on: aimed ? ctx.aimed?.on ?? null : null, x: ctx.cursor.x, y: ctx.cursor.y,
+  urlBefore: page.url(), navSeq: ctx.nav?.seq ?? -1,
+});
+
+/** A target as a sentence names it, its name cut at a word boundary. */
+const brief = (target) => {
+  const i = target.indexOf(':');
+  if (i < 0) return target;
+  const name = target.slice(i + 1);
+  return showTarget(`${target.slice(0, i)}:${name.length > 60 ? `${shorten(name, 60)}…` : name}`);
+};
 
 async function boxOf(el, target, timeout) {
   // `timeout` only when a position check held the press (placed): an element
@@ -239,26 +253,9 @@ function el(page, target, ctx) {
   return locate(page, parseTarget(target, aliasesFor(new URL(page.url()).origin)));
 }
 
-/**
- * Did we end up anywhere near where the human clicked?
- *
- * The recorded point is NOT how the element is found — resolving it by name is
- * what survives a layout change. But it is evidence, and it is the only thing
- * that catches a target which resolves cleanly to the wrong element: the name
- * matched, one node came back, and it sits nowhere near where you pointed.
- */
-function drift(at, box, viewport) {
-  if (!at || !viewport) return null;
-  // Scale for a different window than the one it was recorded in.
-  const sx = viewport.width / (at.vw || viewport.width);
-  const sy = viewport.height / (at.vh || viewport.height);
-  const px = at.x * sx, py = at.y * sy;
-  const inside = px >= box.x && px <= box.x + box.width && py >= box.y && py <= box.y + box.height;
-  if (inside) return null;
-  const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
-  return { px: Math.round(px), py: Math.round(py), cx: Math.round(cx), cy: Math.round(cy),
-           dist: Math.round(Math.hypot(cx - px, cy - py)) };
-}
+// Where a press is aimed, and whether the pixel reaches the element, is
+// aim.js: `drift` (did we end up near where the human clicked?) lives there
+// too, beside the geometry it reads.
 
 const nameOfTarget = (t) => t.slice(t.indexOf(':') + 1);
 
@@ -773,15 +770,17 @@ function layerAt(target, { x, y, button = null }) {
 async function coveredBy(node, opts, button = null) {
   const box = await node.boundingBox().catch(() => null);
   if (!box) return null;
-  const [x, y] = point(box, opts);
+  const view = node.page().viewportSize();
+  const a = await aimAt(node, box, opts, view);
   try {
-    await node.click({ trial: true, timeout: 1000, position: { x: x - box.x, y: y - box.y } });
+    await node.click({ trial: true, timeout: 1000, position: { x: a.x - box.x, y: a.y - box.y } });
     return null;
   } catch (err) {
     if (!/intercepts pointer events/.test(err.message ?? '')) return null;
   }
   const now = await node.boundingBox().catch(() => null) ?? box;   // the trial may have scrolled
-  return node.evaluate(layerAt, { x: point(now, opts)[0], y: point(now, opts)[1], button }).catch(() => null);
+  const b = await aimAt(node, now, opts, view);
+  return node.evaluate(layerAt, { x: b.x, y: b.y, button }).catch(() => null);
 }
 
 /** How long a dismissed layer has to stay gone before the press it cleared the way for. */
@@ -791,8 +790,8 @@ const GONE_FOR = 300;
  * Get a harmless layer out of the way of a click or a fill — once.
  *
  * Today the press lands on the banner and the step is marked passed; the case
- * fails two steps later with "did not navigate", the words a dead button
- * produces. That is the worst kind of failure, because it points at the app.
+ * fails two steps later at a URL check, in the words a dead button produces.
+ * That is the worst kind of failure, because it points at the app.
  *
  * So: a layer that reads as a cookie notice, a newsletter or an announcement,
  * with no field on it and nothing that reads as an error or a question, is
@@ -856,8 +855,8 @@ async function uncover(page, node, target, ctx, opts) {
  * Asked once more just before the press, and no sooner than GONE_FOR after the
  * dismissal: a consent script that re-inserts its banner 160ms later would
  * otherwise catch the press while the step reports a fix — and the case fails
- * a step later with "did not navigate", the misleading failure uncover exists
- * to prevent.
+ * a step later at a URL check, the misleading failure uncover exists to
+ * prevent.
  */
 async function stillUncovered(node, target, ctx, opts, dismissed) {
   const wait = GONE_FOR - (Date.now() - dismissed.pressedAt);
@@ -1541,19 +1540,25 @@ async function pointAt(page, target, ctx, opts = {}) {
   // words a dead button produces. With fixes on, ask before pressing.
   const dismissed = opts.hitTest && modeOf(ctx) !== 'off' ? await uncover(page, node, target, ctx, opts) : null;
 
+  const view = page.viewportSize();
   let box0 = await boxOf(node, target);
-  const d = drift(opts.at, box0, page.viewportSize());
+  // Which of the element's boxes to press, and where in it (aim.js): the
+  // centre of a wrapped link's union box is the gap between its lines.
+  let aim = await aimAt(node, box0, opts, view);
+  const d = drift(opts.at, aim, view);
   let held = false;
   if (d && modeOf(ctx) !== 'off' && opts.step && !retrying.has(ctx)) {
     // With fixes on, a miss is told apart from a moved layout (placed, above).
+    const was = node;
     ({ node, box: box0, target, held = false } = await placed(page, target, node, box0, d, ctx, { ...opts, rescued }));
+    if (node !== was) aim = await aimAt(node, box0, opts, view);
   } else if (d && ctx.emit) {
     ctx.emit({ t: 'log', level: 'warn',
       msg: `${target}: recorded at ${d.px},${d.py} but resolves to ${d.cx},${d.cy} — ${d.dist}px away. ` +
            `Fine if the layout moved; suspicious if it did not.` });
   }
 
-  const [x, y] = point(box0, opts);
+  const { x, y, rect } = aim;
 
   // Enter the box at the point nearest the cursor, THEN settle to the aim
   // point. A straight line from a menu trigger to an item below it cuts the
@@ -1562,13 +1567,13 @@ async function pointAt(page, target, ctx, opts = {}) {
   // legs stay inside, and it reads as an approach rather than a lunge.
   const inset = 4;
   const outside =
-    ctx.cursor.x < box0.x || ctx.cursor.x > box0.x + box0.width ||
-    ctx.cursor.y < box0.y || ctx.cursor.y > box0.y + box0.height;
+    ctx.cursor.x < rect.x || ctx.cursor.x > rect.x + rect.width ||
+    ctx.cursor.y < rect.y || ctx.cursor.y > rect.y + rect.height;
   const pace = paceOf(opts.ms, ctx.pace ?? PACE);
   const perf = performanceAt(pace);
   if (outside) {
-    const ex = Math.min(Math.max(ctx.cursor.x, box0.x + inset), box0.x + box0.width - inset);
-    const ey = Math.min(Math.max(ctx.cursor.y, box0.y + inset), box0.y + box0.height - inset);
+    const ex = Math.min(Math.max(ctx.cursor.x, rect.x + inset), rect.x + rect.width - inset);
+    const ey = Math.min(Math.max(ctx.cursor.y, rect.y + inset), rect.y + rect.height - inset);
     await ctx.cursor.glideTo(ex, ey, perf.approach);
   }
   await ctx.cursor.glideTo(x, y, outside ? perf.aim : pace);
@@ -1579,14 +1584,41 @@ async function pointAt(page, target, ctx, opts = {}) {
   // This one runs at pace 0 too, as a plain move: it is not decoration, it is
   // the difference between clicking the element and clicking where it used to
   // be.
-  const [x2, y2] = point(await boxOf(node, target, held ? HELD_REREAD_MS : undefined), opts);
-  if (Math.hypot(x2 - ctx.cursor.x, y2 - ctx.cursor.y) > 2) {
-    await ctx.cursor.glideTo(x2, y2, perf.correct);
+  const aim2 = await aimAt(node, await boxOf(node, target, held ? HELD_REREAD_MS : undefined), opts, view);
+  if (Math.hypot(aim2.x - ctx.cursor.x, aim2.y - ctx.cursor.y) > 2) {
+    await ctx.cursor.glideTo(aim2.x, aim2.y, perf.correct);
   }
 
   const linger = perf.linger;          // let hover settle, and the eye catch up
   if (linger > 0) await sleep(linger);
   if (dismissed) await stillUncovered(node, target, ctx, opts, dismissed);
+
+  // The last thing before the press: does the pixel under the cursor reach the
+  // element? A wrapped link's other line is tried before giving up — and giving
+  // up is the point: a press that misses reports success, and the case fails
+  // later with the wrong sentence. A layer over it may be the model's business
+  // (mode ai); a gap the element does not paint is nobody's.
+  let hit = await landing(node, aim2.box, ctx.cursor.x, ctx.cursor.y).catch(() => null);
+  if (hit && !hit.ok) {
+    const first = hit;
+    const tried = [[ctx.cursor.x, ctx.cursor.y]];
+    for (const r of aim2.rects.filter((o) => o !== aim2.rect).slice(0, 5)) {
+      const [rx, ry] = aimIn(r, opts);
+      const h = await landing(node, aim2.box, rx, ry).catch(() => null);
+      if (h?.ok) {
+        await ctx.cursor.glideTo(rx, ry, perf.correct);
+        trace(ctx, 'rule', `Pressed on another part of ${showTarget(target)}: the first pixel landed on ${first.on}`, { tier: 'rule', ok: true });
+        hit = h;
+        break;
+      }
+      tried.push([rx, ry]);
+    }
+    if (!hit.ok) {
+      const err = new Error(hide(ctx, missMessage(target, hit, tried)));
+      throw hit.relation === 'over' ? healable(err, 'covered') : err;
+    }
+  }
+  ctx.aimed = { target, x: ctx.cursor.x, y: ctx.cursor.y, on: hit?.ok ? hit.on : null };
   return node;
 }
 
@@ -2234,6 +2266,7 @@ const ACT = {
   async click(page, step, ctx) {
     await pointAt(page, step.target, ctx, { at: step.at, timeout: step.timeout, hitTest: true, step, op: 'click' });
     markNav(ctx);                 // anything after this must be a NEW navigation
+    ctx.lastPress = pressOf(ctx, page, `clicking ${brief(step.target)}`);
     await ctx.cursor.click(performanceAt(ctx.pace ?? PACE).press);
     // A click starts a route change, a fetch and a re-render. Begin the next
     // step when the page has stopped moving, not a fixed moment later.
@@ -2310,6 +2343,7 @@ const ACT = {
       await ctx.cursor.click(performanceAt(ctx.pace ?? PACE).press);
     }
     markNav(ctx);
+    ctx.lastPress = pressOf(ctx, page, step.target ? `pressing ${step.key} on ${brief(step.target)}` : `pressing ${step.key}`, Boolean(step.target));
     await page.keyboard.press(step.key);
     await settle(page, step.settle);
   },
@@ -2350,6 +2384,7 @@ export const OPS = {
   async goto(page, step, ctx) {
     checkUrl(step.url, ctx.origins ?? originsOf(LOCAL));   // re-checked at run time, not just at validate
     markNav(ctx);
+    ctx.lastPress = null;         // a fresh page: nothing has been pressed on it
 
     // A goto to the URL already on screen does NOT reload — Chrome treats it as
     // a same-document navigation. So without this a run inherits whatever the
@@ -2469,12 +2504,9 @@ export const OPS = {
         if (Date.now() > deadline) {
           // Say what IS true. "Timeout 8000ms exceeded" sends you to read the
           // wrong three files; the current URL usually names the real problem
-          // in one line.
-          const same = seen === (step.from ?? seen);
-          throw new Error(
-            `expected the URL to contain "${step.value}", but it is "${seen}"` +
-            (same ? ' — the step before this one did not navigate anywhere' : '')
-          );
+          // in one line — and the press before this check knows whether the
+          // page moved at all, and what its pixel landed on (aim.js).
+          throw new Error(arrivalFailure(step.value, seen, ctx.lastPress ?? null, ctx.nav?.summary?.() ?? null, step.timeout ?? TIMEOUT));
         }
         await sleep(100);
         seen = page.url();

@@ -34,6 +34,11 @@
  *
  *   node scripts/check-heal.js --pin    with GC_HEAL_BASELINE set, also rewrites
  *                                       fixtures/heal/off-baseline.json
+ *   node scripts/check-heal.js --pin-mine   without a baseline: rewrites the
+ *                                       pinned failures from this checkout's own
+ *                                       fixes-off run — for a change to what a
+ *                                       run without fixes says, made on purpose;
+ *                                       review the file's diff before committing
  */
 import { chromium } from 'playwright';
 import { existsSync, readFileSync, writeFileSync as writePinned } from 'node:fs';
@@ -586,6 +591,17 @@ if (baseline && process.argv.includes('--pin')) {
   } else {
     bad('pin the baseline', 'not pinned: this ops.js does not match the baseline');
   }
+} else if (!baseline && process.argv.includes('--pin-mine')) {
+  // A change to what a run without fixes says, made on purpose — a press that
+  // now stops instead of landing on a layer — has no older checkout to pin
+  // from. The pinned failures are rewritten from this checkout's own fixes-off
+  // run, which this section has just shown to be the same as no ctx.heal at
+  // all. Review the file's diff: every entry that moved is a sentence that
+  // changed on purpose, and the mismatches printed above are that list.
+  const mine = {};
+  for (const s of [...SAFE, ...MUST_FAIL]) mine[s.name] = outcome(offRuns.get(s.name));
+  writePinned(PINNED_FILE, `${JSON.stringify(mine, null, 2)}\n`);
+  console.log(`  -  pinned ${Object.keys(mine).length} failures from this checkout's fixes-off run to ${PINNED_FILE} — review its diff`);
 }
 if (!baseline) console.log(`  -  compared with ${pinned ? 'the pinned failures' : 'nothing pinned'}; set GC_HEAL_BASELINE to a checkout to compare live`);
 
