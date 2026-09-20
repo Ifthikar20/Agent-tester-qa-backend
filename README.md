@@ -1073,39 +1073,68 @@ Sometimes the question is not "did the hero grow" but "did anything change".
 selector `:page`: not one element's numbers but the page's *blocks* — every
 heading, paragraph, list item, link, button, cell and label, a field's
 placeholder, an image's alt, and the boxes that arrange them (nav, main,
-sections, forms, tables) — each with where it sits and what it says. Two of
-those snapshots diffed say what was **added**, what was **removed**, what
-**moved** or was resized, and what was **reworded**, and that list is the
+sections, forms, tables) — each with where it sits, what it says and, for a
+link, a form or a control, what it *does* (where it points, whether it can be
+used: hashed, never the address itself). Two of those snapshots diffed say
+what was **added**, what was **removed**, what **moved** or was resized, what
+was **reworded** and what now **does something else**, and that list is the
 incident: the exact totals as chips, the first few of each named
 (`added td “#10046”`, `section#faq down 40px`, `p “Every order…” → “Every
 order… (copy changed by a deploy…)”`), a before and after clip of the
 viewport, and a verdict that says the same in a sentence. Over the API it is
 `POST /api/monitors` with `"selector": ":page"`.
 
-The rule is one of three things — *the layout must not change*, *the text must
-not change*, or *nothing on the page may change* — and a number of pixels
-loosens how far a block may drift before it has moved (`no block may move by
-more than 12px`; the default is 4). A sentence the compiler cannot place ("the
-page must stay on brand") watches for any change and leaves the verdict to a
-reviewer, the way a judgment clause on an element does.
+The rule says what may not change, and the default — *nothing on the page may
+change* — stands for four checks, the three things a test can trip over and
+their alignment: **what the page does** (a link, a form or a control that now
+points or behaves differently: `a “Blog” now points at /blog-2 instead of
+/blog`), **which elements it has** (a control or a box added, removed or
+renamed), **its words** (reworded, appeared, gone) and **their alignment** (a
+block that now overlaps a neighbour it did not, runs past the page's edge or
+sits off it). A rule that names one of them asks only that — *the links must
+not change*, *no element may be added or removed*, *the text must not change*,
+*nothing may overlap* — and *the layout must not change* asks the fifth, where
+every block sits, with a number of pixels loosening how far one may drift
+before it has moved (`no block may move by more than 12px`; the default is 4).
+A sentence the compiler cannot place ("the page must stay on brand") watches
+for any change and leaves the verdict to a reviewer, the way a judgment clause
+on an element does.
 
-What it deliberately does not report: a class that changes nothing visible (a
-page monitor is not a markup hash); a move under the tolerance; where a fixed
-or sticky block is, which depends on the scroll; a snapshot taken at another
-viewport width, which is a different layout rather than a change; and whatever
-the page changes **on its own**. While the monitor is made the runner watches
-the page for a second and a half, and the blocks that changed with nobody
-touching it — a ticker, a clock, a carousel — are learned into the spec's
-`ignore` and never reported. A counter that grows a digit wider and pushes
-its neighbour along is still a move; the pixel phrase, or **Resolve & accept
-current state**, is the answer. Everything else about a monitor holds: the
+What it deliberately does not report: **a scroll**, ever — blocks are measured
+in document coordinates through every scroller on the way up, so a page that
+scrolls an inner `main` under a fixed header reads the same at the top and
+1090px down, and a uniform shift of every free block between two readings,
+which is how a smooth-scroll library scrolls, is forgiven and said (`scroll
+of 1090px ignored`); a class that changes nothing visible (a page monitor is
+not a markup hash); a move under the tolerance — or any move at all under the
+default rule: a pure re-flow with nothing re-pointed, added, removed, reworded
+or overlapping is not a change; where a fixed or sticky block is, which
+depends on the scroll; and whatever the page changes **on its own**. While the
+monitor is made the runner watches the page for a second and a half, and the
+blocks that changed with nobody touching it — a ticker, a clock, a carousel —
+are learned into the spec's `ignore` and never reported. A reading at
+**another viewport width** is anticipated responsive behaviour: what is hidden
+at that width and everything re-flowed is said (`measured at 820px (baseline
+1180px): hidden content treated as responsive`) and not counted — only what
+the page does and what it says still are — and the reading, once the window
+has settled there, is kept as that width's own baseline (`baselines[820]`),
+after one question to Claude when there is a key: its "no" keeps the reading,
+its "yes" opens an incident. And Claude's "false alarm" on any incident closes
+it, its defect with it, and makes the state as it is now the baseline. A
+counter that grows a digit wider and pushes its neighbour along is still a
+move for a layout rule; the pixel phrase, or **Resolve & accept current
+state**, is the answer. Everything else about a monitor holds: the
 confirm-before-alert funnel, six seconds of grace after a visit for blocks
 that arrive late (any verdict waits, not only "missing"), sweeps on a schedule,
 notifications, **Check now**. A snapshot keeps up to 400 blocks; the API and
 the cards carry the count, the store keeps the blocks. `npm run
 check:monitoring` walks it: the ticker learned, a swapped class ignored, the
 reworded hero caught by the words rule, a new table row caught by the layout
-rule with the cells named and the sections below it moved down.
+rule with the cells named and the sections below it moved down — and, on a
+page that scrolls inside, a scroll of 1090px ignored, a link re-pointed, a
+button gone, copy reworded and two sections overlapping each caught as its own
+kind of change, the content slid by a transform forgiven, an iPad's width
+anticipated.
 
 An incident is also a defect. The moment one opens it is filed under a
 `DEF-YYMM-NNN` number like a failed run's (the Defects section), with the
@@ -1124,7 +1153,11 @@ evidence and never instruction.
 
 `public/monitor.html` is a page shaped to be watched, with a panel of real
 buttons that break it (`Grow text`, `Remove table row`, `Hide submit`, `Reset
-all`). `npm run check:monitoring` starts a runner of its own in mock mode and
+all`), and `public/monitor-scroll.html` one that scrolls an inner `main` under a
+fixed header, with buttons that re-point a link, remove a button, reword a
+paragraph, pull a section into its neighbour and slide the content with a
+transform (`Scroll down`, `Change link`, `Remove button`, `Reword copy`,
+`Overlap`, `Shift content`). `npm run check:monitoring` starts a runner of its own in mock mode and
 drives the whole story through the API and the socket — including picking
 from the canvas, and a click that must NOT reach the page. `npm run
 check:monitoring-request` pins, offline, exactly what the resolver puts on the
@@ -2537,6 +2570,7 @@ silently inside someone else's docs.
 | `scripts/check-monitoring-judge.js` | a rule that is not a number, judged: the engine with a scripted model — judging, adopted, stood, unjudged |
 | `scripts/check-keys.js` | the one key reaches the fixes, monitoring and the chat, and no Chromium process carries it |
 | `public/monitor.html` | a page shaped to be watched, with buttons that break it |
+| `public/monitor-scroll.html` | a page that scrolls inside itself, with buttons that change what it does, has, says and how it aligns |
 | `scripts/check-support.js` | a support request lands, turns access on, is told to every socket, and turns off again |
 | `scripts/check-chat-request.js` | the matcher, the mock mind and, offline, exactly what the chat's resolver puts on the wire |
 | `scripts/check-chat.js` | the chat on a runner of its own: a count that equals /api/defects, a case run from a sentence, a proposal confirmed, the transcript kept, drafted tests read, ticked, run, fixed once and reported |

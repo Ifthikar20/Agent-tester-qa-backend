@@ -36,7 +36,7 @@ import crypto from 'node:crypto';
 import { stateDir } from './org.js';
 import * as secrets from './secrets.js';
 import { redactWith } from './redact.js';
-import { evaluate, diff, summarize, changedKeys, isPageSnapshot } from './monitor-evaluate.js';
+import { evaluate, diff, summarize, changedKeys, isPageSnapshot, describePageDiff } from './monitor-evaluate.js';
 import { compileMock, judgeMock, compactSnapshot, sameDoc, violationKey, RULE_MAX, LABEL_MAX, SELECTOR_MAX, PAGE_SELECTOR } from './monitor-rules.js';
 
 export { RULE_MAX, LABEL_MAX, SELECTOR_MAX, PAGE_SELECTOR };
@@ -106,8 +106,9 @@ export class NoSuchIncident extends Error {
 const refuse = (msg, status) => { const e = new Error(msg); e.status = status; return e; };
 const newId = (prefix) => prefix + '_' + crypto.randomUUID().replace(/-/g, '').slice(0, 8);
 const now = () => Date.now();
-const newRuntime = () => ({ debounce: null, pending: null, candidate: null, confirm: null, confirming: false, lastJudgeAt: 0, judgeTimer: null, judgeInFlight: false, tickTimer: null, tickPending: null, armedAt: 0 });
-const clearRuntime = (rt) => { if (!rt) return; clearTimeout(rt.debounce); clearTimeout(rt.confirm); clearTimeout(rt.judgeTimer); clearTimeout(rt.tickTimer); rt.debounce = rt.confirm = rt.judgeTimer = rt.tickTimer = null; rt.candidate = null; rt.pending = null; rt.tickPending = null; };
+/** `page` is what the last evaluation of a whole page forgave or anticipated (pageNoteFor); `width` a reading at a width the monitor has no baseline for yet (noteWidth). */
+const newRuntime = () => ({ debounce: null, pending: null, candidate: null, confirm: null, confirming: false, lastJudgeAt: 0, judgeTimer: null, judgeInFlight: false, tickTimer: null, tickPending: null, armedAt: 0, page: null, width: null });
+const clearRuntime = (rt) => { if (!rt) return; clearTimeout(rt.debounce); clearTimeout(rt.confirm); clearTimeout(rt.judgeTimer); clearTimeout(rt.tickTimer); rt.debounce = rt.confirm = rt.judgeTimer = rt.tickTimer = null; rt.candidate = null; rt.pending = null; rt.tickPending = null; rt.width = null; };
 const str = (v, max) => String(v ?? '').trim().slice(0, max);
 /** Whether a failing check is a judgment clause's proxy (monitor-rules.js normalizeSpec): it says the element changed, not that the rule broke. */
 const isJudgmentCheck = (spec, id) => !!(spec && Array.isArray(spec.checks) && spec.checks.find((c) => c.id === id && c.judgment));
@@ -284,7 +285,10 @@ class MonitorEngine {
     return !!url && sameDoc(m.url, url);
   }
   publicMonitor(m) {
-    return { ...m, baseline: compactSnapshot(m.baseline), last: compactSnapshot(m.last), onPage: this.onPage(m), metrics: summarize(m.last || m.baseline) };
+    const out = { ...m, baseline: compactSnapshot(m.baseline), last: compactSnapshot(m.last), onPage: this.onPage(m), metrics: summarize(m.last || m.baseline, this.rt.get(m.id)?.page ?? null) };
+    // A page monitor's baselines at other widths, compacted the same way: the count, never the blocks.
+    if (m.baselines) out.baselines = Object.fromEntries(Object.entries(m.baselines).map(([w, s]) => [w, compactSnapshot(s)]));
+    return out;
   }
   /**
    * Whether a monitor is a project's: the suite it was made from, or — made
@@ -490,6 +494,123 @@ class MonitorEngine {
     return m;
   }
 
+  // ---- the whole page: which baseline, and a reading at another width ---------------------
+  /**
+   * The baseline a reading is judged against: the creation one, or — for a
+   * whole page read at another viewport width — that width's own, once the
+   * engine has kept one (`m.baselines[width]`, noteWidth). Until then the
+   * creation baseline serves, with the allowances the evaluator makes at
+   * another width (hidden blocks and geometry are a responsive layout's own).
+   */
+  baselineOf(m, snap) {
+    if (!m) return null;
+    if (m.spec?.kind !== 'page' || !isPageSnapshot(snap) || !m.baselines) return m.baseline;
+    const w = snap.env?.innerWidth, w0 = m.baseline?.env?.innerWidth;
+    if (!w || w === w0) return m.baseline;
+    const own = m.baselines[w];
+    return isPageSnapshot(own) ? own : m.baseline;
+  }
+  /** Strict when Claude read this width's re-flow as a regression (adoptWidth): every category counts there until somebody resolves it. */
+  evalOptions(m, snap) {
+    const w = snap?.env?.innerWidth;
+    return { strict: !!(w && m?.widthVerdicts && m.widthVerdicts[w]) };
+  }
+  /** What the last evaluation of a whole page forgave or anticipated, for the card: `{ scrolled, viewport, totals }`; null for an element. */
+  pageNoteFor(m, snap, res) {
+    if (m.spec?.kind !== 'page' || !isPageSnapshot(snap)) return null;
+    const w = snap.env?.innerWidth, w0 = m.baseline?.env?.innerWidth;
+    const other = !!(w && w0 && w !== w0);
+    return {
+      scrolled: res.page?.scrolled ?? null,
+      viewport: other ? { width: w, baseline: w0, adopted: isPageSnapshot(m.baselines?.[w]), strict: !!m.widthVerdicts?.[w] } : null,
+      totals: res.page?.totals ?? null,
+    };
+  }
+  /**
+   * A whole page read at a width the monitor has no baseline for. One reading
+   * is a window being dragged; the second at the same width is the width it
+   * settled at, and that reading — when it passes what is still judged at
+   * another width — becomes the width's own baseline (adoptWidth). A reading
+   * that fails (a link re-pointed, words changed) is an incident first, and
+   * is not adopted.
+   */
+  noteWidth(m, snap, res) {
+    const rt = this.rt.get(m.id);
+    if (!rt || !isPageSnapshot(snap)) return;
+    const w = snap.env?.innerWidth, w0 = m.baseline?.env?.innerWidth;
+    if (!w || !w0 || w === w0 || isPageSnapshot(m.baselines?.[w]) || m.widthVerdicts?.[w]) { rt.width = null; return; }
+    if (!res.ok) return;
+    if (!rt.width || rt.width.w !== w) { rt.width = { w, at: now(), adopting: false }; return; }
+    if (rt.width.adopting) return;
+    rt.width.adopting = true;
+    this.adoptWidth(m, snap, res)
+      .catch((err) => cfg.log.error(`  monitoring: could not keep the ${w}px baseline for ${m.label}: ${err.message}`))
+      .finally(() => { if (rt.width && rt.width.w === w) rt.width = null; });
+  }
+  /**
+   * Keep a reading as its width's baseline — after one question to Claude,
+   * when there is one: whether what the page hides or re-flows at this width
+   * is responsive behaviour or a regression. A yes opens an incident in
+   * Claude's words, against the creation baseline, and holds that width
+   * strictly (every category counts) until somebody resolves it; a no, or no
+   * judge, keeps the reading with a line in the log.
+   */
+  async adoptWidth(m, snap, res) {
+    const w = snap.env.innerWidth, w0 = m.baseline.env.innerWidth;
+    const note = res.page?.viewport?.note ?? `measured at ${w}px; the baseline is ${w0}px`;
+    const first = (s) => String(s ?? '').split(/(?<=\.)\s/)[0];
+    let verdict = null;
+    if (cfg.llm.mode === 'claude' && cfg.resolver) {
+      if (cfg.budget && !cfg.budget.take()) this.say('warn', `${m.label}: no verdict from Claude on the ${w}px reading — the daily AI budget is spent`);
+      else {
+        m.stats.judgeCalls++;
+        const agent = this.live();
+        const excerpt = agent ? this.cleanExcerpt(await agent.excerpt(m).catch(() => null)) : null;
+        const shot = agent ? await agent.screenshotElement(m, { mayScroll: cfg.isIdle() }).catch(() => null) : null;
+        const question = [{ checkId: 'viewport', metric: 'elements', op: 'unchanged', expected: `the page as it was at ${w0}px, re-flowed for ${w}px`, actual: describePageDiff(res.page, 'layout'), baseline: `${m.baseline.blocks.length} blocks`, message: note }];
+        verdict = await cfg.resolver.judge({
+          label: m.label, selector: m.selector, ruleText: m.ruleText, specSummary: m.spec?.summary, judgmentHint: m.spec?.judgmentHint,
+          violations: question, diff: { pageChanges: res.page }, beforePng: this.readShot(m.baselineShot), afterPng: shot?.png ?? null, elapsedMs: now() - m.createdAt,
+          beforeExcerpt: m.baselineExcerpt ?? null, afterExcerpt: excerpt, direct: false,
+        });
+        if (!this.monitors.has(m.id)) return;
+        if (verdict && verdict.violation) {
+          m.widthVerdicts = { ...(m.widthVerdicts || {}), [w]: { at: now(), explanation: verdict.explanation } };
+          const strict = evaluate(m.spec, m.baseline, snap, { strict: true });
+          const violations = strict.violations.length ? strict.violations : question;
+          m.state = 'violated';
+          delete m.ackKey;
+          this.say('error', `incident: ${m.label} — at ${w}px, ${first(verdict.explanation)}`);
+          await this.openIncident(m, { ...strict, ok: false, violations }, snap, 'violated', excerpt, verdict);
+          this.persist();
+          this.emit({ t: 'monitor.changed', monitor: this.publicMonitor(m) });
+          return;
+        }
+        if (!verdict) this.say('warn', `${m.label}: no verdict from Claude on the ${w}px reading: ${String(cfg.resolver.unavailable || 'unavailable')}`);
+      }
+    }
+    if (!this.monitors.has(m.id)) return;
+    m.baselines = { ...(m.baselines || {}), [w]: snap };
+    this.persist();
+    this.say('info', `${m.label}: ${note} — kept as the ${w}px baseline${verdict ? ` (Claude: ${first(verdict.explanation)})` : ''}`);
+    this.emit({ t: 'monitor.changed', monitor: this.publicMonitor(m) });
+  }
+  /**
+   * The state as it is now becomes the normal: the creation baseline for an
+   * element, or for a page read at the width it was made at — else that
+   * width's own baseline, so the creation one keeps serving its width. True
+   * when the creation baseline itself was replaced (its shot and excerpt are
+   * then retaken).
+   */
+  rebaseline(m, snap) {
+    const w = snap?.env?.innerWidth, w0 = m.baseline?.env?.innerWidth;
+    if (m.widthVerdicts && w && m.widthVerdicts[w]) { delete m.widthVerdicts[w]; if (!Object.keys(m.widthVerdicts).length) delete m.widthVerdicts; }
+    if (m.spec?.kind === 'page' && isPageSnapshot(snap) && w && w0 && w !== w0) { m.baselines = { ...(m.baselines || {}), [w]: snap }; return false; }
+    m.baseline = snap;
+    if (m.baselines && w && m.baselines[w]) { delete m.baselines[w]; if (!Object.keys(m.baselines).length) delete m.baselines; }
+    return true;
+  }
+
   // ---- the funnel ----------------------------------------------------------------------
   /** A report from the page: { monitorId, snapshot, reason, selectorNew, … }. */
   ingest(r) {
@@ -522,8 +643,21 @@ class MonitorEngine {
   tick(m, snap, reason) {
     const rt = this.rt.get(m.id);
     if (!rt) return;
-    const res = evaluate(m.spec, m.baseline, snap);
+    const res = evaluate(m.spec, this.baselineOf(m, snap), snap, this.evalOptions(m, snap));
     m.last = snap; m.lastTickAt = now(); m.stats.ticks++;
+    // A baseline taken before positions were measured in page space says
+    // nothing about where anything is (monitor-evaluate.js UPGRADED_NOTE), and
+    // the two geometry categories stood down for this reading. Keep the
+    // reading as the baseline so the next one has something to compare with —
+    // once, silently, because nothing about the page changed.
+    if (res.page?.upgraded && isPageSnapshot(snap)) {
+      this.rebaseline(m, snap);
+      this.say('info', `${m.label}: ${res.page.upgraded.note}`);
+      this.persist();
+    }
+    // A whole page read at another width is kept as that width's own baseline once it has settled (noteWidth); the card says so meanwhile.
+    if (m.spec?.kind === 'page') this.noteWidth(m, snap, res);
+    rt.page = this.pageNoteFor(m, snap, res);
     this.emitTick(m, res);
     const desired = res.missing ? 'missing' : res.ok ? 'ok' : 'violated';
     if (desired === m.state) { rt.candidate = null; clearTimeout(rt.confirm); rt.confirm = null; return; }
@@ -549,7 +683,7 @@ class MonitorEngine {
       let s2 = null;
       try { s2 = await this.live()?.measure(m); } catch { s2 = null; }
       if (!s2) s2 = snap; else this.cleanSnapshot(s2);
-      const r2 = evaluate(m.spec, m.baseline, s2);
+      const r2 = evaluate(m.spec, this.baselineOf(m, s2), s2, this.evalOptions(m, s2));
       const d2 = r2.missing ? 'missing' : r2.ok ? 'ok' : 'violated';
       if (d2 === desired) this.confirm(m, desired, r2, s2);
       else rt.candidate = null;
@@ -558,7 +692,7 @@ class MonitorEngine {
   /** At most one tick event per monitor per 400 ms: a card's numbers, not a firehose. */
   emitTick(m, res) {
     const rt = this.rt.get(m.id);
-    rt.tickPending = { t: 'monitor.tick', monitorId: m.id, state: m.state, ok: res.ok, missing: res.missing, metrics: summarize(m.last), violations: res.violations, at: now() };
+    rt.tickPending = { t: 'monitor.tick', monitorId: m.id, state: m.state, ok: res.ok, missing: res.missing, metrics: summarize(m.last, rt.page), violations: res.violations, at: now() };
     if (rt.tickTimer) return;
     rt.tickTimer = setTimeout(() => { rt.tickTimer = null; if (rt.tickPending) this.emit(rt.tickPending); rt.tickPending = null; }, 400);
   }
@@ -588,21 +722,23 @@ class MonitorEngine {
   }
 
   // ---- incidents -----------------------------------------------------------------------
-  async openIncident(m, res, snap, desired, excerpt = null) {
+  /** `verdict` is one that came with the incident (adoptWidth: Claude read a re-flow as a regression); the judge is then not asked again. */
+  async openIncident(m, res, snap, desired, excerpt = null, verdict = null) {
     // Only a judgment clause's proxies failed: the element changed, and whether
     // the rule broke is Claude's to say (JUDGE_DIRECT_SYSTEM). The incident
     // opens as `judging` and the verdict makes it stand or resolves it; with
     // no model it opens as any other, with a verdict that says what is missing.
     const judgmentOnly = desired !== 'missing' && res.violations.length > 0 && res.violations.every((v) => isJudgmentCheck(m.spec, v.checkId));
     const willJudge = judgmentOnly && cfg.llm.mode === 'claude' && !!cfg.resolver;
+    const base = this.baselineOf(m, snap);
     const inc = {
       id: newId('i'), monitorId: m.id, monitorLabel: m.label, suiteId: m.suiteId ?? null, selector: m.selector, ruleText: m.ruleText,
       type: desired === 'missing' ? 'missing' : 'violation', status: willJudge ? 'judging' : 'open', judgment: judgmentOnly,
       openedAt: now(), resolvedAt: null, resolvedBy: null,
       violations: res.violations,
-      before: { snapshot: compactSnapshot(m.baseline), screenshot: m.baselineShot, excerpt: m.baselineExcerpt ?? null },
+      before: { snapshot: compactSnapshot(base), screenshot: m.baselineShot, excerpt: m.baselineExcerpt ?? null },
       after: { snapshot: compactSnapshot(snap), screenshot: null, excerpt: keepExcerpt(excerpt) },
-      diff: diff(m.baseline, snap, m.spec), verdict: null,
+      diff: diff(base, snap, m.spec, this.evalOptions(m, snap)), verdict: null,
     };
     let afterPng = null;
     const agent = this.live();
@@ -610,7 +746,7 @@ class MonitorEngine {
       const shot = await agent.screenshotElement(m, { mayScroll: cfg.isIdle() }).catch(() => null);
       if (shot) { afterPng = shot.png; inc.after.screenshot = this.saveShot(`${inc.id}-after`, shot.png); inc.after.screenshotKind = shot.kind; }
     }
-    inc.verdict = judgeMock({ label: m.label, selector: m.selector, ruleText: m.ruleText, violations: inc.violations, diff: inc.diff, judgment: judgmentOnly });
+    inc.verdict = verdict ?? judgeMock({ label: m.label, selector: m.selector, ruleText: m.ruleText, violations: inc.violations, diff: inc.diff, judgment: judgmentOnly });
     this.incidents.set(inc.id, inc);
     m.openIncidentId = inc.id;
     m.stats.incidents++;
@@ -631,7 +767,7 @@ class MonitorEngine {
     if (willJudge) this.say('warn', `judging: ${m.label} changed — asking Claude whether "${m.spec.judgmentHint ?? m.ruleText}" still holds`);
     else this.say('error', `${brokenFromTheStart ? 'already broken at creation' : 'incident'}: ${m.label} — ${headline}`);
     agent?.flash(m).catch(() => null);
-    this.scheduleJudge(m, inc, afterPng, excerpt);
+    if (!verdict) this.scheduleJudge(m, inc, afterPng, excerpt);
   }
   async updateIncident(m, inc, res, snap, desired, excerpt = null) {
     const prevIds = inc.violations.map((v) => v.checkId).sort().join(',');
@@ -639,7 +775,7 @@ class MonitorEngine {
     inc.violations = res.violations;
     inc.after.snapshot = compactSnapshot(snap);
     if (excerpt) inc.after.excerpt = keepExcerpt(excerpt);
-    inc.diff = diff(m.baseline, snap, m.spec);
+    inc.diff = diff(this.baselineOf(m, snap), snap, m.spec, this.evalOptions(m, snap));
     inc.type = desired === 'missing' ? 'missing' : 'violation';
     inc.updatedAt = now();
     const agent = this.live();
@@ -674,16 +810,16 @@ class MonitorEngine {
         const rt = this.rt.get(m.id);
         if (rt) { rt.candidate = null; clearTimeout(rt.confirm); rt.confirm = null; clearTimeout(rt.debounce); rt.debounce = null; rt.pending = null; }
         if (m.last && m.last.exists) {
-          m.baseline = m.last;
           const agent = this.live();
-          if (agent) {
+          // The state as it is now is the new normal — for a whole page read at another width, that width's own (rebaseline).
+          if (this.rebaseline(m, m.last) && agent) {
             const shot = await agent.screenshotElement(m, { mayScroll: cfg.isIdle() }).catch(() => null);
             if (shot) { this.deleteShot(m.baselineShot); m.baselineShot = this.saveShot(`${m.id}-baseline-${now()}`, shot.png); }
             m.baselineExcerpt = keepExcerpt(this.cleanExcerpt(await agent.excerpt(m).catch(() => null))) ?? m.baselineExcerpt ?? null;
           }
         }
         if (m.state !== 'paused') {
-          const res = evaluate(m.spec, m.baseline, m.last);
+          const res = evaluate(m.spec, this.baselineOf(m, m.last), m.last, this.evalOptions(m, m.last));
           if (res.ok) { m.state = 'ok'; delete m.ackKey; }
           else { m.state = 'acknowledged'; m.ackKey = violationKey(res); }
         }
@@ -741,19 +877,23 @@ class MonitorEngine {
       const first = (s) => String(s ?? '').split(/(?<=\.)\s/)[0];
       if (v) {
         inc.verdict = v;
-        if (inc.status === 'judging' || (m.spec && m.spec.needsLlmJudgment && inc.status !== 'resolved')) {
-          if (v.violation) {
-            // A judged change that broke the rule: the incident stands, in Claude's words.
-            inc.status = 'open';
-            this.say('error', `incident: ${m.label} — ${first(v.explanation)}`);
-          } else {
-            // Judged fine: the element as it is now becomes the baseline, and the
-            // same state is not asked about again (resolve, 'judge').
-            this.say('info', `judged fine: ${m.label} — ${first(v.explanation)}`);
-            await this.resolve(inc.id, 'judge');
-          }
+        const judged = inc.status === 'judging' || !!(m.spec && m.spec.needsLlmJudgment);
+        if (inc.status === 'resolved') {
+          // Closed while the question was out (recovered, resolved by hand): the verdict stays on it, nothing moves.
+        } else if (!v.violation && v.source === 'claude') {
+          // A false alarm — on a judged clause or on a hard check alike: a
+          // scroll, a re-flow, a frame the arithmetic could not tell from a
+          // change. The state as it is now becomes the baseline, the incident
+          // closes by the judge and its defect with it, and the same state is
+          // not asked about again (resolve, 'judge').
+          this.say('info', `${judged ? 'judged fine' : 'a false alarm, says Claude'}: ${m.label} — ${first(v.explanation)}`);
+          await this.resolve(inc.id, 'judge');
+        } else if (judged) {
+          // A judged change that broke the rule: the incident stands, in Claude's words.
+          inc.status = 'open';
+          this.say('error', `incident: ${m.label} — ${first(v.explanation)}`);
         } else {
-          this.say('info', `Claude on ${m.label}: ${v.severity} severity, ${v.violation ? 'a real violation' : 'a false alarm'}`);
+          this.say('info', `Claude on ${m.label}: ${v.severity} severity, a real violation`);
         }
       } else {
         const why = String(cfg.resolver.unavailable || 'unavailable');

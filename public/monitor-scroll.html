@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Acme Field Notes — a page that scrolls inside</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /* A page the way turbo.ai is built: the window never scrolls, an inner
+     <main> does — so window.scrollY stays 0 while everything moves — under a
+     fixed header. A whole-page monitor must read it the same before and after
+     a scroll of 1090px, and the panel breaks it in the five ways a page can
+     change: what a link does, which controls it has, its words, two sections
+     overlapping, and (a smooth-scroll library's trick) the content slid with a
+     transform. */
+  :root { color-scheme: light; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #101014; background: #fbfbfc; }
+  header.top { position: fixed; top: 0; left: 0; right: 0; height: 56px; display: flex; align-items: center; gap: 18px; padding: 0 24px; background: #fff; border-bottom: 1px solid #eaeaef; z-index: 5; box-sizing: border-box; }
+  header.top h1 { font-size: 18px; margin: 0; }
+  header.top nav a { margin-left: 14px; color: #5a5a66; text-decoration: none; }
+  main { height: 100vh; overflow: auto; padding: 80px 24px 160px; box-sizing: border-box; }
+  main.f-shift { transform: translateY(-500px); }
+  .wrap { max-width: 900px; margin: 0 auto; display: grid; grid-template-columns: 1fr 240px; gap: 24px; align-items: start; }
+  .col { min-width: 0; }
+  section { margin: 0 0 28px; padding: 20px; border: 1px solid #eaeaef; border-radius: 14px; background: #fff; }
+  section h2 { margin: 0 0 8px; font-size: 20px; }
+  section p { margin: 0 0 10px; color: #3a3a46; }
+  .cta { display: inline-block; margin-right: 10px; padding: 8px 14px; border-radius: 999px; background: #e6007c; color: #fff; text-decoration: none; }
+  button.action { padding: 8px 14px; border: 1px solid #eaeaef; border-radius: 999px; background: #fff; font: inherit; cursor: pointer; }
+  #story-b.f-overlap { margin-top: -60px; }
+  .aside { padding: 16px; border: 1px solid #eaeaef; border-radius: 14px; background: #fff; }
+  .aside h3 { margin: 0 0 8px; font-size: 14px; }
+  .aside ul { margin: 0; padding-left: 18px; }
+  .aside li { margin: 4px 0; }
+  .aside a { color: #5a5a66; }
+  /* An iPad-width view: one column, and the sidebar is not shown at all. */
+  @media (max-width: 900px) { .wrap { grid-template-columns: 1fr; } .aside { display: none; } }
+  /* The panel: fixed, out of the content's way, every control a real button
+     with a plain name, so the executor can press it by name. */
+  .faults { position: fixed; right: 16px; bottom: 16px; padding: 12px 14px; border: 1px solid #eaeaef; border-radius: 14px; background: #fff; box-shadow: 0 8px 24px rgb(16 16 20 / .12); z-index: 6; }
+  .faults p { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: #6f6f7c; text-transform: uppercase; letter-spacing: .06em; }
+  .faults div { display: flex; flex-wrap: wrap; gap: 6px; max-width: 300px; }
+  .faults button { padding: 6px 10px; border: 1px solid #eaeaef; border-radius: 999px; background: #fff; font: 12.5px system-ui, sans-serif; cursor: pointer; }
+  .faults button[aria-pressed="true"] { background: #fdeef6; border-color: #e6007c; color: #c2006a; }
+  .faults button.reset { background: #101014; color: #fff; border-color: #101014; }
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>Acme Field Notes</h1>
+  <nav><a href="/monitor-scroll.html#intro">Notes</a><a href="/pricing.html">Pricing</a><a href="/demo.html">Demo</a></nav>
+</header>
+
+<main id="scroller">
+  <div class="wrap">
+    <div class="col">
+      <section id="intro">
+        <h2>Notes from the field</h2>
+        <p id="copy" data-testid="copy">Every order, every carrier, one dashboard. These notes are what our couriers learned on the road this quarter, one story at a time.</p>
+        <a id="read" class="cta" href="/pricing.html">Read the story</a>
+        <button id="save" class="action" type="button">Save for later</button>
+      </section>
+      <section id="story-a">
+        <h2>The Tuesday that went sideways</h2>
+        <p>A van, a bridge closure and forty parcels that still arrived before six. The dispatcher rerouted by hand while the map caught up, and the customers never knew.</p>
+        <p>What we changed: the map now reroutes first and asks questions later, and the dispatcher gets a single line to confirm instead of a form.</p>
+      </section>
+      <section id="story-b">
+        <h2>Why the estimate moved to 2pm</h2>
+        <p>Orders placed before two ship the same day in every region we serve. The old cutoff was a guess; this one is measured, and it is honest about the edges.</p>
+        <p>The estimate on the order page reads the same clock the warehouse does, so the promise at checkout is the promise on the dock.</p>
+      </section>
+      <section id="story-c">
+        <h2>Two carriers, one label</h2>
+        <p>The label printer no longer cares which carrier takes the parcel. The handoff scans the same code either way, and a late swap is a swap, not a reprint.</p>
+        <p>Returns follow the same rule in reverse: one code, any carrier, one place to look it up.</p>
+      </section>
+      <section id="story-d">
+        <h2>What the night shift sees</h2>
+        <p>The dashboard at three in the morning is not the dashboard at noon. Fewer numbers, larger, and the ones that matter when nobody is around to explain them.</p>
+        <p>Every alert that fires at night has a sentence under it saying what to do, written by the person who last did it.</p>
+      </section>
+      <section id="story-e">
+        <h2>The parcel that went to the wrong Springfield</h2>
+        <p>There are thirty-four of them. The address form now asks which one before the parcel leaves, and the map shows the answer so the person can see it is right.</p>
+        <p>It happened twice more that month, both times to the same street, and then never again.</p>
+      </section>
+      <section id="story-f">
+        <h2>Delays we caught before the customer did</h2>
+        <p>Nine hundred and twelve this quarter. Each one got a message before the tracking page went stale, and most of them got a new estimate they could plan around.</p>
+        <p>The ones we did not catch are the ones we study on Fridays.</p>
+      </section>
+      <section id="story-g">
+        <h2>A carrier's page, watched</h2>
+        <p>Can I watch a carrier's page instead of ours? Yes — any page the runner may open, scrolled or not, at any width the site serves.</p>
+        <p>What it reports is what a test would trip over: a link that goes somewhere else, a button that went, words that changed, things that overlap.</p>
+      </section>
+      <section id="story-h">
+        <h2>The end of the notes</h2>
+        <p>Nothing below this line but the panel that breaks the page on purpose, so a monitor can be shown catching each break and recovering from it.</p>
+        <p>Every fault here is reversible, and Reset all puts the page back.</p>
+      </section>
+    </div>
+    <aside class="aside" aria-label="On this page">
+      <h3>On this page</h3>
+      <ul>
+        <li><a href="#story-a">The Tuesday that went sideways</a></li>
+        <li><a href="#story-b">Why the estimate moved to 2pm</a></li>
+        <li><a href="#story-c">Two carriers, one label</a></li>
+        <li><a href="#story-d">What the night shift sees</a></li>
+      </ul>
+      <p>Shown beside the notes on a desktop; not shown at an iPad's width.</p>
+    </aside>
+  </div>
+</main>
+
+<aside class="faults" aria-label="Simulate bugs">
+  <p>Simulate bugs</p>
+  <div>
+    <button type="button" data-fault="scroll">Scroll down</button>
+    <button type="button" data-fault="scroll-top">Scroll up</button>
+    <button type="button" data-fault="href">Change link</button>
+    <button type="button" data-fault="remove-button">Remove button</button>
+    <button type="button" data-fault="reword">Reword copy</button>
+    <button type="button" data-fault="overlap">Overlap</button>
+    <button type="button" data-fault="shift">Shift content</button>
+    <button type="button" class="reset" data-fault="reset">Reset all</button>
+  </div>
+</aside>
+
+<script>
+  // Every fault is reversible, and "Reset all" is the one that puts the page
+  // back — recovery is half of what a monitor is for. The scroll buttons are
+  // not faults: a scroll of 1090px inside <main> is the thing a whole-page
+  // monitor must not report.
+  var scroller = document.getElementById('scroller');
+  var read = document.getElementById('read');
+  var save = document.getElementById('save');
+  var saveHome = save.parentNode, saveNext = save.nextSibling;
+  var copy = document.getElementById('copy');
+  var copyText = copy.textContent;
+  var storyB = document.getElementById('story-b');
+  var active = {};
+  function press(name, on) {
+    var b = document.querySelector('[data-fault="' + name + '"]');
+    if (b) b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    active[name] = !!on;
+  }
+  var faults = {
+    href: function (on) { read.setAttribute('href', on ? '/pricing-2.html' : '/pricing.html'); },
+    'remove-button': function (on) {
+      if (on) save.remove();
+      else if (!save.isConnected) saveHome.insertBefore(save, saveNext && saveNext.isConnected ? saveNext : null);
+    },
+    reword: function (on) { copy.textContent = on ? 'Every order, every carrier, one dashboard. (copy changed by a deploy nobody reviewed)' : copyText; },
+    overlap: function (on) { storyB.classList.toggle('f-overlap', on); },
+    shift: function (on) { scroller.classList.toggle('f-shift', on); },
+  };
+  function apply(name, on) { if (faults[name]) { faults[name](on); press(name, on); } }
+  function reset() { Object.keys(faults).forEach(function (n) { apply(n, false); }); scroller.scrollTop = 0; press('scroll', false); }
+  document.querySelector('.faults').addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-fault]');
+    if (!b) return;
+    var name = b.getAttribute('data-fault');
+    if (name === 'reset') return reset();
+    if (name === 'scroll') { scroller.scrollTop = 1090; press('scroll', true); return; }
+    if (name === 'scroll-top') { scroller.scrollTop = 0; press('scroll', false); return; }
+    apply(name, !active[name]);
+  });
+  // For the check scripts and for a person in devtools.
+  window.__demoFault = function (name, on) { if (name === 'reset') reset(); else apply(name, on !== false); return Object.keys(active).filter(function (k) { return active[k]; }); };
+</script>
+</body>
+</html>

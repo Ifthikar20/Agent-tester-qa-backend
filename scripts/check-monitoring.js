@@ -21,6 +21,10 @@
  *   6b a rule the table cannot read  a judgment clause, a markup-only change, a verdict that asks for a key
  *   6c the whole page, watched     blocks, not one element; a ticker learned and ignored; a swapped class is
  *                                   not a change; new words are; a new row is a layout incident that names it
+ *   6d scrolling is not a change   public/monitor-scroll.html scrolls an inner main: a scroll of 1090px reads
+ *                                   the same; a link re-pointed, a button gone, copy reworded, two sections
+ *                                   overlapping are the four incidents "nothing may change" stands for; the
+ *                                   content slid by a transform is forgiven; an iPad's width is anticipated
  *   7  pause, resume, delete        quiet while paused; gone means gone, shot and all
  *   8  reloads and other pages      re-armed after a reload; not on this page, not missing
  *   8b every visit runs the check   the visit is counted; late is not missing; gone is
@@ -35,6 +39,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import WebSocket from 'ws';
+import { BUNDLE } from '../monitor-page.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.GC_MONITOR_PORT) || 3405;
@@ -42,6 +47,7 @@ const EXTERNAL = process.env.BASE_URL || null;
 const BASE = EXTERNAL || `http://localhost:${PORT}`;
 const WS_URL = `${BASE.replace(/^http/, 'ws')}/ws`;
 const FIXTURE = `${BASE}/monitor.html`;
+const SCROLL = `${BASE}/monitor-scroll.html`;
 const OTHER = `${BASE}/demo.html`;
 const HERO = '[data-testid="hero-copy"]';
 const STATE = join(ROOT, '.ghostclick', 'local');
@@ -431,6 +437,153 @@ section('6c · the whole page, watched');
   const after = await stateOf(page.id);
   if (after?.state === 'ok' && (after.stats?.visits ?? 0) >= 1) ok('and counted as a visit', `${after.stats.visits} visit${after.stats.visits === 1 ? '' : 's'}`); else bad('and counted as a visit', JSON.stringify({ state: after?.state, visits: after?.stats?.visits }));
   for (const id of pageIds) await api('DELETE', `/api/monitors/${id}`);
+}
+
+// ---------------------------------------------------------------------------
+section('6d · the whole page: scrolling is not a change');
+{
+  // public/monitor-scroll.html scrolls an inner <main> under a fixed header —
+  // the turbo.ai shape, where window.scrollY stays 0 while everything moves.
+  // First in a browser of the check's own, the page bundle injected: the
+  // capture reads the same blocks at the same document coordinates before and
+  // after a scroll of 1090px, and says how far the scroller went.
+  const own = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_PATH || undefined, args: ['--disable-dev-shm-usage'] });
+  try {
+    const p = await own.newPage({ viewport: { width: 1180, height: 760 } });
+    await p.addInitScript({ content: BUNDLE });
+    await p.goto(SCROLL);
+    const measure = () => p.evaluate(() => window.__gcMonitor.measurePage());
+    const before = await measure();
+    await p.evaluate(() => { document.getElementById('scroller').scrollTop = 1090; });
+    await p.waitForTimeout(100);
+    const after = await measure();
+    const moved = after.blocks.filter((b) => { const a = before.blocks.find((x) => x.k === b.k); return !a || a.x !== b.x || a.y !== b.y; });
+    if (before.env.scrollY === 0 && after.env.scrollY === 0 && after.env.scroll.y === 1090) ok('the window did not scroll; the inner main did, by 1090px', `env.scroll ${JSON.stringify(after.env.scroll)}`); else bad('the window did not scroll; the inner main did, by 1090px', JSON.stringify({ before: before.env, after: after.env }));
+    if (before.blocks.length >= 40 && moved.length === 0 && after.sig === before.sig) ok('every block reads at the same document coordinates after the scroll', `${before.blocks.length} blocks, none moved, same signature`); else bad('every block reads at the same document coordinates after the scroll', `${moved.length} of ${after.blocks.length} moved: ${moved.slice(0, 3).map((b) => `${b.t}#${b.id ?? ''} ${b.x},${b.y}`).join('; ')}`);
+    const read = before.blocks.find((b) => b.id === 'read');
+    const fixed = before.blocks.filter((b) => b.f).length;
+    if (read && read.c === 1 && read.lh && read.lp === '/pricing.html' && read.p && fixed >= 4) ok('a link is a control block: what it does hashed, its path beside it, its parent named', `a#read [${read.lp}] c=${read.c} p=${read.p} · ${fixed} fixed blocks`); else bad('a link is a control block: what it does hashed, its path beside it, its parent named', JSON.stringify(read));
+    if (before.blocks.every((b) => !('href' in b) && !('action' in b))) ok('no block carries an address, only its hash and a masked path'); else bad('no block carries an address, only its hash and a masked path');
+    await p.close();
+  } finally { await own.close(); }
+
+  // Then the runner: a monitor on the whole page with the default rule, and
+  // the four checks it stands for, each shown catching its own kind of change.
+  if (!(await open(v, SCROLL))) { bad('the scrolling fixture opens'); await done(); }
+  ok('the scrolling fixture opens', SCROLL);
+  await wait(500);
+  const sp = (await create('check-scroll', ':page', 'Nothing on the page may change')).json?.monitor;
+  const ids = sp?.spec?.checks?.map((c) => c.id) ?? [];
+  if (sp?.spec?.kind === 'page' && ids.join(',') === 'logic,elements,content,alignment') ok('"nothing may change" is four checks: what it does, its elements, its words, their alignment', ids.join(' ')); else { bad('"nothing may change" is four checks: what it does, its elements, its words, their alignment', JSON.stringify(sp?.spec ?? sp).slice(0, 200)); await done(); }
+  if (/^Nothing on the page may change: not what it does, not which elements it has, not its words, not their alignment \(scrolling, moves under 4px/.test(sp.spec.summary)) ok('and says so', sp.spec.summary.slice(0, 70) + '…'); else bad('and says so', sp.spec.summary);
+  if (sp.baseline?.env?.scroll?.y === 0 && sp.baseline.env.innerWidth === 1180 && !sp.baseline.blocks) ok('the baseline was read unscrolled at 1180px, and the API carries no blocks', `${sp.baseline.counts?.blocks} blocks`); else bad('the baseline was read unscrolled at 1180px, and the API carries no blocks', JSON.stringify(sp.baseline?.env));
+  const mine = (m) => m.t === 'incident.opened' && m.incident.monitorId === sp.id;
+  const resolvedOf = (id, from) => v.until((m) => m.t === 'incident.resolved' && m.incident.id === id, 10000, from);
+
+  // (a) a scroll of 1090px inside main: nothing opens, and the reading says how far it went.
+  let from = v.at();
+  await run(v, 'click button:Scroll down');
+  await wait(3500);
+  if (await v.none(mine, 1, from)) ok('(a) scrolled 1090px inside main: no incident'); else bad('(a) scrolled 1090px inside main: no incident', 'a scroll was reported as a change');
+  let st = await stateOf(sp.id);
+  if (st?.state === 'ok' && st.last?.env?.scroll?.y === 1090 && st.last.htmlHash === st.baseline.htmlHash) ok('state ok; the last reading scrolled 1090px, the same shape as the baseline', `env.scroll ${JSON.stringify(st.last.env.scroll)}`); else bad('state ok; the last reading scrolled 1090px, the same shape as the baseline', JSON.stringify({ state: st?.state, scroll: st?.last?.env?.scroll, same: st?.last?.htmlHash === st?.baseline?.htmlHash }));
+  await run(v, 'click button:Scroll up');
+  await wait(800);
+
+  // (b) a link that points elsewhere is a change to what the page does.
+  from = v.at();
+  await run(v, 'click button:Change link');
+  const logic = (await incidentFor(v, sp.id, from))?.incident;
+  if (logic?.violations.map((x) => x.metric).join(',') === 'logic') ok('(b) a link that points elsewhere: a logic incident, and only that', logic.violations[0].actual.slice(0, 80)); else bad('(b) a link that points elsewhere: a logic incident, and only that', JSON.stringify(logic?.violations?.map((x) => x.metric)));
+  const lc = logic?.diff?.pageChanges;
+  if (lc?.totals?.logic === 1 && lc.logicChanges?.[0]?.id === 'read' && lc.logicChanges[0].before === '/pricing.html' && lc.logicChanges[0].after === '/pricing-2.html' && /now points at \/pricing-2\.html instead of \/pricing\.html/.test(logic.violations[0].actual)) ok('naming the link and both paths', `${lc.logicChanges[0].before} → ${lc.logicChanges[0].after}`); else bad('naming the link and both paths', JSON.stringify(lc?.logicChanges));
+  if (logic?.verdict?.severity === 'high' && /What the page does changed/.test(logic.verdict.explanation)) ok('a functional change is high severity, in a sentence', logic.verdict.explanation.slice(0, 80) + '…'); else bad('a functional change is high severity, in a sentence', JSON.stringify(logic?.verdict).slice(0, 200));
+  if (logic && !JSON.stringify(logic).includes('"href"')) ok('and no address rides on the incident, only the masked paths'); else bad('and no address rides on the incident, only the masked paths');
+  from = v.at();
+  await run(v, 'click button:Reset all');
+  if (await resolvedOf(logic?.id, from)) ok('the link put back resolves it'); else bad('the link put back resolves it');
+
+  // (c) a control that went is an elements change (and words gone, for a words rule).
+  from = v.at();
+  await run(v, 'click button:Remove button');
+  const gone = (await incidentFor(v, sp.id, from))?.incident;
+  const gm = gone?.violations.map((x) => x.metric) ?? [];
+  if (gm[0] === 'elements' && !gm.includes('logic') && !gm.includes('alignment')) ok('(c) a button removed: an elements incident', gone.violations[0].actual.slice(0, 80)); else bad('(c) a button removed: an elements incident', JSON.stringify(gm));
+  const ec = gone?.diff?.pageChanges;
+  if (ec?.totals?.elementsRemoved === 1 && ec.elementChanges?.[0]?.how === 'removed' && ec.elementChanges[0].id === 'save' && /Save for later/.test(ec.elementChanges[0].text ?? '')) ok('naming the button', `${ec.elementChanges[0].t}#${ec.elementChanges[0].id} “${ec.elementChanges[0].text}”`); else bad('naming the button', JSON.stringify(ec?.elementChanges));
+  from = v.at();
+  await run(v, 'click button:Reset all');
+  if (await resolvedOf(gone?.id, from)) ok('the button put back resolves it'); else bad('the button put back resolves it');
+
+  // (d) reworded copy is a content change, and nothing else.
+  from = v.at();
+  await run(v, 'click button:Reword copy');
+  const worded = (await incidentFor(v, sp.id, from))?.incident;
+  if (worded?.violations.map((x) => x.metric).join(',') === 'content' && worded.diff?.pageChanges?.changed?.some((b) => b.id === 'copy' && /copy changed/.test(b.after))) ok('(d) reworded copy: a content incident, and only that', worded.violations[0].actual.slice(0, 80)); else bad('(d) reworded copy: a content incident, and only that', JSON.stringify(worded?.violations?.map((x) => x.metric)));
+  from = v.at();
+  await run(v, 'click button:Reset all');
+  if (await resolvedOf(worded?.id, from)) ok('the copy put back resolves it'); else bad('the copy put back resolves it');
+
+  // (e) a section pulled up into its neighbour is an alignment change — every
+  // block below it moved too, which is not one.
+  from = v.at();
+  await run(v, 'click button:Overlap');
+  const over = (await incidentFor(v, sp.id, from))?.incident;
+  if (over?.violations.map((x) => x.metric).join(',') === 'alignment' && /section#story-[ab] now overlaps section#story-[ab]/.test(over.violations[0].actual)) ok('(e) two sections overlapping: an alignment incident, and only that', over.violations[0].actual.slice(0, 80)); else bad('(e) two sections overlapping: an alignment incident, and only that', JSON.stringify(over?.violations?.map((x) => [x.metric, x.actual])).slice(0, 300));
+  if ((over?.diff?.pageChanges?.totals?.moved ?? 0) >= 10) ok('the blocks below moved up, which the whole-page watch does not report', `${over.diff.pageChanges.totals.moved} moved`); else bad('the blocks below moved up, which the whole-page watch does not report', JSON.stringify(over?.diff?.pageChanges?.totals));
+  from = v.at();
+  await run(v, 'click button:Reset all');
+  if (await resolvedOf(over?.id, from)) ok('the section put back resolves it'); else bad('the section put back resolves it');
+
+  // (f) the content slid 500px by a transform, the way a smooth-scroll library
+  // scrolls: a uniform shift of every free block is forgiven, and said.
+  from = v.at();
+  await run(v, 'click button:Shift content');
+  const slid = await v.until((m) => m.t === 'monitor.tick' && m.monitorId === sp.id && m.metrics?.scrolled?.dy === -500, 8000, from);
+  if (slid && slid.ok === true) ok('(f) the content slid 500px by a transform: forgiven as a scroll', `scrolled ${JSON.stringify(slid.metrics.scrolled)}`); else bad('(f) the content slid 500px by a transform: forgiven as a scroll', JSON.stringify(slid?.metrics ?? 'no tick said scrolled'));
+  await wait(2500);
+  if (await v.none(mine, 1, from)) ok('and no incident opened'); else bad('and no incident opened');
+  st = await stateOf(sp.id);
+  if (st?.state === 'ok' && st.metrics?.scrolled?.dy === -500) ok('the card says a scroll was ignored', JSON.stringify(st.metrics.scrolled)); else bad('the card says a scroll was ignored', JSON.stringify({ state: st?.state, metrics: st?.metrics }));
+  await run(v, 'click button:Reset all');
+  await wait(800);
+
+  // (g) an iPad's width: the sidebar is not shown and everything re-flows,
+  // which a responsive layout does on purpose — no incident, a note, and the
+  // settled reading kept as that width's own baseline; a button removed at
+  // that width is judged against it. Only where the runner can change device;
+  // check:monitoring-judge drives the same engine path without a browser.
+  from = v.at();
+  v.send({ t: 'device', id: 'ipad' });
+  const dev = await v.until((m) => m.t === 'device' && m.width === 768, 4000, from);
+  if (!dev) ok('(g) (no device command on this runner — the responsive case is covered by check:monitoring-judge)');
+  else {
+    const noted = await v.until((m) => m.t === 'monitor.tick' && m.monitorId === sp.id && m.metrics?.viewport?.width === 768, 8000, from);
+    if (noted && noted.ok === true && noted.metrics.viewport.baseline === 1180) ok('(g) at 768px: the tick says so, and nothing fails', JSON.stringify(noted.metrics.viewport)); else bad('(g) at 768px: the tick says so, and nothing fails', JSON.stringify(noted?.metrics ?? 'no tick at 768'));
+    const kept = await v.until((m) => m.t === 'log' && /check-scroll: measured at 768px; the baseline is 1180px: \d+ blocks are not shown at this width.*kept as the 768px baseline/.test(m.msg), 10000, from);
+    if (kept) ok('the settled reading is kept as the 768px baseline, said in the log', kept.msg.slice(0, 90) + '…'); else bad('the settled reading is kept as the 768px baseline, said in the log');
+    if (await v.none(mine, 1, from)) ok('and no incident opened'); else bad('and no incident opened', 'the sidebar hidden at this width was reported');
+    st = await stateOf(sp.id);
+    const b768 = st?.baselines?.['768'];
+    if (st?.state === 'ok' && b768 && !b768.blocks && b768.env?.innerWidth === 768 && b768.counts?.blocks < st.baseline.counts.blocks && st.baseline.env.innerWidth === 1180) ok('baselines[768] on the API, compacted like the baseline; the 1180px one untouched', `${b768.counts.blocks} blocks at 768, ${st.baseline.counts.blocks} at 1180`); else bad('baselines[768] on the API, compacted like the baseline; the 1180px one untouched', JSON.stringify({ state: st?.state, keys: Object.keys(st?.baselines ?? {}), raw: !!b768?.blocks }));
+    if (st?.metrics?.viewport?.adopted === true) ok('the card compares against this width’s own baseline now', JSON.stringify(st.metrics.viewport)); else bad('the card compares against this width’s own baseline now', JSON.stringify(st?.metrics?.viewport));
+    from = v.at();
+    await run(v, 'click button:Remove button');
+    const narrow = (await incidentFor(v, sp.id, from))?.incident;
+    if (narrow?.violations[0]?.metric === 'elements' && narrow.before?.snapshot?.env?.innerWidth === 768 && narrow.diff?.pageChanges?.viewport === null) ok('a button removed at 768px: an elements incident against the 768px baseline', narrow.violations[0].actual.slice(0, 60)); else bad('a button removed at 768px: an elements incident against the 768px baseline', JSON.stringify({ v: narrow?.violations?.map((x) => x.metric), width: narrow?.before?.snapshot?.env?.innerWidth, viewport: narrow?.diff?.pageChanges?.viewport }));
+    from = v.at();
+    await run(v, 'click button:Reset all');
+    if (await resolvedOf(narrow?.id, from)) ok('the button put back resolves it'); else bad('the button put back resolves it');
+    from = v.at();
+    v.send({ t: 'device', id: 'desktop' });
+    await v.until((m) => m.t === 'device' && m.width === 1180, 4000, from);
+    await wait(3000);
+    if (await v.none(mine, 1, from) && (await stateOf(sp.id))?.state === 'ok') ok('back at 1180px: the creation baseline serves, nothing opened'); else bad('back at 1180px: the creation baseline serves, nothing opened');
+  }
+  await api('DELETE', `/api/monitors/${sp.id}`);
+  // Back to the first fixture for what follows.
+  await open(v, FIXTURE);
+  await wait(1500);
 }
 
 // ---------------------------------------------------------------------------

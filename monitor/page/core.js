@@ -157,6 +157,10 @@ const BLOCK_SELECTOR = TEXT_SELECTOR + ',' + BOX_TAGS.join(',') + ',' + LOOSE_TA
 const BOX_SET = new Set(BOX_TAGS);
 const LOOSE_SET = new Set(LOOSE_TAGS);
 const FIELD_SET = new Set(['input', 'select', 'textarea']);
+// What a test presses, fills or reads a state from: a link with somewhere to
+// go, a button, a field, a disclosure, or anything a role says is one.
+const CONTROL_TAGS = new Set(['button', 'input', 'select', 'textarea', 'summary']);
+const CONTROL_ROLES = new Set(['button', 'link', 'menuitem', 'tab', 'option', 'checkbox', 'radio', 'switch', 'combobox']);
 
 /** What a block says — never a field's value, which is somebody's data. */
 function blockText(el, tag) {
@@ -170,20 +174,89 @@ function ownText(el) {
   for (var n = el.firstChild; n; n = n.nextSibling) if (n.nodeType === 3 && /\S/.test(n.nodeValue)) return true;
   return false;
 }
+function isControl(el, tag) {
+  if (CONTROL_TAGS.has(tag)) return true;
+  if (tag === 'a') return el.hasAttribute('href');
+  var role = el.getAttribute('role');
+  return !!role && CONTROL_ROLES.has(role.trim().toLowerCase());
+}
+/** An address as the logic hash reads it — host, path and query, never the fragment — resolved against the document. */
+function addressOf(raw) {
+  if (!raw) return '';
+  try { var u = new URL(raw, location.href); return u.host + u.pathname + u.search; } catch (_) { return String(raw).slice(0, 200); }
+}
+/**
+ * The same address as a sentence may show it: the path, the host only when it
+ * is another host, an opaque segment (a token, a long id) and the whole query
+ * masked — the way heal.js maskPath treats a URL. A reset link keeps its shape
+ * and loses its secret.
+ */
+function shownAddress(raw) {
+  if (!raw) return '';
+  var u;
+  try { u = new URL(raw, location.href); } catch (_) { return ''; }
+  if (!/^https?:$/.test(u.protocol)) return u.protocol + '…';
+  var opaque = function (seg) { return (seg.length >= 16 && /\d/.test(seg) && /[a-z]/i.test(seg)) || (seg.length >= 12 && /^[0-9a-f]{12,}$/i.test(seg.replace(/-/g, ''))); };
+  var path = u.pathname.split('/').map(function (seg) { return opaque(seg) ? '…' : seg; }).join('/');
+  return (u.host !== location.host ? u.host : '') + path + (u.search ? '?…' : '');
+}
+/**
+ * What an element DOES, as one string to hash (`key`) and a few words a
+ * sentence may show (`words`): where a link or a form goes, what kind of
+ * control a button or a field is and whether it can be used, what state a
+ * role carries. The hash goes into the block as `lh`, so a link that now
+ * points elsewhere is a change the signature sees; the words go in as `lp`
+ * — never the address itself, which can carry a token.
+ */
+function logicOf(el, tag) {
+  var key = [], words = [];
+  if (tag === 'a') {
+    var href = el.getAttribute('href');
+    key.push('a=' + addressOf(href));
+    words.push(href ? shownAddress(href) : 'no href');
+  } else if (tag === 'form') {
+    var action = el.getAttribute('action'), method = (el.getAttribute('method') || 'get').toLowerCase();
+    key.push('form=' + addressOf(action) + '|' + method);
+    words.push(method + ' ' + (action ? shownAddress(action) : 'this page'));
+  } else if (tag === 'button' || tag === 'input') {
+    var type = (el.getAttribute('type') || (tag === 'button' ? 'submit' : 'text')).toLowerCase();
+    var name = el.getAttribute('name') || '', off = !!el.disabled, ariaOff = el.getAttribute('aria-disabled') || '';
+    key.push(tag + '=' + type + '|' + name + '|' + (off ? 1 : 0) + '|' + ariaOff);
+    words.push('type=' + type + (name ? ' name=' + name : '') + (off || ariaOff === 'true' ? ' disabled' : ''));
+  } else if (tag === 'select' || tag === 'textarea') {
+    var fname = el.getAttribute('name') || '', foff = !!el.disabled;
+    key.push(tag + '=' + fname + '|' + (foff ? 1 : 0));
+    words.push((fname ? 'name=' + fname : tag) + (foff ? ' disabled' : ''));
+  }
+  var role = el.getAttribute('role');
+  if (role) {
+    var state = ['aria-expanded', 'aria-pressed', 'aria-checked'].map(function (a) { var v = el.getAttribute(a); return v == null ? '' : v; });
+    key.push('role=' + role + '|' + state.join('|'));
+    words.push('role=' + role + (state[0] ? ' expanded=' + state[0] : '') + (state[1] ? ' pressed=' + state[1] : '') + (state[2] ? ' checked=' + state[2] : ''));
+  }
+  return key.length ? { key: key.join(';'), words: words.join(' ') } : null;
+}
 /**
  * The page as blocks. `k` is a block's address (its path in the tree, hashed),
- * `t` its tag, `x y w h` its box in document coordinates — viewport ones for
- * a fixed or sticky block (`f`), whose place depends on the scroll — `text`
- * its first words and `th` a hash of all of them. `sig` changes when any
- * block appears, goes, moves by the grid or says something else, and not
- * otherwise, so a page that repaints but does not differ costs nothing.
+ * `t` its tag, `x y w h` its box in document coordinates — through every
+ * scroller on the way up, so a page that scrolls an inner `main` rather than
+ * the window reads the same before and after the scroll; viewport ones for a
+ * fixed or sticky block (`f`), whose place depends on the scroll — `text` its
+ * first words and `th` a hash of all of them, `lh` a hash of what it does and
+ * `lp` the words for that, `c` on a control and `p` the address of the block
+ * it sits in. `sig` changes when any block appears, goes, moves by the grid,
+ * says something else or does something else, and not otherwise, so a page
+ * that repaints or scrolls but does not differ costs nothing.
  */
 function measurePage() {
   var ts = Date.now(), url = location.href;
   var body = document.body;
   if (!body) return missingSnapshot();
-  var sx = window.scrollX, sy = window.scrollY;
-  var paths = new Map(), stuckOf = new Map();
+  var win = { x: window.scrollX, y: window.scrollY };
+  var quirks = document.compatMode !== 'CSS1Compat';
+  var paths = new Map(), stuckOf = new Map(), scrollOf = new Map();
+  // The main scroller's offset: the largest one seen on the way up, the window included.
+  var scroll = { x: win.x, y: win.y };
   function pathOfEl(el) {
     if (!el || el === document.documentElement) return '';
     var have = paths.get(el);
@@ -201,6 +274,26 @@ function measurePage() {
     var pos = getComputedStyle(el).position;
     var out = pos === 'fixed' || pos === 'sticky' || stuck(el.parentElement);
     stuckOf.set(el, out);
+    return out;
+  }
+  // How far the ancestors of `el` are scrolled, summed up to the window: what
+  // to add to a viewport rect to get a document one. An element's own scroll
+  // moves its children, not itself, so only ancestors count; the root's is the
+  // window's, and in quirks mode the body's is too.
+  function scrolledBy(el) {
+    if (!el || el === document.documentElement) return win;
+    var have = scrollOf.get(el);
+    if (have) return have;
+    var p = el.parentElement;
+    var out = scrolledBy(p);
+    if (p && p !== document.documentElement && !(quirks && p === body)) {
+      var sl = p.scrollLeft || 0, st = p.scrollTop || 0;
+      if (sl || st) {
+        out = { x: out.x + sl, y: out.y + st };
+        if (st > scroll.y || (st === scroll.y && sl > scroll.x)) scroll = { x: sl, y: st };
+      }
+    }
+    scrollOf.set(el, out);
     return out;
   }
   var candidates = body.querySelectorAll(BLOCK_SELECTOR);
@@ -226,16 +319,21 @@ function measurePage() {
     var text = isBox ? '' : blockText(el, tag);
     if (!isBox && !text && tag !== 'img' && !FIELD_SET.has(tag)) continue;
     var f = stuck(el);
-    var blk = { k: '', t: tag, x: ri(f ? r.left : r.left + sx), y: ri(f ? r.top : r.top + sy), w: ri(r.width), h: ri(r.height) };
+    var off = f ? null : scrolledBy(el);
+    var blk = { k: '', t: tag, x: ri(f ? r.left : r.left + off.x), y: ri(f ? r.top : r.top + off.y), w: ri(r.width), h: ri(r.height) };
     if (f) blk.f = 1;
     if (el.id) blk.id = String(el.id).slice(0, 40);
     if (!isBox) { blk.text = text.slice(0, PAGE_TEXT_MAX); blk.th = fnv1a(text); }
+    var logic = logicOf(el, tag);
+    if (logic) { blk.lh = fnv1a(logic.key); blk.lp = logic.words.slice(0, PAGE_TEXT_MAX); }
+    if (isControl(el, tag)) blk.c = 1;
     byEl.set(el, blk);
     order.push(el);
   }
   // A wrapper — a cell or a list item whose only words are its one link's —
   // is one block, the outer one, not two.
   var kept = [];
+  var keyOf = new Map();
   for (var j = 0; j < order.length; j++) {
     var e = order[j], b = byEl.get(e);
     if (b.text != null) {
@@ -248,13 +346,18 @@ function measurePage() {
       if (dup) continue;
     }
     b.k = fnv1a(pathOfEl(e));
+    keyOf.set(e, b.k);
+    // The block this one sits in: the nearest ancestor that is a block itself.
+    var anc = e.parentElement;
+    while (anc && anc !== body && !keyOf.has(anc)) anc = anc.parentElement;
+    if (anc && keyOf.has(anc)) b.p = keyOf.get(anc);
     kept.push(b);
     if (kept.length >= PAGE_BLOCKS_MAX) { truncated = truncated || j + 1 < order.length; break; }
   }
   var parts = [];
   for (var q = 0; q < kept.length; q++) {
     var kb = kept[q];
-    parts.push(kb.k + ':' + (kb.f ? 'f' : Math.round(kb.x / PAGE_GRID) + ',' + Math.round(kb.y / PAGE_GRID)) + ',' + Math.round(kb.w / PAGE_GRID) + 'x' + Math.round(kb.h / PAGE_GRID) + (kb.th ? ':' + kb.th : ''));
+    parts.push(kb.k + ':' + (kb.f ? 'f' : Math.round(kb.x / PAGE_GRID) + ',' + Math.round(kb.y / PAGE_GRID)) + ',' + Math.round(kb.w / PAGE_GRID) + 'x' + Math.round(kb.h / PAGE_GRID) + (kb.th ? ':' + kb.th : '') + (kb.lh ? ':' + kb.lh : ''));
   }
   var shape = fnv1a(parts.join('|'));
   var de = document.documentElement;
@@ -267,17 +370,17 @@ function measurePage() {
     title: collapse(document.title).slice(0, 200), text: text.slice(0, 2000), textLength: text.length,
     counts: { children: body.childElementCount, descendants: body.getElementsByTagName('*').length, rows: null, openDetails: body.querySelectorAll('details[open]').length, blocks: kept.length },
     htmlHash: shape, blocks: kept, truncated: truncated,
-    env: { innerWidth: window.innerWidth, innerHeight: window.innerHeight, dpr: window.devicePixelRatio || 1, scrollX: r1(sx), scrollY: r1(sy) },
+    env: { innerWidth: window.innerWidth, innerHeight: window.innerHeight, dpr: window.devicePixelRatio || 1, scrollX: r1(win.x), scrollY: r1(win.y), scroll: { x: ri(scroll.x), y: ri(scroll.y) } },
     sig: 'page|' + kept.length + '|' + shape,
   };
 }
-/** One line per block — the page's outline, which is what a page's "markup excerpt" is. */
+/** One line per block — the page's outline, which is what a page's "markup excerpt" is. A link's line says where it goes. */
 function outlineOf(snap, max) {
   var out = [];
   var list = (snap && snap.blocks) || [];
   for (var i = 0; i < list.length && out.length < max; i++) {
     var b = list[i];
-    out.push(b.t + (b.id ? '#' + b.id : '') + (b.text ? ' "' + b.text + '"' : '') + ' @' + b.x + ',' + b.y + ' ' + b.w + 'x' + b.h + (b.f ? ' fixed' : ''));
+    out.push(b.t + (b.id ? '#' + b.id : '') + (b.text ? ' "' + b.text + '"' : '') + ' @' + b.x + ',' + b.y + ' ' + b.w + 'x' + b.h + (b.f ? ' fixed' : '') + (b.lp ? ' [' + b.lp + ']' : ''));
   }
   return out;
 }

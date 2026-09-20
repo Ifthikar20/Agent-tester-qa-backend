@@ -609,20 +609,40 @@ flowchart LR
    document, and `measurePage` (core.js) reports its blocks instead of one element's numbers:
    every readable piece of text (headings, paragraphs, list items, links, buttons, cells, labels,
    a field's placeholder, an image's alt) and the boxes that arrange them (nav, main, sections,
-   forms, tables), each keyed by its place in the tree with its box in document coordinates
-   (viewport ones for a fixed or sticky block) and a hash of its words, capped at 400. The
-   signature changes only when a block appears, goes, moves by the 4px grid or says something
-   else. `compilePageRule` (monitor-rules.js) reads the rule as one of three things — the layout,
-   the words, or both — with an optional pixel tolerance, into a spec of `kind: 'page'`; a sentence
-   it cannot place becomes a judgment clause over both. `diffPage` (monitor-evaluate.js) answers
-   it: what was added, removed, moved or resized past the tolerance, or reworded, as exact totals
-   and capped samples, which is the incident's `diff.pageChanges` and the verdict's sentence. Two
-   things keep it quiet: at creation the engine reads the page three more times over a second and
-   a half and learns the blocks that changed with nobody touching it (`changedKeys`) into the
-   spec's `ignore`; and after a visit a page monitor's every verdict, not only "missing", waits
-   out `ARM_GRACE_MS` for blocks that arrive late. A snapshot at another viewport width is skipped,
-   not failed. The store keeps the blocks; `compactSnapshot` leaves them out of the API and the
-   events, which carry the count.
+   forms, tables), each keyed by its place in the tree with its box in **document coordinates
+   through every scroller on the way up** — the ancestors' `scrollTop`/`scrollLeft` summed to the
+   window's, so a page that scrolls an inner `main` under a fixed header reads the same at any
+   scroll; viewport ones for a fixed or sticky block — a hash of its words, a hash of what it
+   does (`lh`: a link's host, path and query, a form's action and method, a control's type, name
+   and disabled state, a role's expanded/pressed/checked state; masked words `lp` beside it for a
+   sentence, never the address), `c` on a control and `p` the block it sits in, capped at 400;
+   `env.scroll` is the main scroller's offset. The signature changes only when a block appears,
+   goes, moves by the 4px grid, says or does something else. `compilePageRule` (monitor-rules.js)
+   reads the rule into a spec of `kind: 'page'` over five questions — `logic`, `elements`,
+   `content`, `layout`, `alignment` — asking the ones the rule names or, with none named, the four
+   a whole-page watch stands for (everything but the layout: a pure re-flow is not a change), with
+   an optional pixel tolerance; a sentence it cannot place becomes a judgment clause. `diffPage`
+   (monitor-evaluate.js) answers it: first a **uniform shift** of every free block with nothing
+   added, removed or resized is taken out as `scrolled` (the second line of defence, for a
+   smooth-scroll library that moves a wrapper with a transform); then what was re-pointed, added,
+   removed, renamed, reworded, moved past the tolerance or newly overlapping (never a block and one
+   it sits in, by the `p` chain), as booleans, exact `totals` and capped samples — the incident's
+   `diff.pageChanges` and the verdict's sentence. A reading at **another viewport width** is
+   anticipated: `viewport` says what is hidden, only `logic` and `content` are judged, and the
+   second reading at that width (one is a window being dragged) is kept as the width's own
+   baseline in `m.baselines[width]` — after one verdict from Claude when there is a key: a "no"
+   keeps it, a "yes" opens an incident in Claude's words and holds the width strictly (every
+   category counts) until somebody resolves it. Readings at a kept width are judged against it
+   with every category, and a manual resolve there moves that width's baseline, not the creation
+   one. Claude's `violation: false` on any incident — a scroll, a re-flow, a frame the arithmetic
+   could not tell from a change — resolves it by the judge, re-baselines and closes its defect
+   (`runJudge`), not only on a judged clause. Two things keep it quiet: at creation the engine
+   reads the page three more times over a second and a half and learns the blocks that changed
+   with nobody touching it (`changedKeys`) into the spec's `ignore`; and after a visit a page
+   monitor's every verdict, not only "missing", waits out `ARM_GRACE_MS` for blocks that arrive
+   late. The store keeps the blocks; `compactSnapshot` leaves them out of the API and the events
+   (`baselines` too), which carry the count, and `monitor.tick` and the card's `metrics` carry
+   `scrolled` and `viewport` so a card can say what was forgiven.
 
 ```mermaid
 stateDiagram-v2

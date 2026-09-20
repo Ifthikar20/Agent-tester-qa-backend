@@ -35,7 +35,7 @@
  * closed JSON schemas the model is asked to fill live in monitor-resolver.js,
  * and the shape is enforced here by hand.
  */
-import { METRICS, OPS, METRIC_LABELS, METRIC_UNITS, NUMERIC_METRICS, PAGE_TOLERANCE_PX, metric, coerce, describePageDiff } from './monitor-evaluate.js';
+import { METRICS, OPS, METRIC_LABELS, METRIC_UNITS, NUMERIC_METRICS, PAGE_TOLERANCE_PX, PAGE_METRICS, metric, coerce, describePageDiff, pageNotes } from './monitor-evaluate.js';
 
 export const SEVERITIES = ['low', 'medium', 'high'];
 export const CLAUSE_OUTCOMES = ['checks', 'judgment', 'not_understood'];
@@ -489,37 +489,63 @@ export function compileMock({ ruleText, element, baseline }) {
 }
 
 // ---- the whole page ----------------------------------------------------------------------
-const PAGE_LAYOUT_WORDS = /\b(layout|layouts|position|positions|positioned|move|moves|moved|moving|shift|shifts|shifted|size|sizes|sized|resize|resized|align|aligned|alignment|spacing|gap|gaps|overlap|overlaps|structure|arrangement|arranged|place|places|placement|design|look|looks|appearance|visual|visually|render|renders|rendering|style|styles|styling|box|boxes|section|sections|element|elements|block|blocks|shape|geometry|jump|jumps|reflow)\b/;
+// The five things a page rule can be about, each a set of words that names it.
+// A specific word wins over a general one ("nothing may overlap" is about the
+// alignment, not about everything); with no specific word the rule is about
+// everything a whole-page watch asks — what the page does, which elements it
+// has, its words and their alignment. The layout — where blocks sit — is asked
+// only when named: a pure re-flow with nothing added, removed, reworded,
+// re-pointed or overlapping is not a change a whole-page watch reports.
+const PAGE_LOGIC_WORDS = /\b(logic|link|links|href|behaviour|behavior|does(?!\s*(?:not|n't)\b))\b/;
+const PAGE_ELEMENT_WORDS = /\b(element|elements|button|buttons|control|controls|field|fields)\b/;
+const PAGE_ALIGN_WORDS = /\b(align|aligned|alignment|overlap|overlaps|overlapping|misaligned)\b/;
+const PAGE_LAYOUT_WORDS = /\b(layout|layouts|position|positions|positioned|move|moves|moved|moving|shift|shifts|shifted|size|sizes|sized|resize|resized|spacing|gap|gaps|structure|arrangement|arranged|place|places|placement|design|look|looks|appearance|visual|visually|render|renders|rendering|style|styles|styling|box|boxes|section|sections|block|blocks|shape|geometry|jump|jumps|reflow)\b/;
 const PAGE_TEXT_WORDS = /\b(text|texts|copy|wording|words|content|contents|label|labels|caption|captions|heading|headings|title|titles|say|says|said|read|reads|spelling|typo|typos|number|numbers|price|prices|sentence|sentences|paragraph|paragraphs|string|strings|reworded|rewritten|written|message|messages)\b/;
 const PAGE_ANY_WORDS = /\b(nothing|anything|any|everything|whole|entire|all|page|screen|ui|change|changes|changed|different|same|as is|as-is|stable|unchanged|identical|regress|regression|regressions|break|breaks|broken)\b/;
+/** What "nothing may change" asks, in the order the checks are listed. */
+const PAGE_ALL = ['logic', 'elements', 'content', 'alignment'];
 const PAGE_MESSAGES = {
-  layout: (tol) => `The layout must not change: nothing added, removed, moved or resized by more than ${tol}px`,
+  logic: () => 'What the page does must not change: no link, form or control may point or behave differently',
+  elements: () => 'The elements must not change: no control added, removed or renamed',
   content: () => 'The words must not change: nothing reworded, added or removed',
+  layout: (tol) => `The layout must not change: nothing added, removed, moved or resized by more than ${tol}px`,
+  alignment: () => 'Nothing may overlap, clip or leave the page',
 };
+const PAGE_NAMES = { logic: 'what it does', elements: 'its elements', content: 'its words', layout: 'its layout', alignment: 'its alignment' };
 /**
- * A rule about the whole page. It can say one of three things — the layout
- * must hold, the words must hold, or nothing may change — and a number of
- * pixels loosens how far a block may drift before it has moved. Anything
- * else ("the page must still look professional") is watched for any change
- * and left to a reviewer, the way a judgment clause on an element is. The
- * spec is its own shape (`kind: 'page'`): the evaluator answers it with
- * diffPage, never with a metric of one element, and `ignore` is filled in by
- * the engine with the blocks the page changes on its own.
+ * A rule about the whole page. It can say what may not change — what the page
+ * does, which elements it has, its words, its layout, their alignment, any
+ * few of those, or nothing at all — and a number of pixels loosens how far a
+ * block may drift before it has moved. Anything else ("the page must still
+ * look professional") is watched for any change and left to a reviewer, the
+ * way a judgment clause on an element is. The spec is its own shape (`kind:
+ * 'page'`): the evaluator answers it with diffPage, never with a metric of
+ * one element, and `ignore` is filled in by the engine with the blocks the
+ * page changes on its own. Scrolling is never a change (monitor-evaluate.js).
  */
 export function compilePageRule(ruleText) {
   const raw = String(ruleText || '').replace(/\s+/g, ' ').trim().slice(0, RULE_MAX);
   const text = raw.toLowerCase();
-  const layout = PAGE_LAYOUT_WORDS.test(text);
-  const words = PAGE_TEXT_WORDS.test(text);
-  const understood = layout || words || PAGE_ANY_WORDS.test(text) || hasNegation(text);
-  const which = layout && !words ? ['layout'] : words && !layout ? ['content'] : ['layout', 'content'];
+  const named = [];
+  if (PAGE_LOGIC_WORDS.test(text)) named.push('logic');
+  if (PAGE_ELEMENT_WORDS.test(text)) named.push('elements');
+  if (PAGE_TEXT_WORDS.test(text)) named.push('content');
+  if (PAGE_LAYOUT_WORDS.test(text)) named.push('layout');
+  if (PAGE_ALIGN_WORDS.test(text)) named.push('alignment');
+  const understood = named.length > 0 || PAGE_ANY_WORDS.test(text) || hasNegation(text);
+  const which = named.length ? named : PAGE_ALL;
   const px = text.match(/(\d+(?:\.\d+)?)\s*(?:px|pixels?)\b/);
   const tolerance = px ? Math.max(0, Math.min(200, parseFloat(px[1]))) : PAGE_TOLERANCE_PX;
   const checks = which.map((m) => ({ id: m, metric: m, op: 'unchanged', value: null, min: null, max: null, tolerance: null, compareToBaseline: true, message: PAGE_MESSAGES[m](tolerance), judgment: !understood }));
   const clauses = [{ text: raw.slice(0, CLAUSE_MAX), outcome: understood ? 'checks' : 'judgment', checkIds: checks.map((c) => c.id) }];
-  const what = which.length === 2 ? 'Nothing on the page may change: not its layout, not its words' : which[0] === 'layout' ? 'The page’s layout must not change' : 'The page’s words must not change';
+  const everything = which.length === PAGE_ALL.length && PAGE_ALL.every((m) => which.includes(m));
+  const what = everything
+    ? 'Nothing on the page may change: not what it does, not which elements it has, not its words, not their alignment'
+    : which.length === 1
+      ? (which[0] === 'logic' ? 'What the page does must not change' : which[0] === 'alignment' ? 'Nothing on the page may overlap, clip or leave it' : `The page’s ${PAGE_NAMES[which[0]].replace(/^its /, '')} must not change`)
+      : `Nothing on the page may change: not ${which.map((m) => PAGE_NAMES[m]).join(', not ')}`;
   return {
-    kind: 'page', summary: `${what} (moves under ${tolerance}px and whatever changes on its own are ignored)`.slice(0, 160),
+    kind: 'page', summary: `${what} (scrolling, moves under ${tolerance}px and whatever changes on its own are ignored)`.slice(0, 200),
     checks, clauses, needsLlmJudgment: !understood, judgmentHint: understood ? null : raw.slice(0, 500), source: 'mock', tolerance, ignore: [],
   };
 }
@@ -529,17 +555,19 @@ function pct(a, b) {
   if (typeof a !== 'number' || typeof b !== 'number' || a === 0) return null;
   return Math.abs((b - a) / a);
 }
+/** What a page diff forgave, as a sentence to end an explanation with: a scroll between the readings, a reading at another width. */
+const notesOf = (diff) => { const n = diff && diff.pageChanges ? pageNotes(diff.pageChanges) : []; return n.length ? ' ' + n.map((s) => s.charAt(0).toUpperCase() + s.slice(1) + '.').join(' ') : ''; };
 /** The explanation an incident opens with — the numbers, in sentences, at once. */
 export function judgeMock({ label, selector, ruleText, violations, diff, judgment = false }) {
   // Only a judgment clause's proxies failed: the element changed, and whether
   // the rule still holds is a question the mock cannot answer. Said so.
   if (judgment) {
-    const page = diff && diff.pageChanges ? [describePageDiff(diff.pageChanges, 'layout'), describePageDiff(diff.pageChanges, 'content')].filter((t) => t !== 'nothing measurable').join('; ') : null;
+    const page = diff && diff.pageChanges ? PAGE_METRICS.map((m) => describePageDiff(diff.pageChanges, m)).filter((t) => t !== 'nothing measurable').join('; ') : null;
     const changed = Object.entries(diff || {}).filter(([k]) => k !== 'htmlChanged' && k !== 'pageChanges').slice(0, 4).map(([k, val]) => (Array.isArray(val) ? METRIC_LABELS[k] + ' ' + val[0] + ' → ' + val[1] : k));
     const what = [page, diff && diff.htmlChanged ? 'its markup changed' : null, changed.length ? changed.join(', ') : null].filter(Boolean).join('; ') || 'it changed';
     return {
       violation: true, severity: 'medium',
-      explanation: '"' + label + '" (' + selector + ') changed under the rule "' + ruleText + '": ' + what + '. Whether the rule still holds is a judgment, not a number — set ANTHROPIC_API_KEY and Claude decides from the markup and the clips on each confirmed change; until then every change is reported.',
+      explanation: '"' + label + '" (' + selector + ') changed under the rule "' + ruleText + '": ' + what + '. Whether the rule still holds is a judgment, not a number — set ANTHROPIC_API_KEY and Claude decides from the markup and the clips on each confirmed change; until then every change is reported.' + notesOf(diff),
       source: 'mock', at: Date.now(),
     };
   }
@@ -547,7 +575,8 @@ export function judgeMock({ label, selector, ruleText, violations, diff, judgmen
   const others = Object.entries(diff || {}).filter(([k]) => k !== v.metric && k !== 'htmlChanged' && k !== 'pageChanges').slice(0, 4).map(([k, val]) => (Array.isArray(val) ? METRIC_LABELS[k] + ' ' + val[0] + ' → ' + val[1] : k));
   let severity = 'low';
   if (v.metric === 'exists' || v.metric === 'visible') severity = 'high';
-  else if (v.metric === 'layout' || v.metric === 'content') {
+  else if (v.metric === 'logic' || v.metric === 'elements') severity = 'high';   // a functional element is affected
+  else if (v.metric === 'layout' || v.metric === 'content' || v.metric === 'alignment') {
     // Something went or many things moved is worse than one thing reworded.
     const t = (diff && diff.pageChanges && diff.pageChanges.totals) || {};
     severity = (t.removed || 0) > 0 || (t.added || 0) + (t.moved || 0) >= 10 ? 'high' : 'medium';
@@ -565,9 +594,13 @@ export function judgeMock({ label, selector, ruleText, violations, diff, judgmen
   else if (v.metric === 'htmlHash') explanation += 'Its markup changed.';
   else if (v.metric === 'layout') explanation += 'The layout changed: ' + v.actual + '.';
   else if (v.metric === 'content') explanation += 'The words changed: ' + v.actual + '.';
+  else if (v.metric === 'logic') explanation += 'What the page does changed: ' + v.actual + '.';
+  else if (v.metric === 'elements') explanation += 'The elements changed: ' + v.actual + '.';
+  else if (v.metric === 'alignment') explanation += 'The alignment changed: ' + v.actual + '.';
   else explanation += 'Its ' + metricLabel + ' is now ' + v.actual + unit + ' but the rule expects ' + v.expected + (v.baseline != null ? ' (baseline ' + v.baseline + unit + ')' : '') + '.';
   if (others.length) explanation += ' Side effects: ' + others.join(', ') + '.';
   if (violations && violations.length > 1) explanation += ' ' + (violations.length - 1) + ' other check' + (violations.length > 2 ? 's' : '') + ' failed as well.';
+  explanation += notesOf(diff);
   return {
     violation: true, severity, explanation,
     source: 'mock', at: Date.now(),
